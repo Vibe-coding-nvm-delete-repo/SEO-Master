@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "SavedCluster": {
+      "title": "SavedCluster",
+      "description": "A keyword cluster saved by the user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "pageName": { "type": "string" },
+        "totalVolume": { "type": "number" },
+        "keywordCount": { "type": "number" },
+        "keywords": { "type": "string", "description": "JSON stringified array of keywords" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "pageName", "totalVolume", "keywordCount", "keywords", "createdAt"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "A project containing keyword research data.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "fileName": { "type": "string" }
+      },
+      "required": ["uid", "name", "createdAt"]
+    },
+    "ProjectData": {
+      "title": "ProjectData",
+      "description": "The processed research data for a project.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "results": { "type": "string", "description": "JSON stringified ProcessedRow[]" },
+        "clusterSummary": { "type": "string", "description": "JSON stringified ClusterSummary[]" },
+        "tokenSummary": { "type": "string", "description": "JSON stringified TokenSummary[]" },
+        "stats": { "type": "string", "description": "JSON stringified Stats" },
+        "datasetStats": { "type": "string", "description": "JSON stringified DatasetStats" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "results", "clusterSummary", "tokenSummary", "stats", "datasetStats", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/saved_clusters/{clusterId}": {
+      "schema": { "$ref": "#/entities/SavedCluster" },
+      "description": "Clusters saved by users."
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "User projects."
+    },
+    "/project_data/{projectId}": {
+      "schema": { "$ref": "#/entities/ProjectData" },
+      "description": "Data associated with a project."
+    }
+  }
+}

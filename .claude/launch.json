@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vite-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/vite/bin/vite.js", "--port=3000", "--host=0.0.0.0"],
+      "port": 3000,
+      "env": {
+        "NAPI_RS_FORCE_WASI": "1"
+      }
+    }
+  ]
+}

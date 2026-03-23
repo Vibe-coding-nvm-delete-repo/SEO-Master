@@ -1,0 +1,5 @@
+{
+  "name": "Keyword Cluster Tool",
+  "description": "Upload a CSV of keywords and search volumes to cluster them by token similarity and plurality.",
+  "requestFramePermissions": []
+}
