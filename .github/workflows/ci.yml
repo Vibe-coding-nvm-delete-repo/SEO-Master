@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm install --ignore-scripts
+      - run: npm install --ignore-scripts esbuild-wasm @rollup/wasm-node @tailwindcss/oxide-wasm32-wasi --force
+      - run: node scripts/patch-wasm.cjs
+      - name: TypeScript Check
+        run: npx tsc --noEmit
+      - name: Run Tests
+        run: NAPI_RS_FORCE_WASI=1 npx vitest run
+      - name: Production Build
+        run: NAPI_RS_FORCE_WASI=1 npx vite build
