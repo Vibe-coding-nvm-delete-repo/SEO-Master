@@ -300,3 +300,201 @@
 | 2026-03-23 | Separate review settings panel (API key, model, concurrency, temperature, prompt) |
 | 2026-03-23 | Review stats inline: review count, approve/mismatch counts, total cost |
 | 2026-03-23 | Mismatch count badge on Pages (Grouped) tab |
+| 2026-03-24 | Auto-Group: Token Clusters sub-tab (4+ shared token matching, instant, no API) |
+| 2026-03-24 | Auto-Group: LLM-powered semantic grouping with concurrency + progress tracking |
+| 2026-03-24 | Auto-Group: QA review pass on suggestions with separate cost tracking |
+| 2026-03-24 | Auto-Group: Approve All / Dismiss All / Bulk select for suggestions |
+| 2026-03-24 | Auto-Group: Sortable columns, search, KD column in both sub-tabs |
+| 2026-03-24 | Auto-Group: Per-project isolation (key={activeProjectId} remount) |
+| 2026-03-24 | Auto-Group: Settings persist to Firestore (API key, model, concurrency, prompt) |
+| 2026-03-24 | Shared ModelSelector component (unified across Generate, Group Review, Auto-Group) |
+| 2026-03-24 | Shared SettingsControls component (temperature, concurrency, reasoning, max tokens) |
+| 2026-03-24 | Toast notification system (stacking, auto-dismiss, color-coded by action type) |
+| 2026-03-24 | Activity Log tab per project (persisted to IDB + Firestore) |
+| 2026-03-24 | Token merge system (parent/child, undo, CSV integration, project-level rules) |
+| 2026-03-24 | Multi-sort (shift+click headers for secondary sort) |
+| 2026-03-24 | Draggable column resize (persisted to localStorage) |
+| 2026-03-24 | Breadcrumb navigation bar |
+| 2026-03-24 | Editable project names (click-to-edit in breadcrumb + project cards) |
+| 2026-03-24 | Google SERP button + Copy button on all page/group names |
+| 2026-03-24 | Token click in Token Management → filters keyword management |
+
+---
+
+## ⚡ Next Up: Cross-Group Duplicate Reconciliation (LLM-Powered)
+
+**Status:** Planned, not yet implemented. Ready to build.
+
+**What it does:** After auto-grouping produces ~500-1,000 groups, takes each group name and compares it against ALL other group names via LLM to find semantic duplicates that ended up in different token clusters. User reviews merge candidates, approves/dismisses each.
+
+**Where it lives:** New "Find Duplicates" button in the Auto-Group toolbar, between auto-group stats and QA button.
+
+**Flow:**
+```
+Token Clusters → Run Auto-Group → ✨ Find Duplicates ✨ → Run QA → Approve
+```
+
+### Batching Strategy
+- **3 groups per batch** checked against the full group list
+- For 1,000 groups: 334 API calls
+- Input per call: ~6,200 tokens (3 check groups + 1,000 numbered group names)
+- Output per call: ~60 tokens (JSON with 0-3 matches)
+- **Total cost: ~$0.32 per pass** with a cheap model (GPT-4o-mini / OSS 120B)
+- **3 passes to fully clean up: ~$0.96 total**
+
+### Prompt Design
+```
+"You are checking for semantic duplicate groups in an SEO keyword clustering project.
+
+CHECK THESE 3 GROUPS for duplicates:
+1. fast payday loans
+2. auto loan refinance rates
+3. legitimate credit repair services
+
+FULL GROUP LIST (576 total):
+1. payday loans
+2. quick payday loans
+3. payday loan calculator
+...
+
+RULES:
+- Only flag groups with IDENTICAL semantic intent (just different wording)
+- Synonyms (fast/quick, car/auto, legitimate/reputable) = DUPLICATE
+- Different sub-intents (calculator vs rates vs meaning) = NOT duplicates
+- Location variants (Houston vs Dallas) = NOT duplicates
+- When in doubt, do NOT flag as duplicate
+
+Return JSON only:
+{ "duplicates": [
+    { "checkIdx": 1, "matchIdx": 2, "confidence": 92, "reason": "fast/quick synonyms" }
+] }"
+```
+
+### UX
+**Results appear in a collapsible section ABOVE the main suggestions table:**
+```
+┌─ Duplicate Groups Found (14 pairs) ─────── [Merge All (14)] [Dismiss All] ─┐
+│                                                                               │
+│  ☐  "fast payday loans" (4 pages, 45k vol)                                  │
+│      ↔ "quick payday loans" (3 pages, 32k vol)     92% match  [Merge] [✗]   │
+│                                                                               │
+│  ☐  "auto loan refinance" (2 pages, 12k vol)                                │
+│      ↔ "car refinance loan" (3 pages, 18k vol)     88% match  [Merge] [✗]   │
+│                                                                               │
+│  ... 12 more                                                                  │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Merge Logic
+- **Higher volume group absorbs the lower** (pages combine, stats recalculate)
+- Absorbed group disappears from suggestions
+- Group name = higher volume group's name
+- **Chain merges:** If A↔B and B↔C, all three merge into highest volume
+- Toast + activity log on each merge
+
+### Multi-Pass Support
+- User can click "Find Duplicates" again after merging
+- Merged groups may now match OTHER groups (chain effect)
+- Button shows pass number: "Find Duplicates (Pass 2)"
+- When 0 duplicates found: "✓ No duplicates found" toast
+- Each pass: ~$0.32, takes 30-60 seconds
+
+### Edge Cases
+1. **Chain merges (A↔B + B↔C)** — Build union-find structure in "Merge All", all collapse to highest vol
+2. **User dismisses a pair** — Track dismissed pairs, don't re-show on next pass
+3. **Group already merged/gone** — Skip gracefully, toast "Group no longer exists"
+4. **Same group matches multiple others** — Show all pairs, merging one auto-resolves others
+5. **LLM hallucinates non-existent group** — Validate all matchIdx against actual list, skip invalid
+6. **JSON parse error** — Same error handling as auto-group, skip batch, count as error
+
+### Implementation
+- Add `findDuplicateGroups()` to `AutoGroupEngine.ts` (~80 lines)
+- Add duplicate UI section to `AutoGroupPanel.tsx` (~100 lines)
+- Add `DuplicateCandidate` interface to `types.ts`
+- Uses same settings as auto-group (API key, model, concurrency)
+- Persisted alongside autoGroupSuggestions in IDB + Firestore
+
+---
+
+## Future Roadmap (Shelved — Revisit Later)
+
+### 🔮 Phase 2: Embedding-Based Reconciliation (Post-Auto-Group)
+
+**Status:** Designed, not implemented. Builds on the existing auto-group pipeline.
+
+**What it does:** After LLM auto-grouping completes, runs a second pass using TF-IDF cosine similarity to find duplicate/near-duplicate groups that ended up in different token clusters. Catches cross-cluster semantic matches that token overlap misses.
+
+**How it works:**
+1. Extract all auto-grouped suggestion names
+2. Build TF-IDF vectors for each group name (client-side, instant, free)
+3. Compute pairwise cosine similarity (~1-3 seconds for 900 groups)
+4. Flag pairs with similarity > 0.85 as merge candidates
+5. Show user: "These 2 groups from different clusters may be the same — merge?"
+6. User clicks Merge or Keep Separate
+
+**Implementation:** New file `src/EmbeddingReconciliation.ts` (~150 lines). Pure math, zero API cost. Plugs in right after auto-group completes, before QA review.
+
+**Why it matters:** Token clustering requires exact 4-token matches. "fast payday loans" and "quick payday loans" end up in different clusters because `fast` ≠ `quick`. Cosine similarity catches this (0.94 similarity) without any LLM call.
+
+---
+
+### 🔮 Phase 3: Token Semantic Pre-Merge (Before Clustering)
+
+**Status:** Designed, not implemented. Would run before the 4-token clustering step.
+
+**What it does:** Uses the LLM to compare each unique token against all others (batched), finding semantic synonyms (fast↔quick, automobile↔car). Merges them using the existing token merge infrastructure before clustering occurs. Results in better, more accurate token clusters.
+
+**How it works:**
+1. For each unique token, send to LLM with 3-5 sample page names for context:
+   ```
+   Token: "fast"
+   Appears in: "fast payday loans", "fast cash advance", "fast approval loans"
+   Which of these tokens are semantic equivalents? [quick, rapid, instant, speedy, ...]
+   ```
+2. LLM returns matches → applied as merge rules via existing TokenMergeEngine
+3. Signatures recalculate → pages regroup → better 4-token clusters
+4. Cost: ~500 API calls (~$5-25 depending on model)
+
+**Why it matters:** Eliminates synonym fragmentation BEFORE clustering. "fast payday loans" and "quick payday loans" would share the same token after merge, so they'd naturally cluster together.
+
+---
+
+### 🔮 Phase 4: Full Embedding Clustering (Alternative to Token Overlap)
+
+**Status:** Concept only. Requires embedding API support.
+
+**What it does:** Instead of (or in addition to) token overlap, embed ALL page names as vectors and cluster by cosine similarity. Catches semantic matches with ZERO token overlap (e.g., "home mortgage refinance" ↔ "refinancing your house loan").
+
+**How it works:**
+1. Send all page names to embedding model (OpenRouter or dedicated) — $0.001 for 3,000 pages
+2. Compute pairwise cosine similarity — pure CPU math, 1-3 seconds
+3. Build connected components at 0.85 threshold (pages reachable through similarity edges = same group)
+4. Show as "Embedding Clusters" alongside Token Clusters
+
+**Key insight:** Cosine similarity scores are precise (4+ decimal places) and the gap between same-intent (0.90-0.98) and different-intent (0.10-0.70) is usually large. No ambiguity in grouping.
+
+**Performance:** 3,800 pages = 7.2M comparisons. With pre-computed magnitudes + early termination: ~3 seconds in browser. Not computationally expensive.
+
+---
+
+### 🔮 Phase 5: Additional Enhancement Ideas
+
+**Cross-Cluster Reconciliation (Free):**
+After auto-grouping, compare group names ACROSS clusters by token overlap >70%. Flag merge candidates. No API cost, instant.
+
+**Suggest Split for Oversized Groups:**
+Flag any auto-grouped group with >15 pages as potentially too broad. Offer re-run with stricter prompt for just that group.
+
+**Learning from User Corrections:**
+Log when user moves a page between groups or rejects a suggestion. Build a local correction dictionary over time. Use corrections to improve future auto-group accuracy. Zero API cost, compounds over time.
+
+**Two-Pass Auto-Group:**
+Pass 1 (current): 4-token clustering → LLM grouping. Gets 80% right.
+Pass 2 (new): Take all single-page groups + ungrouped leftovers → embed → cluster by similarity → LLM group. Catches the remaining 20%.
+
+**Token Role Detection:**
+Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how, calculator). Cluster by topic tokens only (ignoring modifiers). Then LLM splits by modifier intent within each topic cluster. More accurate initial clustering.
+
+---
+
+*Last updated: 2026-03-24*

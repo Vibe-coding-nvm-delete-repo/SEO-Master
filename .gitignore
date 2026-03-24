@@ -45,3 +45,4 @@ node_modules/lightningcss/node/index.js.original
 
 # Test coverage
 coverage/
+.firebase

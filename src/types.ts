@@ -15,6 +15,7 @@ export interface ProcessedRow {
   labelArr: string[];
   locationCity: string | null;
   locationState: string | null;
+  originalTokenArr?: string[];  // Pre-merge tokens, set on first merge for undo support
 }
 
 export interface Cluster {
@@ -69,6 +70,7 @@ export interface GroupedCluster {
   reviewReason?: string;
   reviewCost?: number;
   reviewedAt?: string;
+  mergeAffected?: boolean;  // Set when token merge auto-unapproves this group
 }
 
 export interface BlockedKeyword {
@@ -93,6 +95,54 @@ export interface Project {
   createdAt: string;
   uid: string;
   fileName?: string;
+}
+
+// Activity log types
+export type ActivityAction = 'group' | 'ungroup' | 'approve' | 'unapprove' | 'block' | 'unblock' | 'qa-review' | 'remove-approved' | 'merge' | 'unmerge' | 'auto-group';
+
+// Auto-group types
+export interface AutoGroupCluster {
+  id: string;
+  sharedTokens: string[];
+  pages: ClusterSummary[];
+  totalVolume: number;
+  keywordCount: number;
+  avgKd: number | null;
+  pageCount: number;
+  confidence: 'high' | 'medium' | 'review';
+  isIdentical: boolean;  // true if all pages have 100% token overlap
+}
+
+export interface AutoGroupSuggestion {
+  id: string;
+  sourceClusterId: string;
+  groupName: string;
+  pages: ClusterSummary[];
+  totalVolume: number;
+  keywordCount: number;
+  avgKd: number | null;
+  status: 'pending' | 'processing' | 'approved' | 'mismatch' | 'error' | 'manual-review';
+  retryCount: number;
+  reviewReason?: string;
+  reviewMismatchedPages?: string[];
+  reviewCost?: number;
+  qaStatus?: 'approve' | 'mismatch' | 'error';
+  qaMismatchedPages?: string[];
+}
+
+export interface TokenMergeRule {
+  id: string;
+  parentToken: string;
+  childTokens: string[];
+  createdAt: string;
+}
+
+export interface ActivityLogEntry {
+  id: string;
+  timestamp: string;  // ISO 8601
+  action: ActivityAction;
+  details: string;
+  count: number;
 }
 
 export interface Stats {

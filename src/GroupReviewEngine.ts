@@ -33,6 +33,7 @@ export interface ReviewEngineConfig {
   systemPrompt: string;
   concurrency: number;
   modelPricing?: { prompt: string; completion: string };
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
 }
 
 export interface ReviewEngineCallbacks {
@@ -83,6 +84,7 @@ async function reviewSingleGroup(
           ],
           temperature: config.temperature ?? 0.3,
           ...(config.maxTokens > 0 ? { max_tokens: config.maxTokens } : {}),
+          ...(config.reasoningEffort && config.reasoningEffort !== 'none' ? { reasoning: { effort: config.reasoningEffort } } : {}),
           response_format: { type: 'json_object' },
         }),
         signal,

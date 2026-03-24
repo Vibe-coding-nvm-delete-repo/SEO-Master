@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
 import pluralize from 'pluralize';
-import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings } from 'lucide-react';
+import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries, misspellingMap } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, stateRegex, capitalizeWords, normalizeState, detectForeignEntity, synonymRegex, multiWordLocationsRegex, pluralizeCache, misspellingRegex, prefixPattern, localIntentRegex, stem, getLabelColor } from './processing';
 import { auth, db, googleProvider } from './firebase';
@@ -11,7 +11,14 @@ import { GoogleGenAI } from '@google/genai';
 import GenerateTab from './GenerateTab';
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
 import { processReviewQueue, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
-import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats } from './types';
+import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion } from './types';
+import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows } from './tokenMerge';
+import MergeConfirmModal from './MergeConfirmModal';
+import { useToast } from './ToastContext';
+import ActivityLog from './ActivityLog';
+import AutoGroupPanel from './AutoGroupPanel';
+import TableHeader, { type FilterBag } from './TableHeader';
+import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, KEYWORDS_COLUMNS, BLOCKED_COLUMNS } from './tableConstants';
 
 // Error boundary — catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
@@ -100,8 +107,8 @@ const KeywordRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurr
   labelColorMap: Map<string, { border: string; bg: string; text: string; sectionName: string }>;
 }) => (
   <tr className="hover:bg-zinc-50/50 transition-colors">
-    <td className="px-3 py-0.5 text-[13px] font-medium text-zinc-700 min-w-[200px]">{row.pageName}</td>
-    <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs min-w-[220px]">
+    <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 break-words">{row.pageName}</td>
+    <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
       <div className="flex flex-wrap gap-1">
         {row.tokenArr.map((token, i) => {
           const labelColor = labelColorMap.get(token);
@@ -115,7 +122,7 @@ const KeywordRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurr
               setSelectedTokens(newTokens);
               setCurrentPage(1);
             }}
-            className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[11px] transition-colors`}
+            className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
             style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
             title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
           >
@@ -125,12 +132,12 @@ const KeywordRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurr
         })}
       </div>
     </td>
-    <td className="px-1.5 py-0.5 text-zinc-500 text-right tabular-nums">{row.pageNameLen}</td>
+    <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">{row.pageNameLen}</td>
     <td className="px-2 py-0.5 text-zinc-700">{row.keyword}</td>
-    <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
       {row.searchVolume.toLocaleString()}
     </td>
-    <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
       {row.kd !== null ? row.kd : '-'}
     </td>
     <td className="px-3 py-0.5 text-zinc-600">{row.label}</td>
@@ -184,15 +191,31 @@ const ClusterRow = React.memo(({
           onChange={(e) => onSelect(e.target.checked)}
         />
       </td>
-      <td className="px-3 py-0.5 text-[13px] font-medium text-zinc-700 min-w-[200px] flex items-center gap-2">
-        {isExpanded ? (
-          <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
-        ) : (
-          <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
-        )}
-        {row.pageName}
+      <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
+        <div className="flex items-center gap-1.5 group/name">
+          {isExpanded ? (
+            <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
+          )}
+          <span className="break-words">{row.pageName}</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.pageName)}`, '_blank'); }}
+            className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0"
+            title="Search Google SERPs"
+          >
+            <ExternalLink className="w-3 h-3" />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(row.pageName); }}
+            className="p-0.5 text-zinc-300 hover:text-indigo-600 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0"
+            title="Copy page name"
+          >
+            <Copy className="w-3 h-3" />
+          </button>
+        </div>
       </td>
-      <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs min-w-[220px]">
+      <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
         <div className="flex flex-wrap gap-1">
           {row.tokenArr.map((token, i) => {
             const labelColor = labelColorMap.get(token);
@@ -207,7 +230,7 @@ const ClusterRow = React.memo(({
                 setSelectedTokens(newTokens);
                 setCurrentPage(1);
               }}
-              className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[11px] transition-colors`}
+              className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
               style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
               title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
             >
@@ -217,16 +240,16 @@ const ClusterRow = React.memo(({
           })}
         </div>
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-500 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">
         {row.pageNameLen}
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.keywordCount.toLocaleString()}
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.totalVolume.toLocaleString()}
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.avgKd !== null ? row.avgKd : '-'}
       </td>
       <td className="px-3 py-0.5 text-zinc-600">
@@ -292,11 +315,12 @@ const ClusterRow = React.memo(({
   </>
 ));
 
-const TokenRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurrentPage }: {
+const TokenRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurrentPage, switchToPages }: {
   row: TokenSummary;
   selectedTokens: Set<string>;
   setSelectedTokens: (s: Set<string>) => void;
   setCurrentPage: (p: number) => void;
+  switchToPages?: () => void;
 }) => (
   <tr className="hover:bg-zinc-50/50 transition-colors">
     <td className="px-3 py-0.5 font-medium text-zinc-700 font-mono text-sm">
@@ -307,22 +331,25 @@ const TokenRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurren
           else newTokens.add(row.token);
           setSelectedTokens(newTokens);
           setCurrentPage(1);
+          // Switch to Pages (Ungrouped) to show filtered results
+          if (switchToPages && newTokens.size > 0) switchToPages();
         }}
         className={`${selectedTokens.has(row.token) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors`}
+        title="Click to filter keyword management by this token"
       >
         {row.token}
       </button>
     </td>
-    <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
       {row.length}
     </td>
-    <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
       {row.frequency.toLocaleString()}
     </td>
-    <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
       {row.totalVolume.toLocaleString()}
     </td>
-    <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
       {row.avgKd !== null ? row.avgKd : '-'}
     </td>
     <td className="px-3 py-0.5 text-zinc-600">{row.label}</td>
@@ -375,23 +402,38 @@ const GroupedClusterRow = React.memo(({
           onChange={(e) => onGroupSelect(e.target.checked)}
         />
       </td>
-      <td className="px-3 py-0.5 text-[13px] font-medium text-zinc-700 min-w-[200px]">
-        <div className="flex items-center gap-2">
+      <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
+        <div className="flex items-center gap-1.5 group/gname">
           {isExpanded ? (
             <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
           ) : (
             <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
           )}
-          <span className="truncate">{row.groupName}</span>
+          <span className="break-words">{row.groupName}</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.groupName)}`, '_blank'); }}
+            className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/gname:opacity-100 transition-opacity shrink-0"
+            title="Search Google SERPs"
+          >
+            <ExternalLink className="w-3 h-3" />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(row.groupName); }}
+            className="p-0.5 text-zinc-300 hover:text-indigo-600 opacity-0 group-hover/gname:opacity-100 transition-opacity shrink-0"
+            title="Copy group name"
+          >
+            <Copy className="w-3 h-3" />
+          </button>
           {groupActionButton && <span onClick={(e) => e.stopPropagation()}>{groupActionButton}</span>}
         </div>
       </td>
-      <td className="px-1.5 py-0.5 min-w-[220px]">
+      <td className="px-1.5 py-0.5 overflow-hidden">
         <div className="flex flex-wrap gap-1">
           {(() => {
-            // Tokens derived from the GROUP NAME only (not all pages' tokens)
-            const groupNameTokens = row.groupName.toLowerCase().split(/\s+/).filter(t => t.trim());
-            return groupNameTokens.map(token => {
+            // Tokens from the highest volume page in the group (matches the page name)
+            const topPage = row.clusters.length > 0 ? row.clusters.reduce((best, c) => c.totalVolume > best.totalVolume ? c : best, row.clusters[0]) : null;
+            const groupTokens = topPage ? topPage.tokenArr : [];
+            return groupTokens.map(token => {
               const labelColor = labelColorMap.get(token);
               return (
                 <button
@@ -404,7 +446,7 @@ const GroupedClusterRow = React.memo(({
                     setSelectedTokens(newTokens);
                     setCurrentPage(1);
                   }}
-                  className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[11px] transition-colors`}
+                  className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
                   style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
                   title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
                 >
@@ -431,17 +473,17 @@ const GroupedClusterRow = React.memo(({
           <span className="text-zinc-300">-</span>
         )}
       </td>
-      <td className="px-3 py-0.5 text-zinc-500 text-right tabular-nums">-</td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">-</td>
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.clusters.length.toLocaleString()}
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.keywordCount.toLocaleString()}
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.totalVolume.toLocaleString()}
       </td>
-      <td className="px-1.5 py-0.5 text-zinc-600 text-right tabular-nums">
+      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.avgKd !== null ? row.avgKd : '-'}
       </td>
       <td className="px-3 py-0.5 text-zinc-600 text-xs">
@@ -483,17 +525,31 @@ const GroupedClusterRow = React.memo(({
                 onChange={(e) => onSubClusterSelect(`${row.id}::${cluster.tokens}`, e.target.checked)}
               />
             </td>
-            <td className="px-3 py-0.5 text-[13px] font-medium text-zinc-700 min-w-[200px]">
-              <div className="flex items-center gap-2 pl-6">
+            <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
+              <div className="flex items-center gap-1.5 pl-6 group/sub">
                 {isSubExpanded ? (
                   <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
                 ) : (
                   <ChevronRight className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
                 )}
-                <span className="text-sm">{cluster.pageName}</span>
+                <span className="text-[12px] break-words">{cluster.pageName}</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(cluster.pageName)}`, '_blank'); }}
+                  className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/sub:opacity-100 transition-opacity shrink-0"
+                  title="Search Google SERPs"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(cluster.pageName); }}
+                  className="p-0.5 text-zinc-300 hover:text-indigo-600 opacity-0 group-hover/sub:opacity-100 transition-opacity shrink-0"
+                  title="Copy page name"
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
               </div>
             </td>
-            <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs min-w-[220px]">
+            <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
               <div className="flex flex-wrap gap-1">
                 {cluster.tokenArr.map((token, i) => {
                   const labelColor = labelColorMap.get(token);
@@ -508,7 +564,7 @@ const GroupedClusterRow = React.memo(({
                       setSelectedTokens(newTokens);
                       setCurrentPage(1);
                     }}
-                    className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[11px] transition-colors`}
+                    className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
                     style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
                     title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
                   >
@@ -526,17 +582,17 @@ const GroupedClusterRow = React.memo(({
                 <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" title="Matches group" />
               ) : null}
             </td>
-            <td className="px-3 py-0.5 text-zinc-500 text-right tabular-nums">
+            <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">
               {cluster.pageNameLen}
             </td>
-            <td className="px-3 py-0.5 text-zinc-400 text-right tabular-nums">-</td>
-            <td className="px-3 py-0.5 text-zinc-600 text-right tabular-nums">
+            <td className="px-1 py-0.5 text-zinc-400 text-right tabular-nums text-xs">-</td>
+            <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
               {cluster.keywordCount.toLocaleString()}
             </td>
-            <td className="px-3 py-0.5 text-zinc-600 text-right tabular-nums">
+            <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
               {cluster.totalVolume.toLocaleString()}
             </td>
-            <td className="px-3 py-0.5 text-zinc-600 text-right tabular-nums">
+            <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
               {cluster.avgKd !== null ? cluster.avgKd : '-'}
             </td>
             <td className="px-3 py-0.5 text-zinc-600">{cluster.label}</td>
@@ -568,7 +624,8 @@ const GroupedClusterRow = React.memo(({
 
 export default function App() {
   const [mainTab, setMainTab] = useState<'group' | 'generate'>('group');
-  const [groupSubTab, setGroupSubTab] = useState<'data' | 'projects' | 'how-it-works' | 'dictionaries'>('data');
+  const [groupSubTab, setGroupSubTab] = useState<'data' | 'projects' | 'settings' | 'log'>('data');
+  const [settingsSubTab, setSettingsSubTab] = useState<'general' | 'how-it-works' | 'dictionaries' | 'blocked'>('general');
 
   // Starred models — shared across Generate tab and Group Review
   const [starredModels, setStarredModels] = useState<Set<string>>(() => {
@@ -602,6 +659,7 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isProjectLoading, setIsProjectLoading] = useState(false);
+  const [editingProjectName, setEditingProjectName] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
@@ -623,13 +681,28 @@ export default function App() {
   const groupReviewSettingsRef = useRef<GroupReviewSettingsRef>(null);
   const reviewAbortRef = useRef<AbortController | null>(null);
   const reviewProcessingRef = useRef(false);
+  // Debounced QA re-review — when pages are removed from groups, wait 5s then re-trigger QA
+  const reReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reReviewGroupIds = useRef<Set<string>>(new Set());
   // Ungrouping: track selected groups and sub-clusters within groups
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
   const [selectedSubClusters, setSelectedSubClusters] = useState<Set<string>>(new Set()); // key: "groupId::clusterTokens"
   const [stats, setStats] = useState<Stats | null>(null);
   const [datasetStats, setDatasetStats] = useState<{ cities: number, states: number, numbers: number, faqs: number, commercial: number, local: number, year: number, informational: number, navigational: number } | null>(null);
-  const [activeTab, setActiveTab] = useState<'keywords' | 'pages' | 'grouped' | 'approved' | 'blocked'>('pages');
+  const [activeTab, setActiveTab] = useState<'pages' | 'grouped' | 'approved' | 'blocked' | 'auto-group'>('pages');
   const [approvedGroups, setApprovedGroups] = useState<GroupedCluster[]>([]);
+  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
+  const activityLogRef = useRef(activityLog);
+  useEffect(() => { activityLogRef.current = activityLog; }, [activityLog]);
+  const [autoGroupSuggestions, setAutoGroupSuggestions] = useState<AutoGroupSuggestion[]>([]);
+  const autoGroupSuggestionsRef = useRef(autoGroupSuggestions);
+  useEffect(() => { autoGroupSuggestionsRef.current = autoGroupSuggestions; }, [autoGroupSuggestions]);
+  const [tokenMergeRules, setTokenMergeRules] = useState<TokenMergeRule[]>([]);
+  const tokenMergeRulesRef = useRef(tokenMergeRules);
+  useEffect(() => { tokenMergeRulesRef.current = tokenMergeRules; }, [tokenMergeRules]);
+  const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+  const [mergeModalTokens, setMergeModalTokens] = useState<string[]>([]);
+  const { addToast } = useToast();
   const [, startTransition] = useTransition();
   const switchTab = useCallback((tab: typeof activeTab) => {
     startTransition(() => {
@@ -657,9 +730,10 @@ export default function App() {
   const [excludedLabels, setExcludedLabels] = useState<Set<string>>(new Set());
   const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
   const [isLabelDropdownOpen, setIsLabelDropdownOpen] = useState(false);
-  const [sortConfig, setSortConfig] = useState<{key: keyof ClusterSummary, direction: 'asc' | 'desc'}>({ key: 'keywordCount', direction: 'desc' });
+  // Multi-sort: array of sort criteria applied in order (first = primary, second = secondary, etc.)
+  const [sortConfig, setSortConfig] = useState<Array<{key: keyof ClusterSummary, direction: 'asc' | 'desc'}>>([{ key: 'totalVolume', direction: 'desc' }]);
   const [tokenSortConfig, setTokenSortConfig] = useState<{key: keyof TokenSummary, direction: 'asc' | 'desc'}>({ key: 'frequency', direction: 'desc' });
-  const [groupedSortConfig, setGroupedSortConfig] = useState<{key: 'groupName' | 'totalVolume' | 'keywordCount' | 'avgKd', direction: 'asc' | 'desc'}>({ key: 'keywordCount', direction: 'desc' });
+  const [groupedSortConfig, setGroupedSortConfig] = useState<Array<{key: string, direction: 'asc' | 'desc'}>>([{ key: 'keywordCount', direction: 'desc' }]);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(500);
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
@@ -684,6 +758,38 @@ export default function App() {
   const tokenMgmtPerPage = 100;
   const [tokenMgmtSubTab, setTokenMgmtSubTab] = useState<'current' | 'all' | 'blocked'>('current');
   const [blockedTokens, setBlockedTokens] = useState<Set<string>>(new Set());
+
+  // Universal blocked tokens — persists across ALL projects (global, not project-specific)
+  const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('kwg_universal_blocked');
+      if (saved) return new Set<string>(JSON.parse(saved));
+    } catch {}
+    return new Set<string>();
+  });
+
+  // Persist universal blocked to localStorage + Firestore on every change
+  const universalBlockedInitRef = useRef(true);
+  useEffect(() => {
+    if (universalBlockedInitRef.current) { universalBlockedInitRef.current = false; return; }
+    const arr = Array.from(universalBlockedTokens);
+    localStorage.setItem('kwg_universal_blocked', JSON.stringify(arr));
+    setDoc(doc(db, 'app_settings', 'universal_blocked'), { tokens: arr, updatedAt: new Date().toISOString() }).catch(() => {});
+  }, [universalBlockedTokens]);
+
+  // Load universal blocked from Firestore on mount (fallback if localStorage is empty)
+  useEffect(() => {
+    if (universalBlockedTokens.size > 0) return; // Already loaded from localStorage
+    getDoc(doc(db, 'app_settings', 'universal_blocked')).then(snap => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data?.tokens?.length > 0) {
+          setUniversalBlockedTokens(new Set<string>(data.tokens));
+        }
+      }
+    }).catch(() => {});
+  }, []);
+
   const [labelSections, setLabelSections] = useState<LabelSection[]>([]);
   const [isLabelSidebarOpen, setIsLabelSidebarOpen] = useState(true);
   const [labelSortConfigs, setLabelSortConfigs] = useState<Record<string, { key: 'token' | 'kws' | 'vol' | 'kd'; direction: 'asc' | 'desc' }>>({});
@@ -1222,7 +1328,10 @@ export default function App() {
       datasetStats: ds,
       blockedTokens: Array.from(bTokens ?? blockedTokens),
       blockedKeywords: bKeywords ?? blockedKeywords,
-      labelSections,
+      labelSections: labelSectionsRef.current,
+      activityLog: activityLogRef.current.slice(0, 500),
+      tokenMergeRules: tokenMergeRulesRef.current,
+      autoGroupSuggestions: autoGroupSuggestionsRef.current,
       updatedAt: new Date().toISOString()
     };
     // Save to IndexedDB (fast, local cache)
@@ -1287,6 +1396,11 @@ export default function App() {
       setDatasetStats(null);
       setBlockedKeywords([]);
       setBlockedTokens(new Set());
+      setGroupedClusters([]);
+      setApprovedGroups([]);
+      setActivityLog([]);
+      setAutoGroupSuggestions([]);
+      setTokenMergeRules([]);
       setFileName(null);
     } catch (error) {
       setProjectError("Failed to create project.");
@@ -1327,6 +1441,7 @@ export default function App() {
     setActiveProjectId(projectId);
     setIsProjectLoading(true);
     setMainTab('group');
+    setGroupSubTab('data');
     try {
       // Try IDB first (fast local cache)
       let data = await loadFromIDB(projectId);
@@ -1349,6 +1464,9 @@ export default function App() {
         setTokenSummary(data.tokenSummary || null);
         setGroupedClusters(data.groupedClusters || []);
         setApprovedGroups(data.approvedGroups || []);
+        setActivityLog(data.activityLog || []);
+        setTokenMergeRules(data.tokenMergeRules || []);
+        setAutoGroupSuggestions(data.autoGroupSuggestions || []);
         setStats(data.stats || null);
         setDatasetStats(data.datasetStats || null);
         setBlockedTokens(new Set<string>(data.blockedTokens || []));
@@ -1647,13 +1765,16 @@ export default function App() {
                 // 4. Normalize states (multi-word and single-word)
                 normalizedKeyword = normalizedKeyword.replace(stateRegex, match => stateMap[match]);
 
-                const tokens = normalizedKeyword.split(/[^a-z0-9]+/);
-                const signature = [...new Set(tokens
+                let tokenArr = normalizedKeyword.split(/[^a-z0-9]+/)
                   .filter(t => t.length > 0)
-                  .map(t => numberMap[t] || stem(t))
-                )]
-                  .sort()
-                  .join(' ');
+                  .map(t => numberMap[t] || stem(t));
+
+                // Apply token merge rules (permanent project-level synonyms)
+                if (tokenMergeRules.length > 0) {
+                  tokenArr = applyMergeRulesToTokenArr(tokenArr, tokenMergeRules);
+                }
+
+                const signature = [...new Set(tokenArr)].sort().join(' ');
 
                 if (!signature) continue;
 
@@ -1908,7 +2029,7 @@ export default function App() {
                   informational: datasetInformational,
                   navigational: datasetNavigational
                 });
-                setActiveTab('keywords');
+                setActiveTab('pages');
                 setIsProcessing(false);
               }
             } catch (err: any) {
@@ -2053,7 +2174,7 @@ export default function App() {
     setStats(null);
     setError(null);
     setFileName(null);
-    setActiveTab('keywords');
+    setActiveTab('pages');
     setSearchImmediate('');
     setMinClusterCount('');
     setMaxClusterCount('');
@@ -2070,16 +2191,22 @@ export default function App() {
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('all');
     setGroupedSortConfig({ key: 'keywordCount', direction: 'desc' });
+    setGroupedClusters([]);
+    setApprovedGroups([]);
+    setActivityLog([]);
+    setAutoGroupSuggestions([]);
+    setTokenMergeRules([]);
   };
 
   // Check if a row's tokens contain any blocked token
+  // Check both project-specific AND universal blocked token sets
   const hasBlockedToken = useCallback((tokenArr: string[]) => {
-    if (blockedTokens.size === 0) return false;
+    if (blockedTokens.size === 0 && universalBlockedTokens.size === 0) return false;
     for (const t of tokenArr) {
-      if (blockedTokens.has(t)) return true;
+      if (blockedTokens.has(t) || universalBlockedTokens.has(t)) return true;
     }
     return false;
-  }, [blockedTokens]);
+  }, [blockedTokens, universalBlockedTokens]);
 
   // Effective results: filter out keywords whose tokens contain a blocked token
   const effectiveResults = useMemo(() => {
@@ -2422,20 +2549,37 @@ export default function App() {
   const filteredResults = filteredResultsData.filtered;
 
   const sortedClusters = useMemo(() => {
+    if (sortConfig.length === 0) return filteredClusters;
     return [...filteredClusters].sort((a, b) => {
-      const aVal = a[sortConfig.key] ?? (sortConfig.direction === 'asc' ? Infinity : -Infinity);
-      const bVal = b[sortConfig.key] ?? (sortConfig.direction === 'asc' ? Infinity : -Infinity);
-      if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
-      if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+      for (const { key, direction } of sortConfig) {
+        const aVal = a[key] ?? (direction === 'asc' ? Infinity : -Infinity);
+        const bVal = b[key] ?? (direction === 'asc' ? Infinity : -Infinity);
+        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+      }
       return 0;
     });
   }, [filteredClusters, sortConfig]);
 
-  const handleSort = useCallback((key: keyof ClusterSummary) => {
-    setSortConfig(current => ({
-      key,
-      direction: current.key === key && current.direction === 'desc' ? 'asc' : 'desc'
-    }));
+  // Multi-sort handler: regular click = replace sort, Shift+click = add/toggle secondary sort
+  const handleSort = useCallback((key: keyof ClusterSummary, additive?: boolean) => {
+    setSortConfig(current => {
+      const existingIdx = current.findIndex(s => s.key === key);
+      if (additive) {
+        // Shift+click: add as secondary sort or toggle direction if already in list
+        if (existingIdx >= 0) {
+          const updated = [...current];
+          updated[existingIdx] = { key, direction: updated[existingIdx].direction === 'desc' ? 'asc' : 'desc' };
+          return updated;
+        }
+        return [...current, { key, direction: 'desc' }];
+      }
+      // Regular click: if already primary, toggle direction. Otherwise replace all with this one.
+      if (existingIdx === 0 && current.length === 1) {
+        return [{ key, direction: current[0].direction === 'desc' ? 'asc' : 'desc' }];
+      }
+      return [{ key, direction: 'desc' }];
+    });
     setCurrentPage(1);
   }, []);
 
@@ -2460,9 +2604,60 @@ export default function App() {
   }, []);
 
   const SortIcon = ({ columnKey }: { columnKey: keyof ClusterSummary }) => {
-    if (sortConfig.key !== columnKey) return <ArrowUpDown className="w-4 h-4 text-zinc-400" />;
-    return sortConfig.direction === 'asc' ? <ArrowUp className="w-4 h-4 text-indigo-600" /> : <ArrowDown className="w-4 h-4 text-indigo-600" />;
+    if (sortConfig.length > 1) {
+      const idx = sortConfig.findIndex(s => s.key === columnKey);
+      if (idx >= 0) {
+        const dir = sortConfig[idx].direction;
+        return <span className="inline-flex items-center gap-0.5">{dir === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-indigo-600" /> : <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />}<span className="text-[8px] font-bold text-indigo-500">{idx + 1}</span></span>;
+      }
+      return <ArrowUpDown className="w-4 h-4 text-zinc-400" />;
+    }
+    const primary = sortConfig[0];
+    if (!primary || primary.key !== columnKey) return <ArrowUpDown className="w-4 h-4 text-zinc-400" />;
+    return primary.direction === 'asc' ? <ArrowUp className="w-4 h-4 text-indigo-600" /> : <ArrowDown className="w-4 h-4 text-indigo-600" />;
   };
+
+  // Unified sort handler for grouped/approved tabs
+  const handleGroupedSort = useCallback((key: string, additive?: boolean) => {
+    setGroupedSortConfig(current => {
+      const existingIdx = current.findIndex(s => s.key === key);
+      if (additive) {
+        if (existingIdx >= 0) {
+          const updated = [...current];
+          updated[existingIdx] = { key, direction: updated[existingIdx].direction === 'desc' ? 'asc' : 'desc' };
+          return updated;
+        }
+        return [...current, { key, direction: 'desc' }];
+      }
+      if (existingIdx === 0 && current.length === 1) {
+        return [{ key, direction: current[0].direction === 'desc' ? 'asc' : 'desc' }];
+      }
+      return [{ key, direction: 'desc' }];
+    });
+    setCurrentPage(1);
+  }, []);
+
+  // Blocked tab sort
+  const [blockedSortConfig, setBlockedSortConfig] = useState<{key: string, direction: 'asc' | 'desc'}>({ key: 'volume', direction: 'desc' });
+  const handleBlockedSort = useCallback((key: string) => {
+    setBlockedSortConfig(current => ({
+      key,
+      direction: current.key === key && current.direction === 'desc' ? 'asc' : 'desc',
+    }));
+    setCurrentPage(1);
+  }, []);
+
+  // Shared filter bag for TableHeader — single object passed to all tabs
+  const filterBag = useMemo((): FilterBag => ({
+    minLen, setMinLen, maxLen, setMaxLen,
+    minKwInCluster, setMinKwInCluster, maxKwInCluster, setMaxKwInCluster,
+    minVolume, setMinVolume, maxVolume, setMaxVolume,
+    minKd, setMinKd, maxKd, setMaxKd,
+    filterCity, setFilterCity, filterState, setFilterState,
+    excludedLabels, setExcludedLabels,
+    isLabelDropdownOpen, setIsLabelDropdownOpen,
+    labelCounts,
+  }), [minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, isLabelDropdownOpen, labelCounts]);
 
   const TokenSortIcon = ({ columnKey }: { columnKey: keyof TokenSummary }) => {
     if (tokenSortConfig.key !== columnKey) return <ArrowUpDown className="w-4 h-4 text-zinc-400" />;
@@ -2638,14 +2833,20 @@ export default function App() {
         return true;
       });
     }
-    // Sort
-    const { key, direction } = groupedSortConfig;
+    // Multi-sort
+    if (groupedSortConfig.length === 0) return groups;
     return [...groups].sort((a, b) => {
-      const aVal = a[key] ?? (direction === 'asc' ? Infinity : -Infinity);
-      const bVal = b[key] ?? (direction === 'asc' ? Infinity : -Infinity);
-      if (typeof aVal === 'string' && typeof bVal === 'string') return direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-      if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-      if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+      for (const { key, direction } of groupedSortConfig) {
+        const aVal = (a as any)[key] ?? (direction === 'asc' ? Infinity : -Infinity);
+        const bVal = (b as any)[key] ?? (direction === 'asc' ? Infinity : -Infinity);
+        if (typeof aVal === 'string' && typeof bVal === 'string') {
+          const cmp = aVal.localeCompare(bVal);
+          if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
+          continue;
+        }
+        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+      }
       return 0;
     });
   }, [effectiveGrouped, groupedSortConfig, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, selectedTokens]);
@@ -2712,7 +2913,7 @@ export default function App() {
     if (!tokenSummary) return [];
     let base: TokenSummary[];
     if (tokenMgmtSubTab === 'blocked') {
-      base = tokenSummary.filter(t => blockedTokens.has(t.token));
+      base = tokenSummary.filter(t => blockedTokens.has(t.token) || universalBlockedTokens.has(t.token));
     } else if (tokenMgmtSubTab === 'current') {
       // Compute token stats FROM SCRATCH using only currently visible clusters (not global tokenSummary)
       // This ensures "current" shows different data than "all" when filters are active
@@ -2726,9 +2927,9 @@ export default function App() {
         for (const g of filteredSortedGrouped) clusters.push(...g.clusters);
       } else if (activeTab === 'approved') {
         for (const g of filteredApprovedGroups) clusters.push(...g.clusters);
-      } else if (activeTab === 'keywords' && effectiveResults) {
-        // Build pseudo-clusters from individual keywords
-        for (const r of effectiveResults) {
+      } else if (activeTab === 'keywords' && filteredResults) {
+        // Build token stats from currently filtered keywords only (not all keywords)
+        for (const r of filteredResults) {
           for (const t of r.tokenArr) {
             if (blockedTokens.has(t)) continue;
             const existing = tokenStatsMap.get(t);
@@ -2781,7 +2982,7 @@ export default function App() {
       });
     } else {
       // 'all' — show all non-blocked tokens
-      base = tokenSummary.filter(t => !blockedTokens.has(t.token));
+      base = tokenSummary.filter(t => !blockedTokens.has(t.token) && !universalBlockedTokens.has(t.token));
     }
     const q = tokenMgmtSearch.toLowerCase().trim();
     let tokens = q ? base.filter(t => t.token.includes(q)) : [...base];
@@ -2796,11 +2997,183 @@ export default function App() {
       return direction === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
     });
     return tokens;
-  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, effectiveClusters, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, effectiveResults, debouncedSearchQuery, selectedTokens]);
+  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, effectiveClusters, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults, debouncedSearchQuery, selectedTokens]);
 
   const tokenMgmtTotalPages = Math.max(1, Math.ceil(filteredMgmtTokens.length / tokenMgmtPerPage));
   const safeMgmtPage = Math.min(tokenMgmtPage, tokenMgmtTotalPages);
   const paginatedMgmtTokens = useMemo(() => filteredMgmtTokens.slice((safeMgmtPage - 1) * tokenMgmtPerPage, safeMgmtPage * tokenMgmtPerPage), [filteredMgmtTokens, safeMgmtPage]);
+
+  // Activity log + toast helper — creates a log entry and fires a toast notification
+  const logAndToast = useCallback((action: ActivityAction, details: string, count: number, toastMsg: string, toastType: 'success' | 'info' | 'warning' | 'error' = 'info') => {
+    const entry: ActivityLogEntry = {
+      id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      action,
+      details,
+      count,
+    };
+    setActivityLog(prev => {
+      const next = [entry, ...prev];
+      return next.length > 500 ? next.slice(0, 500) : next; // Cap at 500
+    });
+    addToast(toastMsg, toastType);
+  }, [addToast]);
+
+  // Debounced QA re-review — when pages are removed from groups, wait 5s then re-trigger QA
+  const scheduleReReview = useCallback((groupIds: string[]) => {
+    groupIds.forEach(id => reReviewGroupIds.current.add(id));
+    if (reReviewTimerRef.current) clearTimeout(reReviewTimerRef.current);
+    reReviewTimerRef.current = setTimeout(() => {
+      reReviewTimerRef.current = null;
+      const ids = new Set(reReviewGroupIds.current);
+      reReviewGroupIds.current.clear();
+      if (ids.size === 0) return;
+      const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
+      if (!hasReviewApi) return;
+      setGroupedClusters(prev => prev.map(g =>
+        ids.has(g.id) && g.clusters.length > 0 ? { ...g, reviewStatus: 'pending' as const, reviewMismatchedPages: undefined, reviewReason: undefined } : g
+      ));
+      logAndToast('qa-review', `Re-reviewing ${ids.size} group${ids.size > 1 ? 's' : ''} after page removal`, ids.size, `QA re-review queued for ${ids.size} group${ids.size > 1 ? 's' : ''}`, 'info');
+    }, 5000);
+  }, [logAndToast]);
+
+  // Token merge handlers
+  const handleOpenMergeModal = useCallback(() => {
+    if (selectedMgmtTokens.size < 2) return;
+    setMergeModalTokens(Array.from(selectedMgmtTokens));
+    setIsMergeModalOpen(true);
+  }, [selectedMgmtTokens]);
+
+  const handleMergeTokens = useCallback((parentToken: string) => {
+    if (!results || !clusterSummary) return;
+    const childTokens = mergeModalTokens.filter(t => t !== parentToken);
+    if (childTokens.length === 0) return;
+
+    // Run the cascade
+    const cascade = executeMergeCascade(results, groupedClusters, approvedGroups, parentToken, childTokens);
+
+    // Create merge rule
+    const newRule: TokenMergeRule = {
+      id: `merge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      parentToken,
+      childTokens,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Update selected token filters — replace children with parent
+    const newSelectedTokens = new Set(selectedTokens);
+    let filterChanged = false;
+    for (const child of childTokens) {
+      if (newSelectedTokens.has(child)) {
+        newSelectedTokens.delete(child);
+        newSelectedTokens.add(parentToken);
+        filterChanged = true;
+      }
+    }
+
+    startTransition(() => {
+      setResults(cascade.results);
+      setClusterSummary(cascade.clusterSummary);
+      setGroupedClusters(cascade.groupedClusters);
+      setApprovedGroups(cascade.approvedGroups);
+      setTokenSummary(cascade.tokenSummary);
+      setTokenMergeRules(prev => [...prev, newRule]);
+      if (filterChanged) setSelectedTokens(newSelectedTokens);
+      setSelectedMgmtTokens(new Set());
+    });
+
+    // Notifications
+    const details = `Merged ${childTokens.join(', ')} → ${parentToken}`;
+    logAndToast('merge', details, childTokens.length,
+      `Merged ${childTokens.length} token${childTokens.length > 1 ? 's' : ''} into '${parentToken}' — ${cascade.pagesAffected} pages affected`, 'info');
+
+    if (cascade.unapprovedGroups.length > 0) {
+      logAndToast('merge', `Auto-unapproved ${cascade.unapprovedGroups.length} group(s) due to merge`, cascade.unapprovedGroups.length,
+        `${cascade.unapprovedGroups.length} approved group${cascade.unapprovedGroups.length > 1 ? 's' : ''} moved back for re-review`, 'warning');
+    }
+
+    // Save
+    if (activeProjectId) {
+      saveProjectData(cascade.results, cascade.clusterSummary, cascade.tokenSummary, cascade.groupedClusters, stats, datasetStats, fileName, undefined, undefined, cascade.approvedGroups);
+    }
+
+    setIsMergeModalOpen(false);
+    setMergeModalTokens([]);
+  }, [results, clusterSummary, groupedClusters, approvedGroups, mergeModalTokens, selectedTokens, activeProjectId, stats, datasetStats, fileName, logAndToast, startTransition]);
+
+  const handleUndoMergeChild = useCallback((ruleId: string, childToken: string) => {
+    if (!results) return;
+
+    // Update the rule
+    const updatedRules = tokenMergeRules.map(r => {
+      if (r.id !== ruleId) return r;
+      return { ...r, childTokens: r.childTokens.filter(t => t !== childToken) };
+    }).filter(r => r.childTokens.length > 0); // Remove rules with no children
+
+    // Restore originalTokenArr on all rows, then re-apply all remaining rules
+    const restoredResults = results.map(row => {
+      if (!row.originalTokenArr) return row;
+      // Start from original tokens
+      let tokenArr = [...row.originalTokenArr];
+      // Re-apply all remaining rules
+      for (const rule of updatedRules) {
+        const childSet = new Set(rule.childTokens);
+        if (tokenArr.some(t => childSet.has(t))) {
+          let hasParent = false;
+          const merged: string[] = [];
+          for (const t of tokenArr) {
+            if (childSet.has(t)) { if (!hasParent) { merged.push(rule.parentToken); hasParent = true; } }
+            else if (t === rule.parentToken) { if (!hasParent) { merged.push(rule.parentToken); hasParent = true; } }
+            else merged.push(t);
+          }
+          tokenArr = merged.sort();
+        }
+      }
+      const newSig = [...new Set(tokenArr)].sort().join(' ');
+      // If no rules remain and tokens match original, clear originalTokenArr
+      const stillMerged = updatedRules.length > 0 && newSig !== [...row.originalTokenArr].sort().join(' ');
+      return {
+        ...row,
+        tokenArr,
+        tokens: newSig,
+        originalTokenArr: stillMerged ? row.originalTokenArr : undefined,
+      };
+    });
+
+    // Rebuild everything from the restored results
+    const newClusters = rebuildClustersFromRows(restoredResults);
+    const newClusterMap = new Map(newClusters.map(c => [c.tokens, c]));
+
+    // Update groups with new cluster data
+    const updateGroupList = (groups: GroupedCluster[]) => groups.map(group => {
+      const newGroupClusters = group.clusters.map(c => newClusterMap.get(c.tokens) || c).filter((c, i, arr) => arr.findIndex(x => x.tokens === c.tokens) === i);
+      if (newGroupClusters.length === 0) return null;
+      const totalVolume = newGroupClusters.reduce((s, c) => s + c.totalVolume, 0);
+      const keywordCount = newGroupClusters.reduce((s, c) => s + c.keywordCount, 0);
+      return { ...group, clusters: newGroupClusters, totalVolume, keywordCount };
+    }).filter((g): g is GroupedCluster => g !== null);
+
+    const updatedGroups = updateGroupList(groupedClusters);
+    const updatedApproved = updateGroupList(approvedGroups);
+    const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
+
+    startTransition(() => {
+      setResults(restoredResults);
+      setClusterSummary(newClusters);
+      setGroupedClusters(updatedGroups);
+      setApprovedGroups(updatedApproved);
+      setTokenSummary(newTokenSummary);
+      setTokenMergeRules(updatedRules);
+    });
+
+    const rule = tokenMergeRules.find(r => r.id === ruleId);
+    logAndToast('unmerge', `Unmerged '${childToken}' from '${rule?.parentToken || 'parent'}'`, 1,
+      `Unmerged '${childToken}'`, 'success');
+
+    if (activeProjectId) {
+      saveProjectData(restoredResults, newClusters, newTokenSummary, updatedGroups, stats, datasetStats, fileName, undefined, undefined, updatedApproved);
+    }
+  }, [results, tokenMergeRules, groupedClusters, approvedGroups, activeProjectId, stats, datasetStats, fileName, logAndToast, startTransition]);
 
   // Block/unblock token handlers
   const handleBlockTokens = useCallback((tokens: string[]) => {
@@ -2811,9 +3184,10 @@ export default function App() {
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('blocked');
     setTokenMgmtPage(1);
+    logAndToast('block', `Blocked: ${tokens.join(', ')}`, tokens.length, `Blocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`, 'error');
     // Persist
     saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, newBlocked);
-  }, [blockedTokens, results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName]);
+  }, [blockedTokens, results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, logAndToast]);
 
   const handleUnblockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
@@ -2822,9 +3196,10 @@ export default function App() {
     setBlockedTokens(newBlocked);
     setSelectedMgmtTokens(new Set());
     setTokenMgmtPage(1);
+    logAndToast('unblock', `Unblocked: ${tokens.join(', ')}`, tokens.length, `Unblocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}`, 'success');
     // Persist
     saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, newBlocked);
-  }, [blockedTokens, results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName]);
+  }, [blockedTokens, results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, logAndToast]);
 
   // Memoize grouped stats to avoid 5 reduce() calls on every render
   const groupedStats = useMemo(() => {
@@ -2842,28 +3217,103 @@ export default function App() {
       const group = prev.find(g => g.groupName === groupName);
       if (!group) return prev;
       setApprovedGroups(ap => [...ap, group]);
+      logAndToast('approve', `Approved '${groupName}'`, group.clusters.length, `Approved '${groupName}' (${group.clusters.length} pages)`, 'success');
       return prev.filter(g => g.groupName !== groupName);
     });
-  }, []);
+  }, [logAndToast]);
 
   // Unapprove a group — move from approved back to grouped
+  // Recalculate group aggregate stats from its clusters — used after removing individual pages
+  const recalcGroupStats = useCallback((group: GroupedCluster, remainingClusters: ClusterSummary[]): GroupedCluster => {
+    const totalVolume = remainingClusters.reduce((sum, c) => sum + c.totalVolume, 0);
+    const keywordCount = remainingClusters.reduce((sum, c) => sum + c.keywordCount, 0);
+    let totalKd = 0, kdCount = 0;
+    remainingClusters.forEach(c => { if (c.avgKd !== null) { totalKd += c.avgKd * c.keywordCount; kdCount += c.keywordCount; } });
+    return { ...group, clusters: remainingClusters, totalVolume, keywordCount, avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null };
+  }, []);
+
   const handleUnapproveGroup = useCallback((groupName: string) => {
     setApprovedGroups(prev => {
       const group = prev.find(g => g.groupName === groupName);
       if (!group) return prev;
       setGroupedClusters(gc => [...gc, group]);
+      logAndToast('unapprove', `Unapproved '${groupName}'`, group.clusters.length, `Unapproved '${groupName}'`, 'warning');
       return prev.filter(g => g.groupName !== groupName);
     });
-  }, []);
+  }, [logAndToast]);
+
+  // Remove individual sub-clusters from approved groups (unapprove specific pages)
+  const handleRemoveFromApproved = useCallback(() => {
+    if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
+    if (!clusterSummary) return;
+
+    const clustersToReturn: ClusterSummary[] = [];
+    let newApproved = [...approvedGroups];
+
+    // Handle entire groups being unapproved
+    for (const groupId of selectedGroups) {
+      const group = newApproved.find(g => g.id === groupId);
+      if (group) {
+        // Move entire group back to grouped
+        setGroupedClusters(gc => [...gc, group]);
+      }
+    }
+    newApproved = newApproved.filter(g => !selectedGroups.has(g.id));
+
+    // Handle individual sub-clusters being removed from approved groups
+    for (const subKey of selectedSubClusters) {
+      const [groupId, clusterTokens] = subKey.split('::');
+      if (selectedGroups.has(groupId)) continue;
+      const groupIdx = newApproved.findIndex(g => g.id === groupId);
+      if (groupIdx === -1) continue;
+      const group = newApproved[groupIdx];
+      const clusterToReturn = group.clusters.find(c => c.tokens === clusterTokens);
+      if (clusterToReturn) {
+        clustersToReturn.push(clusterToReturn);
+        const remaining = group.clusters.filter(c => c.tokens !== clusterTokens);
+        if (remaining.length === 0) {
+          newApproved.splice(groupIdx, 1);
+        } else {
+          newApproved[groupIdx] = recalcGroupStats(group, remaining);
+        }
+      }
+    }
+
+    // Return individual clusters back to ungrouped
+    if (clustersToReturn.length > 0) {
+      const newClusters = [...clusterSummary, ...clustersToReturn];
+      setClusterSummary(newClusters);
+      if (results) {
+        const returnedTokens = new Set(clustersToReturn.map(c => c.tokens));
+        const newRows: ProcessedRow[] = [];
+        for (const cluster of clustersToReturn) {
+          for (const kw of cluster.keywords) {
+            newRows.push({ keyword: kw.keyword, keywordLower: kw.keyword.toLowerCase(), searchVolume: kw.volume, kd: kw.kd, pageName: cluster.pageName, tokens: cluster.tokens, tokenArr: cluster.tokenArr, labelArr: cluster.labelArr || [], label: cluster.label, locationCity: cluster.locationCity || '', locationState: cluster.locationState || '', pageNameLen: cluster.pageNameLen, pageNameLower: cluster.pageNameLower || cluster.pageName.toLowerCase() });
+          }
+        }
+        setResults([...results, ...newRows]);
+      }
+    }
+
+    setApprovedGroups(newApproved);
+    setSelectedGroups(new Set());
+    setSelectedSubClusters(new Set());
+
+    const totalRemoved = selectedGroups.size + clustersToReturn.length;
+    logAndToast('remove-approved', `Removed ${totalRemoved} items from approved`, totalRemoved, `Removed ${totalRemoved} items from approved`, 'warning');
+  }, [selectedGroups, selectedSubClusters, approvedGroups, clusterSummary, results, recalcGroupStats, logAndToast]);
 
   // Auto-save when approvedGroups changes (approve/unapprove triggers this)
+  // Uses a short delay so other state updates in the same batch settle first
   const approvedGroupsInitRef = useRef(true);
   useEffect(() => {
     if (approvedGroupsInitRef.current) { approvedGroupsInitRef.current = false; return; }
-    if (activeProjectId) {
+    if (!activeProjectId) return;
+    const timer = setTimeout(() => {
       saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, undefined, undefined, approvedGroups);
-    }
-  }, [approvedGroups]);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [approvedGroups, groupedClusters]);
 
   // AI Group Review — process pending groups automatically
   useEffect(() => {
@@ -2901,6 +3351,7 @@ export default function App() {
         systemPrompt: settingsData.systemPrompt,
         concurrency: settingsData.concurrency,
         modelPricing: modelObj?.pricing,
+        reasoningEffort: settingsData.reasoningEffort,
       },
       {
         onReviewing: () => {},
@@ -2915,6 +3366,12 @@ export default function App() {
               reviewedAt: result.reviewedAt,
             } : g
           ));
+          const groupName = pendingGroups.find(g => g.id === result.groupId)?.groupName || result.groupId;
+          if (result.status === 'approve') {
+            logAndToast('qa-review', `QA: '${groupName}' — Approved`, 1, `QA: '${groupName}' — Approved ✓`, 'success');
+          } else {
+            logAndToast('qa-review', `QA: '${groupName}' — Mismatch (${(result.mismatchedPages || []).join(', ')})`, result.mismatchedPages?.length || 1, `QA: '${groupName}' — Mismatch ✗`, 'error');
+          }
         },
         onError: (error: ReviewError) => {
           setGroupedClusters(prev => prev.map(g =>
@@ -2925,6 +3382,8 @@ export default function App() {
               reviewedAt: new Date().toISOString(),
             } : g
           ));
+          const groupName = pendingGroups.find(g => g.id === error.groupId)?.groupName || error.groupId;
+          logAndToast('qa-review', `QA error: '${groupName}' — ${error.error}`, 1, `QA error: '${groupName}'`, 'error');
         },
       },
       controller.signal
@@ -3041,24 +3500,63 @@ export default function App() {
     // Track grouping rate for ETA estimation
     recordGroupingEvent(clustersToGroup.length);
 
+    logAndToast('group', `Grouped into '${groupNameInput.trim()}'`, clustersToGroup.length, `Grouped ${clustersToGroup.length} pages into '${groupNameInput.trim()}'`, 'info');
+
     // Save to IndexedDB
     if (activeProjectId) {
       saveProjectData(newResults, remainingClusters, tokenSummary, newGrouped, stats, datasetStats, fileName);
     }
-  }, [selectedClusters, groupNameInput, clusterSummary, groupedClusters, results, tokenSummary, stats, datasetStats, fileName, activeProjectId, recordGroupingEvent]);
+  }, [selectedClusters, groupNameInput, clusterSummary, groupedClusters, results, tokenSummary, stats, datasetStats, fileName, activeProjectId, recordGroupingEvent, logAndToast]);
 
   // Global Tab key shortcut: press Tab anywhere to group selected pages
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Tab' && !e.shiftKey && selectedClusters.size > 0 && groupNameInput.trim()) {
-        e.preventDefault();
-        e.stopPropagation();
-        handleGroupClusters();
+      if (e.key === 'Tab' && !e.shiftKey) {
+        // Tab in Pages (Ungrouped) → Group selected clusters
+        if (activeTab === 'pages' && selectedClusters.size > 0 && groupNameInput.trim()) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleGroupClusters();
+          return;
+        }
+        // Tab in Pages (Grouped) → Approve selected groups
+        if (activeTab === 'grouped' && selectedGroups.size > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          const groupsToApprove = groupedClusters.filter(g => selectedGroups.has(g.id));
+          groupsToApprove.forEach(g => handleApproveGroup(g.groupName));
+          setSelectedGroups(new Set());
+          setSelectedSubClusters(new Set());
+          return;
+        }
       }
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [handleGroupClusters, selectedClusters.size, groupNameInput]);
+  }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, groupedClusters, handleApproveGroup]);
+
+  // Auto-group approve handler — adds LLM-suggested groups to groupedClusters
+  const handleAutoGroupApprove = useCallback((newGroups: GroupedCluster[]) => {
+    const updatedGrouped = [...groupedClusters, ...newGroups];
+    setGroupedClusters(updatedGrouped);
+
+    // Remove grouped pages from clusterSummary
+    const groupedTokens = new Set<string>();
+    for (const g of newGroups) {
+      for (const c of g.clusters) groupedTokens.add(c.tokens);
+    }
+    const remaining = clusterSummary?.filter(c => !groupedTokens.has(c.tokens)) || null;
+    setClusterSummary(remaining);
+
+    // Also remove from results
+    let newResults = results;
+    if (results) {
+      newResults = results.filter(r => !groupedTokens.has(r.tokens));
+      setResults(newResults);
+    }
+
+    saveProjectData(newResults, remaining, tokenSummary, updatedGrouped, stats, datasetStats, fileName);
+  }, [groupedClusters, clusterSummary, results, tokenSummary, stats, datasetStats, fileName]);
 
   // Ungroup: send selected groups or individual sub-clusters back to Pages (Clusters) tab
   const handleUngroupClusters = () => {
@@ -3079,6 +3577,7 @@ export default function App() {
     newGrouped = newGrouped.filter(g => !selectedGroups.has(g.id));
 
     // Then, handle individual sub-clusters being ungrouped (from groups NOT fully selected)
+    const groupsWithPagesRemoved: string[] = [];
     for (const subKey of selectedSubClusters) {
       const [groupId, clusterTokens] = subKey.split('::');
       if (selectedGroups.has(groupId)) continue; // Already handled above
@@ -3093,18 +3592,10 @@ export default function App() {
           // Group is now empty, remove it
           newGrouped.splice(groupIdx, 1);
         } else {
-          // Update group stats
-          const totalVolume = remainingInGroup.reduce((sum, c) => sum + c.totalVolume, 0);
-          const keywordCount = remainingInGroup.reduce((sum, c) => sum + c.keywordCount, 0);
-          let totalKd = 0, kdCount = 0;
-          remainingInGroup.forEach(c => { if (c.avgKd !== null) { totalKd += c.avgKd * c.keywordCount; kdCount += c.keywordCount; } });
-          newGrouped[groupIdx] = {
-            ...group,
-            clusters: remainingInGroup,
-            totalVolume,
-            keywordCount,
-            avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
-          };
+          // Recalculate group stats after removing sub-cluster
+          newGrouped[groupIdx] = recalcGroupStats(group, remainingInGroup);
+          // Track this group for QA re-review (still has pages, composition changed)
+          groupsWithPagesRemoved.push(group.id);
         }
       }
     }
@@ -3144,6 +3635,13 @@ export default function App() {
 
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
+
+    logAndToast('ungroup', `Ungrouped ${clustersToReturn.length} pages`, clustersToReturn.length, `Ungrouped ${clustersToReturn.length} pages back to ungrouped`, 'warning');
+
+    // Schedule QA re-review for groups that had pages removed but still have remaining pages
+    if (groupsWithPagesRemoved.length > 0) {
+      scheduleReReview(groupsWithPagesRemoved);
+    }
 
     // Save to IndexedDB
     if (activeProjectId) {
@@ -3186,31 +3684,94 @@ export default function App() {
   const approvedPageCount = approvedGroups.reduce((sum, g) => sum + g.clusters.length, 0);
 
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
+    <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
       <div className="max-w-[1600px] mx-auto px-6 py-6">
         
         <header className="mb-3">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold tracking-tight text-zinc-900">SEO Master Tool</h1>
+              <h1 className="text-xl font-semibold tracking-tight text-zinc-900 flex items-center gap-2"><Globe className="w-5 h-5 text-indigo-600" />SEO Master Tool</h1>
               <p className="text-xs text-zinc-400 mt-0.5">Keyword clustering, page grouping, approval workflows & AI content generation</p>
             </div>
-            <div className="flex space-x-1 bg-zinc-200/50 p-1 rounded-lg">
+            <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
               <button
                 onClick={() => setMainTab('group')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
               >
+                <Layers className="w-3.5 h-3.5" />
                 Group
               </button>
               <button
                 onClick={() => setMainTab('generate')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
               >
+                <Sparkles className="w-3.5 h-3.5" />
                 Generate
               </button>
             </div>
           </div>
         </header>
+
+        {/* Breadcrumb navigation */}
+        <div className="flex items-center gap-1 text-xs text-zinc-400 mb-2 min-h-[24px]">
+          <span className="text-zinc-600 font-medium">
+            {mainTab === 'group' ? 'Group' : 'Generate'}
+          </span>
+          {mainTab === 'group' && (
+            <>
+              <ChevronRight className="w-3 h-3" />
+              <span className="text-zinc-600 font-medium capitalize">
+                {groupSubTab === 'data' ? (activeProjectId ? 'Data' : 'Projects') : groupSubTab === 'settings' ? 'Settings' : groupSubTab === 'log' ? 'Log' : groupSubTab}
+              </span>
+              {groupSubTab === 'data' && activeProjectId && (
+                <>
+                  <ChevronRight className="w-3 h-3" />
+                  {editingProjectName ? (
+                    <input
+                      autoFocus
+                      type="text"
+                      defaultValue={projects.find(p => p.id === activeProjectId)?.name || ''}
+                      className="px-1.5 py-0.5 text-xs border border-indigo-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-indigo-400 w-48"
+                      onBlur={(e) => {
+                        const newName = e.target.value.trim();
+                        if (newName && newName !== projects.find(p => p.id === activeProjectId)?.name) {
+                          const updated = projects.map(p => p.id === activeProjectId ? { ...p, name: newName } : p);
+                          setProjects(updated);
+                          // Persist to localStorage + Firestore
+                          try { localStorage.setItem('kwg_projects', JSON.stringify(updated)); } catch {}
+                          setDoc(doc(db, 'projects', activeProjectId), { name: newName }, { merge: true }).catch(() => {});
+                        }
+                        setEditingProjectName(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                        if (e.key === 'Escape') setEditingProjectName(false);
+                      }}
+                    />
+                  ) : (
+                    <button
+                      onClick={() => setEditingProjectName(true)}
+                      className="hover:text-zinc-700 transition-colors text-zinc-600 font-medium hover:underline"
+                      title="Click to rename project"
+                    >
+                      {projects.find(p => p.id === activeProjectId)?.name || '...'}
+                    </button>
+                  )}
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-zinc-600 font-medium capitalize">
+                    {activeTab === 'keywords' ? 'All Keywords' : activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
+                  </span>
+                </>
+              )}
+            </>
+          )}
+          {mainTab === 'generate' && (
+            <>
+              <ChevronRight className="w-3 h-3" />
+              <span className="text-zinc-600 font-medium">Generate 1</span>
+            </>
+          )}
+        </div>
 
         {mainTab === 'group' && (
           <>
@@ -3243,7 +3804,7 @@ export default function App() {
                   <>
                     <span className="text-zinc-300 mx-1">|</span>
                     <FileText className="w-3 h-3 text-emerald-600 shrink-0" />
-                    <span className="text-[11px] text-zinc-500 truncate max-w-[250px]">{fileName}</span>
+                    <span className="text-[11px] text-zinc-500 truncate overflow-hidden">{fileName}</span>
                     <button onClick={reset} className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 bg-zinc-100 border border-zinc-200 rounded hover:bg-zinc-200 transition-colors">
                       <UploadCloud className="w-2.5 h-2.5" /> New
                     </button>
@@ -3254,18 +3815,18 @@ export default function App() {
                 )}
               </div>
               {/* Right: Group sub-tabs */}
-              <div className="flex space-x-1 bg-zinc-200/50 p-0.5 rounded-md">
-                <button onClick={() => setGroupSubTab('data')} className={`px-2 py-1 text-[11px] font-medium rounded transition-all ${groupSubTab === 'data' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700'}`}>
-                  Data
+              <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
+                <button onClick={() => setGroupSubTab('data')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'data' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <Database className="w-3 h-3" />Data
                 </button>
-                <button onClick={() => setGroupSubTab('projects')} className={`px-2 py-1 text-[11px] font-medium rounded transition-all ${groupSubTab === 'projects' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700'}`}>
-                  Projects
+                <button onClick={() => setGroupSubTab('projects')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'projects' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <Folder className="w-3 h-3" />Projects
                 </button>
-                <button onClick={() => setGroupSubTab('how-it-works')} className={`px-2 py-1 text-[11px] font-medium rounded transition-all ${groupSubTab === 'how-it-works' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700'}`}>
-                  How it Works
+                <button onClick={() => setGroupSubTab('settings')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'settings' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <Settings className="w-3 h-3" />Settings
                 </button>
-                <button onClick={() => setGroupSubTab('dictionaries')} className={`px-2 py-1 text-[11px] font-medium rounded transition-all ${groupSubTab === 'dictionaries' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700'}`}>
-                  Dictionaries
+                <button onClick={() => setGroupSubTab('log')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'log' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <ClipboardList className="w-3 h-3" />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
                 </button>
               </div>
             </div>
@@ -3411,9 +3972,9 @@ export default function App() {
 
               {/* Labels Sidebar */}
               {isLabelSidebarOpen && (
-              <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm flex flex-col w-[280px] shrink-0 overflow-hidden">
+              <div className="bg-white border border-zinc-100 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col w-[280px] shrink-0 overflow-hidden">
                 <div className="px-4 py-3 border-b border-zinc-200 flex items-center justify-between shrink-0">
-                  <span className="text-sm font-semibold text-zinc-700 uppercase tracking-wide">Labels</span>
+                  <span className="text-sm font-semibold text-zinc-700 uppercase tracking-wide flex items-center gap-1.5"><Bookmark className="w-3.5 h-3.5" />Labels</span>
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => {
@@ -3621,10 +4182,10 @@ export default function App() {
               )}
 
               {/* Keyword Management */}
-              <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm flex flex-col flex-1 min-w-0">
-              <div className="px-4 py-2 border-b border-zinc-200 bg-zinc-50/50 flex flex-col shrink-0 relative z-20 gap-1.5">
+              <div className="bg-white border border-zinc-100 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col flex-1 min-w-0">
+              <div className="px-4 py-2.5 border-b border-zinc-100 bg-zinc-50/30 flex flex-col shrink-0 relative z-20 gap-1.5">
                 <div className="flex items-center gap-3">
-                  <h3 className="text-sm font-semibold text-zinc-900">Keyword Management</h3>
+                  <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Hash className="w-3.5 h-3.5 text-zinc-500" />Keyword Management</h3>
                   {/* AI Review stats — always visible */}
                   {(() => {
                     const allGroups = [...groupedClusters, ...approvedGroups];
@@ -3645,18 +4206,18 @@ export default function App() {
                 </div>
                 {/* Row 1: Tabs with live counts */}
                 <div className="flex items-center gap-4">
-                  <div className="flex space-x-1 bg-zinc-200/50 p-1 rounded-lg w-fit">
+                  <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg w-fit">
                     <button
-                      onClick={() => switchTab('keywords')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'keywords' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      onClick={() => switchTab('auto-group')}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'auto-group' ? 'bg-gradient-to-r from-violet-500 to-purple-500 shadow-sm text-white' : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}
                     >
-                      All {(effectiveResults?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
+                      <Zap className="w-3 h-3" />Auto-Group
                     </button>
                     <button
                       onClick={() => switchTab('pages')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'pages' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'pages' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
-                      Pages (Ungrouped) {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
+                      <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => {
@@ -3665,22 +4226,22 @@ export default function App() {
                         }
                         switchTab('grouped');
                       }}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'grouped' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'grouped' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
-                      Pages (Grouped) {effectiveGrouped.length > 0 && <span className="text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
+                      <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
                       {(() => { const mc = groupedClusters.filter(g => g.reviewStatus === 'mismatch').length; return mc > 0 ? <span className="ml-1 px-1 py-0.5 text-[9px] font-bold bg-red-100 text-red-700 rounded-full">{mc}</span> : null; })()}
                     </button>
                     <button
                       onClick={() => switchTab('approved')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
-                      Pages (Approved) {approvedGroups.length > 0 && <span className="text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
+                      <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('blocked')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
-                      Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
+                      <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
                     </button>
                   </div>
                 </div>
@@ -3813,20 +4374,14 @@ export default function App() {
                       </>
                     )}
 
-                    {/* Pages (Approved): Unapprove button only */}
+                    {/* Pages (Approved): Unapprove — handles both entire groups AND individual pages */}
                     {activeTab === 'approved' && (
                       <button
-                        onClick={() => {
-                          const groupsToUnapprove = approvedGroups.filter(g => selectedGroups.has(g.id));
-                          if (groupsToUnapprove.length > 0) {
-                            groupsToUnapprove.forEach(g => handleUnapproveGroup(g.groupName));
-                            setSelectedGroups(new Set());
-                          }
-                        }}
-                        disabled={selectedGroups.size === 0}
+                        onClick={handleRemoveFromApproved}
+                        disabled={selectedGroups.size === 0 && selectedSubClusters.size === 0}
                         className="px-4 py-1.5 text-xs font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
                       >
-                        Unapprove ({selectedGroups.size})
+                        Unapprove ({selectedGroups.size + selectedSubClusters.size})
                       </button>
                     )}
                   </div>
@@ -3844,566 +4399,109 @@ export default function App() {
                 />
               </div>
 
-              <div className="overflow-auto flex-1 rounded-b-2xl">
+              <div className="overflow-auto flex-1 rounded-b-2xl" style={activeTab === 'auto-group' ? { display: 'none' } : undefined}>
 
-                <table className="text-left text-sm relative">
-                  <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#e4e4e7]">
-                    {activeTab === 'keywords' ? (
-                      <>
-                      <tr>
-                        <th className="px-3 py-2 whitespace-nowrap">Page Name</th>
-                        <th className="px-3 py-2 whitespace-nowrap min-w-[220px]">Tokens</th>
-                        <th className="px-1.5 py-2 whitespace-nowrap text-right">Len</th>
-                        <th className="px-2 py-2 whitespace-nowrap">Keyword</th>
-                        <th className="px-1.5 py-2 whitespace-nowrap text-right">Vol.</th>
-                        <th className="px-1.5 py-2 whitespace-nowrap text-right">KD</th>
-                        <th className="px-3 py-2 whitespace-nowrap">Label</th>
-                        <th className="px-3 py-2 whitespace-nowrap">City</th>
-                        <th className="px-3 py-2 whitespace-nowrap">State</th>
-                      </tr>
-                      <tr className="bg-zinc-100/50">
-                        <td className="px-3 py-0.5"></td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-0.5 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minLen} onChange={(e) => { setMinLen(e.target.value); setCurrentPage(1); }} className="w-8 px-0.5 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Len" />
-                            <input type="number" placeholder="↑" value={maxLen} onChange={(e) => { setMaxLen(e.target.value); setCurrentPage(1); }} className="w-8 px-0.5 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Len" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-0.5 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minVolume} onChange={(e) => { setMinVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-0.5 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Vol" />
-                            <input type="number" placeholder="↑" value={maxVolume} onChange={(e) => { setMaxVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-0.5 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Vol" />
-                          </div>
-                        </td>
-                        <td className="px-0.5 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKd} onChange={(e) => { setMinKd(e.target.value); setCurrentPage(1); }} className="w-8 px-0.5 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KD" />
-                            <input type="number" placeholder="↑" value={maxKd} onChange={(e) => { setMaxKd(e.target.value); setCurrentPage(1); }} className="w-8 px-0.5 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KD" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="relative">
-                            <button
-                              onClick={() => setIsLabelDropdownOpen(!isLabelDropdownOpen)}
-                              className="px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white hover:bg-zinc-50 flex items-center gap-1 w-full"
-                            >
-                              <Filter className="w-3 h-3 text-zinc-400" />
-                              <span className="text-zinc-500 truncate">{excludedLabels.size > 0 ? `${excludedLabels.size} hidden` : 'All'}</span>
-                            </button>
-                            {isLabelDropdownOpen && (
-                              <>
-                                <div className="fixed inset-0 z-10" onClick={() => setIsLabelDropdownOpen(false)} />
-                                <div className="absolute left-0 mt-1 w-52 bg-white border border-zinc-200 rounded-xl shadow-lg z-20 p-2 flex flex-col gap-0.5">
-                                  {['Location', 'Number', 'FAQ', 'Commercial', 'Local', 'Year', 'Informational', 'Navigational'].map(label => (
-                                    <label key={label} className="flex items-center justify-between gap-2 px-2 py-1 hover:bg-zinc-50 rounded-lg cursor-pointer">
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                          type="checkbox"
-                                          checked={!excludedLabels.has(label)}
-                                          onChange={(e) => {
-                                            const newLabels = new Set(excludedLabels);
-                                            if (!e.target.checked) newLabels.add(label);
-                                            else newLabels.delete(label);
-                                            setExcludedLabels(newLabels);
-                                            setCurrentPage(1);
-                                          }}
-                                          className="rounded text-indigo-600 focus:ring-indigo-500"
-                                        />
-                                        <span className="text-xs text-zinc-700">{label}</span>
-                                      </div>
-                                      <span className="text-[10px] font-mono text-zinc-400">{(labelCounts[label] || 0).toLocaleString()}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 city..." value={filterCity} onChange={(e) => { setFilterCity(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 state..." value={filterState} onChange={(e) => { setFilterState(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                      </tr>
-                      </>
-                    ) : activeTab === 'pages' ? (
-                      <>
-                      <tr>
-                        <th className="px-3 py-1.5 whitespace-nowrap w-12 text-center" rowSpan={2}>
-                          <input 
-                            type="checkbox" 
-                            className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                            checked={paginatedClusters.length > 0 && paginatedClusters.every(c => selectedClusters.has(c.tokens))}
-                            onChange={(e) => {
-                              const newSelected = new Set(selectedClusters);
-                              if (e.target.checked) {
-                                paginatedClusters.forEach(c => newSelected.add(c.tokens));
-                              } else {
-                                paginatedClusters.forEach(c => newSelected.delete(c.tokens));
-                              }
-                              setSelectedClusters(newSelected);
-                              if (newSelected.size > 0) {
-                                let highest: ClusterSummary | null = null;
-                                for (const tokens of newSelected) {
-                                  const c = clusterByTokens.get(tokens);
-                                  if (c && (!highest || c.totalVolume > highest.totalVolume)) {
-                                    highest = c;
-                                  }
-                                }
-                                if (highest) setGroupNameInput(highest.pageName);
-                              } else {
-                                setGroupNameInput('');
-                              }
-                            }}
-                          />
-                        </th>
-                        <th 
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none"
-                          onClick={() => handleSort('pageName')}
-                        >
-                          <div className="flex items-center gap-2">
-                            Page Name
-                            <SortIcon columnKey="pageName" />
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none min-w-[220px]"
-                          onClick={() => handleSort('tokens')}
-                        >
-                          <div className="flex items-center gap-2">
-                            Tokens
-                            <SortIcon columnKey="tokens" />
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => handleSort('pageNameLen')}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            Len
-                            <SortIcon columnKey="pageNameLen" />
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => handleSort('keywordCount')}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            KWs
-                            <SortIcon columnKey="keywordCount" />
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => handleSort('totalVolume')}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            Vol.
-                            <SortIcon columnKey="totalVolume" />
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => handleSort('avgKd')}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            KD
-                            <SortIcon columnKey="avgKd" />
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none"
-                          onClick={() => handleSort('label')}
-                        >
-                          <div className="flex items-center gap-2">
-                            Label
-                            <SortIcon columnKey="label" />
-                          </div>
-                        </th>
-                        <th 
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none"
-                          onClick={() => handleSort('locationCity')}
-                        >
-                          <div className="flex items-center gap-2">
-                            City
-                            <SortIcon columnKey="locationCity" />
-                          </div>
-                        </th>
-                        <th 
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none"
-                          onClick={() => handleSort('locationState')}
-                        >
-                          <div className="flex items-center gap-2">
-                            State
-                            <SortIcon columnKey="locationState" />
-                          </div>
-                        </th>
-                      </tr>
-                      {/* Filter row */}
-                      <tr className="bg-zinc-100/50">
-                        <td className="px-3 py-0.5"></td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minLen} onChange={(e) => { setMinLen(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Len" />
-                            <input type="number" placeholder="↑" value={maxLen} onChange={(e) => { setMaxLen(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Len" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKwInCluster} onChange={(e) => { setMinKwInCluster(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KWs" />
-                            <input type="number" placeholder="↑" value={maxKwInCluster} onChange={(e) => { setMaxKwInCluster(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KWs" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minVolume} onChange={(e) => { setMinVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Vol" />
-                            <input type="number" placeholder="↑" value={maxVolume} onChange={(e) => { setMaxVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Vol" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKd} onChange={(e) => { setMinKd(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KD" />
-                            <input type="number" placeholder="↑" value={maxKd} onChange={(e) => { setMaxKd(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KD" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="relative">
-                            <button
-                              onClick={() => setIsLabelDropdownOpen(!isLabelDropdownOpen)}
-                              className="px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white hover:bg-zinc-50 flex items-center gap-1 w-full"
-                            >
-                              <Filter className="w-3 h-3 text-zinc-400" />
-                              <span className="text-zinc-500 truncate">{excludedLabels.size > 0 ? `${excludedLabels.size} hidden` : 'All'}</span>
-                            </button>
-                            {isLabelDropdownOpen && (
-                              <>
-                                <div className="fixed inset-0 z-10" onClick={() => setIsLabelDropdownOpen(false)} />
-                                <div className="absolute left-0 mt-1 w-52 bg-white border border-zinc-200 rounded-xl shadow-lg z-20 p-2 flex flex-col gap-0.5">
-                                  {['Location', 'Number', 'FAQ', 'Commercial', 'Local', 'Year', 'Informational', 'Navigational'].map(label => (
-                                    <label key={label} className="flex items-center justify-between gap-2 px-2 py-1 hover:bg-zinc-50 rounded-lg cursor-pointer">
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                          type="checkbox"
-                                          checked={!excludedLabels.has(label)}
-                                          onChange={(e) => {
-                                            const newLabels = new Set(excludedLabels);
-                                            if (!e.target.checked) newLabels.add(label);
-                                            else newLabels.delete(label);
-                                            setExcludedLabels(newLabels);
-                                            setCurrentPage(1);
-                                          }}
-                                          className="rounded text-indigo-600 focus:ring-indigo-500"
-                                        />
-                                        <span className="text-xs text-zinc-700">{label}</span>
-                                      </div>
-                                      <span className="text-[10px] font-mono text-zinc-400">{(labelCounts[label] || 0).toLocaleString()}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 city..." value={filterCity} onChange={(e) => { setFilterCity(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 state..." value={filterState} onChange={(e) => { setFilterState(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                      </tr>
-                      </>
-                    ) : activeTab === 'approved' ? (
-                      <>
-                      <tr>
-                        <th className="px-3 py-1.5 whitespace-nowrap w-12 text-center" rowSpan={2}>
-                          <input
-                            type="checkbox"
-                            className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                            checked={filteredApprovedGroups.length > 0 && filteredApprovedGroups.every(g => selectedGroups.has(g.id))}
-                            onChange={(e) => {
-                              const newSelected = new Set(selectedGroups);
-                              if (e.target.checked) {
-                                filteredApprovedGroups.forEach(g => newSelected.add(g.id));
-                              } else {
-                                filteredApprovedGroups.forEach(g => newSelected.delete(g.id));
-                              }
-                              setSelectedGroups(newSelected);
-                            }}
-                          />
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'groupName', direction: prev.key === 'groupName' && prev.direction === 'asc' ? 'desc' : 'asc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center gap-2">
-                            Group / Page Name
-                            {groupedSortConfig.key === 'groupName' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left min-w-[220px]">Tokens</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-center w-[60px]">Status</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-right">Len</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-right">Pages</th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'keywordCount', direction: prev.key === 'keywordCount' && prev.direction === 'desc' ? 'asc' : 'desc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            KWs
-                            {groupedSortConfig.key === 'keywordCount' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'totalVolume', direction: prev.key === 'totalVolume' && prev.direction === 'desc' ? 'asc' : 'desc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            Vol.
-                            {groupedSortConfig.key === 'totalVolume' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'avgKd', direction: prev.key === 'avgKd' && prev.direction === 'desc' ? 'asc' : 'desc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            KD
-                            {groupedSortConfig.key === 'avgKd' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left">Label</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left">City</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left">State</th>
-                      </tr>
-                      {/* Filter row — matches Pages tabs exactly */}
-                      <tr className="bg-zinc-100/50">
-                        <td className="px-3 py-0.5"></td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-1 py-0.5"></td>{/* Status — no filter */}
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minLen} onChange={(e) => { setMinLen(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Len" />
-                            <input type="number" placeholder="↑" value={maxLen} onChange={(e) => { setMaxLen(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Len" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKwInCluster} onChange={(e) => { setMinKwInCluster(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KWs" />
-                            <input type="number" placeholder="↑" value={maxKwInCluster} onChange={(e) => { setMaxKwInCluster(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KWs" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minVolume} onChange={(e) => { setMinVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Vol" />
-                            <input type="number" placeholder="↑" value={maxVolume} onChange={(e) => { setMaxVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Vol" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKd} onChange={(e) => { setMinKd(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KD" />
-                            <input type="number" placeholder="↑" value={maxKd} onChange={(e) => { setMaxKd(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KD" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="relative">
-                            <button
-                              onClick={() => setIsLabelDropdownOpen(!isLabelDropdownOpen)}
-                              className="px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white hover:bg-zinc-50 flex items-center gap-1 w-full"
-                            >
-                              <Filter className="w-3 h-3 text-zinc-400" />
-                              <span className="text-zinc-500 truncate">{excludedLabels.size > 0 ? `${excludedLabels.size} hidden` : 'All'}</span>
-                            </button>
-                            {isLabelDropdownOpen && (
-                              <>
-                                <div className="fixed inset-0 z-10" onClick={() => setIsLabelDropdownOpen(false)} />
-                                <div className="absolute left-0 mt-1 w-52 bg-white border border-zinc-200 rounded-xl shadow-lg z-20 p-2 flex flex-col gap-0.5">
-                                  {['Location', 'Number', 'FAQ', 'Commercial', 'Local', 'Year', 'Informational', 'Navigational'].map(label => (
-                                    <label key={label} className="flex items-center justify-between gap-2 px-2 py-1 hover:bg-zinc-50 rounded-lg cursor-pointer">
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                          type="checkbox"
-                                          checked={!excludedLabels.has(label)}
-                                          onChange={(e) => {
-                                            const newLabels = new Set(excludedLabels);
-                                            if (!e.target.checked) newLabels.add(label);
-                                            else newLabels.delete(label);
-                                            setExcludedLabels(newLabels);
-                                            setCurrentPage(1);
-                                          }}
-                                          className="rounded text-indigo-600 focus:ring-indigo-500"
-                                        />
-                                        <span className="text-xs text-zinc-700">{label}</span>
-                                      </div>
-                                      <span className="text-[10px] font-mono text-zinc-400">{(labelCounts[label] || 0).toLocaleString()}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 city..." value={filterCity} onChange={(e) => { setFilterCity(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 state..." value={filterState} onChange={(e) => { setFilterState(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                      </tr>
-                      </>
-                    ) : activeTab === 'grouped' ? (
-                      <>
-                      <tr>
-                        <th className="px-3 py-1.5 whitespace-nowrap w-12 text-center" rowSpan={2}>
-                          <input
-                            type="checkbox"
-                            className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                            checked={paginatedGroupedClusters.length > 0 && paginatedGroupedClusters.every(g => selectedGroups.has(g.id))}
-                            onChange={(e) => {
-                              const newSelected = new Set(selectedGroups);
-                              if (e.target.checked) {
-                                paginatedGroupedClusters.forEach(g => newSelected.add(g.id));
-                              } else {
-                                paginatedGroupedClusters.forEach(g => newSelected.delete(g.id));
-                              }
-                              setSelectedGroups(newSelected);
-                            }}
-                          />
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'groupName', direction: prev.key === 'groupName' && prev.direction === 'asc' ? 'desc' : 'asc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center gap-2">
-                            Group / Page Name
-                            {groupedSortConfig.key === 'groupName' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left min-w-[220px]">Tokens</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-center w-[60px]">Status</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-right">Len</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-right">Pages</th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'keywordCount', direction: prev.key === 'keywordCount' && prev.direction === 'desc' ? 'asc' : 'desc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            KWs
-                            {groupedSortConfig.key === 'keywordCount' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'totalVolume', direction: prev.key === 'totalVolume' && prev.direction === 'desc' ? 'asc' : 'desc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            Vol.
-                            {groupedSortConfig.key === 'totalVolume' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th
-                          className="px-3 py-2 whitespace-nowrap cursor-pointer hover:bg-zinc-100 transition-colors select-none text-right"
-                          onClick={() => { setGroupedSortConfig(prev => ({ key: 'avgKd', direction: prev.key === 'avgKd' && prev.direction === 'desc' ? 'asc' : 'desc' })); setCurrentPage(1); }}
-                        >
-                          <div className="flex items-center justify-end gap-2">
-                            KD
-                            {groupedSortConfig.key === 'avgKd' && (groupedSortConfig.direction === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />)}
-                          </div>
-                        </th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left">Label</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left">City</th>
-                        <th className="px-3 py-2 whitespace-nowrap text-left">State</th>
-                      </tr>
-                      {/* Filter row — matches Pages (Ungrouped) exactly */}
-                      <tr className="bg-zinc-100/50">
-                        <td className="px-3 py-0.5"></td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-1 py-0.5"></td>{/* Status — no filter */}
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minLen} onChange={(e) => { setMinLen(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Len" />
-                            <input type="number" placeholder="↑" value={maxLen} onChange={(e) => { setMaxLen(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Len" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5"></td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKwInCluster} onChange={(e) => { setMinKwInCluster(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KWs" />
-                            <input type="number" placeholder="↑" value={maxKwInCluster} onChange={(e) => { setMaxKwInCluster(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KWs" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minVolume} onChange={(e) => { setMinVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min Vol" />
-                            <input type="number" placeholder="↑" value={maxVolume} onChange={(e) => { setMaxVolume(e.target.value); setCurrentPage(1); }} className="w-10 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max Vol" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="flex items-center gap-0.5">
-                            <input type="number" placeholder="↓" value={minKd} onChange={(e) => { setMinKd(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Min KD" />
-                            <input type="number" placeholder="↑" value={maxKd} onChange={(e) => { setMaxKd(e.target.value); setCurrentPage(1); }} className="w-8 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" title="Max KD" />
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <div className="relative">
-                            <button
-                              onClick={() => setIsLabelDropdownOpen(!isLabelDropdownOpen)}
-                              className="px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white hover:bg-zinc-50 flex items-center gap-1 w-full"
-                            >
-                              <Filter className="w-3 h-3 text-zinc-400" />
-                              <span className="text-zinc-500 truncate">{excludedLabels.size > 0 ? `${excludedLabels.size} hidden` : 'All'}</span>
-                            </button>
-                            {isLabelDropdownOpen && (
-                              <>
-                                <div className="fixed inset-0 z-10" onClick={() => setIsLabelDropdownOpen(false)} />
-                                <div className="absolute left-0 mt-1 w-52 bg-white border border-zinc-200 rounded-xl shadow-lg z-20 p-2 flex flex-col gap-0.5">
-                                  {['Location', 'Number', 'FAQ', 'Commercial', 'Local', 'Year', 'Informational', 'Navigational'].map(label => (
-                                    <label key={label} className="flex items-center justify-between gap-2 px-2 py-1 hover:bg-zinc-50 rounded-lg cursor-pointer">
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                          type="checkbox"
-                                          checked={!excludedLabels.has(label)}
-                                          onChange={(e) => {
-                                            const newLabels = new Set(excludedLabels);
-                                            if (!e.target.checked) newLabels.add(label);
-                                            else newLabels.delete(label);
-                                            setExcludedLabels(newLabels);
-                                            setCurrentPage(1);
-                                          }}
-                                          className="rounded text-indigo-600 focus:ring-indigo-500"
-                                        />
-                                        <span className="text-xs text-zinc-700">{label}</span>
-                                      </div>
-                                      <span className="text-[10px] font-mono text-zinc-400">{(labelCounts[label] || 0).toLocaleString()}</span>
-                                    </label>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 city..." value={filterCity} onChange={(e) => { setFilterCity(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                        <td className="px-1 py-0.5">
-                          <input type="text" placeholder="🔍 state..." value={filterState} onChange={(e) => { setFilterState(e.target.value); setCurrentPage(1); }} className="w-20 px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400" />
-                        </td>
-                      </tr>
-                      </>
-                    ) : activeTab === 'blocked' ? (
-                      <tr>
-                        <th className="px-3 py-1.5 whitespace-nowrap text-left">Keyword</th>
-                        <th className="px-3 py-1.5 whitespace-nowrap text-left min-w-[200px]">Tokens</th>
-                        <th className="px-3 py-1.5 whitespace-nowrap text-right">Vol.</th>
-                        <th className="px-3 py-1.5 whitespace-nowrap text-right">KD</th>
-                        <th className="px-3 py-1.5 whitespace-nowrap text-left">Reason</th>
-                      </tr>
-                    ) : null}
-                  </thead>
+                <table className="text-left text-sm relative w-full table-fixed">
+                  {/* Shared TableHeader — single source of truth for all tab headers */}
+                  {activeTab === 'keywords' ? (
+                    <TableHeader
+                      columns={KEYWORDS_COLUMNS}
+                      showCheckbox={false}
+                      sortKey={sortConfig[0]?.key ?? null}
+                      sortDirection={sortConfig[0]?.direction ?? 'desc'}
+                      sortStack={sortConfig as Array<{key: string, direction: 'asc' | 'desc'}>}
+                      onSort={(key, additive) => handleSort(key as keyof ClusterSummary, additive)}
+                      filters={filterBag}
+                      setCurrentPage={setCurrentPage}
+                    />
+                  ) : activeTab === 'pages' ? (
+                    <TableHeader
+                      columns={PAGES_COLUMNS}
+                      showCheckbox={true}
+                      allChecked={paginatedClusters.length > 0 && paginatedClusters.every(c => selectedClusters.has(c.tokens))}
+                      onCheckAll={(checked) => {
+                        const newSelected = new Set(selectedClusters);
+                        if (checked) {
+                          paginatedClusters.forEach(c => newSelected.add(c.tokens));
+                        } else {
+                          paginatedClusters.forEach(c => newSelected.delete(c.tokens));
+                        }
+                        setSelectedClusters(newSelected);
+                        if (newSelected.size > 0) {
+                          let highest: ClusterSummary | null = null;
+                          for (const tokens of newSelected) {
+                            const c = clusterByTokens.get(tokens);
+                            if (c && (!highest || c.totalVolume > highest.totalVolume)) highest = c;
+                          }
+                          if (highest) setGroupNameInput(highest.pageName);
+                        } else {
+                          setGroupNameInput('');
+                        }
+                      }}
+                      sortKey={sortConfig[0]?.key ?? null}
+                      sortDirection={sortConfig[0]?.direction ?? 'desc'}
+                      sortStack={sortConfig as Array<{key: string, direction: 'asc' | 'desc'}>}
+                      onSort={(key, additive) => handleSort(key as keyof ClusterSummary, additive)}
+                      filters={filterBag}
+                      setCurrentPage={setCurrentPage}
+                    />
+                  ) : activeTab === 'approved' ? (
+                    <TableHeader
+                      columns={APPROVED_COLUMNS}
+                      showCheckbox={true}
+                      allChecked={filteredApprovedGroups.length > 0 && filteredApprovedGroups.every(g => selectedGroups.has(g.id))}
+                      onCheckAll={(checked) => {
+                        const newGroups = new Set(selectedGroups);
+                        const newSubs = new Set(selectedSubClusters);
+                        if (checked) {
+                          filteredApprovedGroups.forEach(g => { newGroups.add(g.id); g.clusters.forEach(c => newSubs.add(`${g.id}::${c.tokens}`)); });
+                        } else {
+                          filteredApprovedGroups.forEach(g => { newGroups.delete(g.id); g.clusters.forEach(c => newSubs.delete(`${g.id}::${c.tokens}`)); });
+                        }
+                        setSelectedGroups(newGroups);
+                        setSelectedSubClusters(newSubs);
+                      }}
+                      sortKey={groupedSortConfig[0]?.key ?? null}
+                      sortDirection={groupedSortConfig[0]?.direction ?? 'desc'}
+                      sortStack={groupedSortConfig}
+                      onSort={handleGroupedSort}
+                      filters={filterBag}
+                      setCurrentPage={setCurrentPage}
+                    />
+                  ) : activeTab === 'grouped' ? (
+                    <TableHeader
+                      columns={GROUPED_COLUMNS}
+                      showCheckbox={true}
+                      allChecked={paginatedGroupedClusters.length > 0 && paginatedGroupedClusters.every(g => selectedGroups.has(g.id))}
+                      onCheckAll={(checked) => {
+                        const newGroups = new Set(selectedGroups);
+                        const newSubs = new Set(selectedSubClusters);
+                        if (checked) {
+                          paginatedGroupedClusters.forEach(g => { newGroups.add(g.id); g.clusters.forEach(c => newSubs.add(`${g.id}::${c.tokens}`)); });
+                        } else {
+                          paginatedGroupedClusters.forEach(g => { newGroups.delete(g.id); g.clusters.forEach(c => newSubs.delete(`${g.id}::${c.tokens}`)); });
+                        }
+                        setSelectedGroups(newGroups);
+                        setSelectedSubClusters(newSubs);
+                      }}
+                      sortKey={groupedSortConfig[0]?.key ?? null}
+                      sortDirection={groupedSortConfig[0]?.direction ?? 'desc'}
+                      sortStack={groupedSortConfig}
+                      onSort={handleGroupedSort}
+                      filters={filterBag}
+                      setCurrentPage={setCurrentPage}
+                    />
+                  ) : activeTab === 'blocked' ? (
+                    <TableHeader
+                      columns={BLOCKED_COLUMNS}
+                      showCheckbox={false}
+                      sortKey={blockedSortConfig.key}
+                      sortDirection={blockedSortConfig.direction}
+                      onSort={handleBlockedSort}
+                      filters={filterBag}
+                      setCurrentPage={setCurrentPage}
+                    />
+                  ) : null}
                   <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
                     {activeTab === 'keywords' && paginatedResults.map((row, idx) => (
                       <KeywordRow
@@ -4528,27 +4626,33 @@ export default function App() {
                         groupActionButton={
                           <button
                             onClick={() => handleApproveGroup(row.groupName)}
-                            className="px-2 py-0.5 text-[10px] font-medium rounded bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors"
-                            title="Move to Pages (Approved)"
+                            className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 transition-colors text-[10px] font-bold shrink-0"
+                            title="Approve group"
                           >
-                            Approve
+                            ✓
                           </button>
                         }
                       />
                     ))}
 
                     {activeTab === 'approved' && (() => {
-                      // Apply same sorting as grouped tab
+                      // Apply same multi-sorting as grouped tab
                       const sorted = [...filteredApprovedGroups].sort((a, b) => {
-                        const { key, direction } = groupedSortConfig;
-                        let aVal: any, bVal: any;
-                        if (key === 'groupName') { aVal = a.groupName.toLowerCase(); bVal = b.groupName.toLowerCase(); }
-                        else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
-                        else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
-                        else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
-                        else { aVal = 0; bVal = 0; }
-                        if (typeof aVal === 'string') return direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-                        return direction === 'asc' ? aVal - bVal : bVal - aVal;
+                        for (const { key, direction } of groupedSortConfig) {
+                          let aVal: any, bVal: any;
+                          if (key === 'groupName') { aVal = a.groupName.toLowerCase(); bVal = b.groupName.toLowerCase(); }
+                          else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
+                          else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
+                          else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
+                          else { aVal = 0; bVal = 0; }
+                          if (typeof aVal === 'string') {
+                            const cmp = aVal.localeCompare(bVal);
+                            if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
+                            continue;
+                          }
+                          if (aVal !== bVal) return direction === 'asc' ? aVal - bVal : bVal - aVal;
+                        }
+                        return 0;
                       });
                       // Apply same pagination
                       const paginated = sorted.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -4608,10 +4712,10 @@ export default function App() {
                         groupActionButton={
                           <button
                             onClick={() => handleUnapproveGroup(group.groupName)}
-                            className="px-2 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors"
-                            title="Move back to Pages (Grouped)"
+                            className="w-5 h-5 flex items-center justify-center rounded bg-amber-500 text-white hover:bg-amber-600 transition-colors text-[10px] font-bold shrink-0"
+                            title="Unapprove group"
                           >
-                            Unapprove
+                            ↩
                           </button>
                         }
                       />
@@ -4619,28 +4723,41 @@ export default function App() {
 
                     {activeTab === 'blocked' && filteredBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row, idx) => (
                       <tr key={idx} className="hover:bg-red-50/50 transition-colors">
-                        <td className="px-3 py-1 text-sm text-zinc-700">{row.keyword}</td>
-                        <td className="px-3 py-1 text-xs font-mono">
+                        <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 break-words">{row.keyword}</td>
+                        <td className="px-3 py-0.5 overflow-hidden">
                           {row.tokenArr ? (
                             <div className="flex flex-wrap gap-1">
                               {row.tokenArr.map((t, i) => (
-                                <span key={i} className="px-1.5 py-0.5 bg-zinc-100 text-zinc-600 border border-zinc-200 rounded-md text-[11px]">{t}</span>
+                                <span key={i} className="px-1.5 py-0.5 bg-zinc-100 text-zinc-600 border border-zinc-200 rounded-md text-[12px]">{t}</span>
                               ))}
                             </div>
                           ) : <span className="text-zinc-400">-</span>}
                         </td>
-                        <td className="px-3 py-1 text-sm text-right text-zinc-600 tabular-nums">{row.volume.toLocaleString()}</td>
-                        <td className="px-3 py-1 text-sm text-right text-zinc-600 tabular-nums">{row.kd !== null ? row.kd : '-'}</td>
-                        <td className="px-3 py-1 text-sm">
-                          <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-medium">{row.reason}</span>
+                        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{row.volume.toLocaleString()}</td>
+                        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{row.kd !== null ? row.kd : '-'}</td>
+                        <td className="px-3 py-0.5 text-[12px]">
+                          <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded-full text-[10px] font-medium">{row.reason}</span>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              
-              <div className="px-4 py-2 border-t border-zinc-200 bg-zinc-50 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0">
+
+              {/* Auto-Group Panel — replaces table when auto-group tab is active */}
+              {activeTab === 'auto-group' && (
+                <AutoGroupPanel
+                  key={activeProjectId || 'no-project'}
+                  effectiveClusters={effectiveClusters}
+                  onApproveGroups={handleAutoGroupApprove}
+                  groupReviewSettingsRef={groupReviewSettingsRef}
+                  logAndToast={logAndToast}
+                  persistedSuggestions={autoGroupSuggestions}
+                  onSuggestionsChange={setAutoGroupSuggestions}
+                />
+              )}
+
+              <div className="px-4 py-2 border-t border-zinc-200 bg-zinc-50 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0" style={activeTab === 'auto-group' ? { display: 'none' } : undefined}>
                 <div className="flex items-center gap-2 text-sm text-zinc-500">
                   <span>Show</span>
                   <select 
@@ -4682,10 +4799,10 @@ export default function App() {
               {/* End Keyword Management */}
 
               {/* Token Management Panel */}
-              <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm flex flex-col w-[340px] shrink-0">
+              <div className="bg-white border border-zinc-100 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col w-[340px] shrink-0">
                 <div className="px-4 py-3 border-b border-zinc-200 shrink-0 space-y-2">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-zinc-900">Token Management</h3>
+                    <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Filter className="w-3.5 h-3.5 text-zinc-500" />Token Management</h3>
                     {blockedTokens.size > 0 && (
                       <span className="text-[10px] font-medium text-red-600">{blockedTokens.size} blocked</span>
                     )}
@@ -4726,6 +4843,14 @@ export default function App() {
                         Block ({selectedMgmtTokens.size})
                       </button>
                     )}
+                    {selectedMgmtTokens.size >= 2 && tokenMgmtSubTab !== 'blocked' && (
+                      <button
+                        onClick={handleOpenMergeModal}
+                        className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-indigo-500 text-white hover:bg-indigo-600 transition-colors whitespace-nowrap"
+                      >
+                        Merge ({selectedMgmtTokens.size})
+                      </button>
+                    )}
                     {selectedMgmtTokens.size > 0 && tokenMgmtSubTab === 'blocked' && (
                       <button
                         onClick={() => handleUnblockTokens(Array.from(selectedMgmtTokens))}
@@ -4737,9 +4862,36 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Merged tokens display */}
+                {tokenMergeRules.length > 0 && tokenMgmtSubTab !== 'blocked' && (
+                  <div className="px-2 py-1.5 border-b border-zinc-200 bg-indigo-50/30">
+                    <div className="text-[10px] font-medium text-indigo-600 mb-1">Merged Tokens ({tokenMergeRules.length})</div>
+                    <div className="space-y-1">
+                      {tokenMergeRules.map(rule => (
+                        <div key={rule.id} className="flex flex-wrap items-center gap-1">
+                          <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">{rule.parentToken}</span>
+                          <span className="text-[9px] text-zinc-400">←</span>
+                          {rule.childTokens.map(child => (
+                            <span key={child} className="inline-flex items-center gap-0.5 text-[10px] text-zinc-600 bg-zinc-100 px-1 py-0.5 rounded border border-zinc-200">
+                              {child}
+                              <button
+                                onClick={() => handleUndoMergeChild(rule.id, child)}
+                                className="text-zinc-400 hover:text-red-500 transition-colors ml-0.5"
+                                title={`Undo merge: restore '${child}'`}
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="overflow-auto flex-1">
                   <table className="w-full text-left text-xs">
-                    <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#e4e4e7]">
+                    <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#f0f0f0]">
                       <tr>
                         <th className="px-2 py-1.5 w-8">
                           <input
@@ -4793,6 +4945,9 @@ export default function App() {
                             {tokenMgmtSort.key === 'avgKd' && (tokenMgmtSort.direction === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
                           </div>
                         </th>
+                        {tokenMgmtSubTab !== 'blocked' && (
+                          <th className="px-1 py-1.5 w-6"></th>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
@@ -4820,14 +4975,61 @@ export default function App() {
                               }}
                             />
                           </td>
-                          <td className="px-2 py-1 font-mono text-zinc-800">{row.token}</td>
+                          {/* Star icon — add/remove from Universal Blocked list (only in blocked tab) */}
+                          {tokenMgmtSubTab === 'blocked' && (
+                            <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => {
+                                  setUniversalBlockedTokens(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(row.token)) next.delete(row.token);
+                                    else next.add(row.token);
+                                    return next;
+                                  });
+                                }}
+                                className={`p-0.5 transition-colors ${universalBlockedTokens.has(row.token) ? 'text-amber-500 hover:text-amber-600' : 'text-zinc-300 hover:text-amber-400'}`}
+                                title={universalBlockedTokens.has(row.token) ? 'Remove from Universal Blocked' : 'Add to Universal Blocked'}
+                              >
+                                {universalBlockedTokens.has(row.token) ? <Star className="w-3.5 h-3.5 fill-current" /> : <Star className="w-3.5 h-3.5" />}
+                              </button>
+                            </td>
+                          )}
+                          <td className="px-2 py-1 font-mono text-zinc-800">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newTokens = new Set(selectedTokens);
+                                if (newTokens.has(row.token)) newTokens.delete(row.token);
+                                else newTokens.add(row.token);
+                                setSelectedTokens(newTokens);
+                                setCurrentPage(1);
+                                if (newTokens.size > 0) switchTab('pages');
+                              }}
+                              className={`${selectedTokens.has(row.token) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors cursor-pointer`}
+                              title="Click to filter keyword management by this token"
+                            >
+                              {row.token}
+                            </button>
+                          </td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.frequency.toLocaleString()}</td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.totalVolume.toLocaleString()}</td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.avgKd !== null ? row.avgKd : '-'}</td>
+                          {/* Block button — small red circle, only on non-blocked tabs */}
+                          {tokenMgmtSubTab !== 'blocked' && (
+                            <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => handleBlockTokens([row.token])}
+                                className="w-4 h-4 flex items-center justify-center rounded-full bg-red-100 text-red-400 hover:bg-red-500 hover:text-white transition-colors"
+                                title="Block this token"
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       ))}
                       {paginatedMgmtTokens.length === 0 && (
-                        <tr><td colSpan={5} className="px-4 py-8 text-center text-xs text-zinc-400">
+                        <tr><td colSpan={tokenMgmtSubTab === 'blocked' ? 6 : 6} className="px-4 py-8 text-center text-xs text-zinc-400">
                           {tokenMgmtSubTab === 'blocked' ? 'No blocked tokens' : 'No tokens found'}
                         </td></tr>
                       )}
@@ -4945,55 +5147,310 @@ export default function App() {
                       <p className="text-zinc-500 max-w-xs">Create your first project to start organizing your keyword data.</p>
                     </div>
                   ) : (
-                    projects.map((project) => (
-                      <div 
-                        key={project.id}
-                        className={`group bg-white border rounded-2xl p-6 shadow-sm hover:shadow-md transition-all cursor-pointer relative ${activeProjectId === project.id ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-zinc-200'}`}
-                        onClick={() => selectProject(project.id)}
-                      >
-                        <div className="flex items-start justify-between mb-4">
-                          <div className={`p-3 rounded-xl ${activeProjectId === project.id ? 'bg-indigo-100 text-indigo-600' : 'bg-zinc-100 text-zinc-500 group-hover:bg-indigo-50 group-hover:text-indigo-500 transition-colors'}`}>
-                            <Folder className="w-6 h-6" />
-                          </div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              deleteProject(project.id);
-                            }}
-                            className="p-2 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all z-10 relative"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <h3 className="text-lg font-semibold text-zinc-900 mb-1 truncate">{project.name}</h3>
-                        <p className="text-sm text-zinc-500 mb-4 line-clamp-2 h-10">{project.description || 'No description provided.'}</p>
-                        
-                        <div className="flex items-center justify-between pt-4 border-t border-zinc-100">
-                          <div className="flex items-center gap-2 text-xs text-zinc-400">
-                            <Calendar className="w-3.5 h-3.5" />
-                            {new Date(project.createdAt).toLocaleDateString()}
-                          </div>
-                          {project.fileName && (
-                            <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-md">
-                              <FileText className="w-3 h-3" />
-                              CSV Uploaded
-                            </div>
-                          )}
-                        </div>
+                    projects.map((project) => {
+                      const isActive = activeProjectId === project.id;
+                      return (
+                        <div
+                          key={project.id}
+                          className={`bg-white border rounded-2xl shadow-sm hover:shadow-md transition-all cursor-pointer relative overflow-hidden ${isActive ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-zinc-200 hover:border-zinc-300'}`}
+                          onClick={() => selectProject(project.id)}
+                        >
+                          {/* Active indicator bar */}
+                          {isActive && <div className="absolute top-0 left-0 right-0 h-1 bg-indigo-500" />}
 
-                        {activeProjectId === project.id && (
-                          <div className="absolute top-4 right-4">
-                            <div className="flex items-center gap-1.5 px-2 py-1 bg-indigo-600 text-white text-[10px] font-bold uppercase tracking-wider rounded-full shadow-sm">
-                              Active
+                          <div className="p-5">
+                            {/* Row 1: Icon + Name (editable) + Actions */}
+                            <div className="flex items-center gap-3 mb-2">
+                              <div className={`p-2 rounded-lg shrink-0 ${isActive ? 'bg-indigo-100 text-indigo-600' : 'bg-zinc-100 text-zinc-400'}`}>
+                                <Folder className="w-5 h-5" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <h3
+                                  className="text-sm font-semibold text-zinc-900 truncate cursor-text"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const el = e.currentTarget;
+                                    el.contentEditable = 'true';
+                                    el.focus();
+                                    // Select all text
+                                    const range = document.createRange();
+                                    range.selectNodeContents(el);
+                                    window.getSelection()?.removeAllRanges();
+                                    window.getSelection()?.addRange(range);
+                                    const finish = () => {
+                                      el.contentEditable = 'false';
+                                      const newName = el.textContent?.trim();
+                                      if (newName && newName !== project.name) {
+                                        setProjects(prev => prev.map(p => p.id === project.id ? { ...p, name: newName } : p));
+                                        // Persist to Firestore
+                                        setDoc(doc(db, 'projects', project.id), { name: newName }, { merge: true }).catch(() => {});
+                                      } else {
+                                        el.textContent = project.name;
+                                      }
+                                    };
+                                    el.onblur = finish;
+                                    el.onkeydown = (ev: KeyboardEvent) => { if (ev.key === 'Enter') { ev.preventDefault(); el.blur(); } if (ev.key === 'Escape') { el.textContent = project.name; el.blur(); } };
+                                  }}
+                                  title="Click to rename"
+                                  suppressContentEditableWarning
+                                >
+                                  {project.name}
+                                </h3>
+                              </div>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); deleteProject(project.id); }}
+                                className="p-1.5 text-zinc-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all shrink-0"
+                                title="Delete project"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+
+                            {/* Description */}
+                            {project.description && (
+                              <p className="text-xs text-zinc-400 mb-3 line-clamp-2 pl-11">{project.description}</p>
+                            )}
+
+                            {/* Row 2: Stats */}
+                            <div className="flex items-center gap-3 pl-11 text-[11px]">
+                              <span className="text-zinc-400 flex items-center gap-1">
+                                <Calendar className="w-3 h-3" />
+                                {new Date(project.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                              </span>
+                              {project.fileName && (
+                                <span className="text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-medium flex items-center gap-1">
+                                  <FileText className="w-3 h-3" />
+                                  CSV
+                                </span>
+                              )}
+                              {isActive && (
+                                <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-semibold">Active</span>
+                              )}
                             </div>
                           </div>
-                        )}
-                      </div>
-                    ))
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </>
+          </div>
+        )}
+
+        {/* Settings sub-tab — Universal Blocked Tokens */}
+        {mainTab === 'group' && groupSubTab === 'settings' && (
+          <div className="bg-white rounded-2xl border border-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-4 duration-500">
+            {/* Settings header with sub-tabs */}
+            <div className="px-6 py-4 border-b border-zinc-100">
+              <h2 className="text-base font-semibold text-zinc-900 mb-3">Settings</h2>
+              <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg w-fit">
+                <button onClick={() => setSettingsSubTab('general')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'general' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  General
+                </button>
+                <button onClick={() => setSettingsSubTab('how-it-works')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'how-it-works' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  How it Works
+                </button>
+                <button onClick={() => setSettingsSubTab('dictionaries')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'dictionaries' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  Dictionaries
+                </button>
+                <button onClick={() => setSettingsSubTab('blocked')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'blocked' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
+                </button>
+              </div>
+            </div>
+
+            {/* Settings > General */}
+            {settingsSubTab === 'general' && (
+              <div className="p-6">
+                <p className="text-sm text-zinc-400">General settings coming soon. Group Review settings are available via the gear icon in Pages (Grouped).</p>
+              </div>
+            )}
+
+            {/* Settings > Universal Blocked */}
+            {settingsSubTab === 'blocked' && (
+              <div className="p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-800">Universal Blocked Tokens</h3>
+                    <p className="text-xs text-zinc-400 mt-0.5">Automatically blocked across ALL projects during CSV processing.</p>
+                  </div>
+                  <span className="px-2 py-0.5 text-[10px] font-semibold bg-red-50 text-red-600 border border-red-100 rounded-md">{universalBlockedTokens.size} tokens</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Type token and press Enter..."
+                    className="flex-1 px-3 py-2 text-sm border border-zinc-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-400"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const input = e.currentTarget;
+                        const val = input.value.toLowerCase().trim();
+                        if (!val) return;
+                        setUniversalBlockedTokens(prev => new Set([...prev, val]));
+                        input.value = '';
+                      }
+                    }}
+                  />
+                  {universalBlockedTokens.size > 0 && (
+                    <button
+                      onClick={() => { if (confirm('Remove all universally blocked tokens?')) setUniversalBlockedTokens(new Set()); }}
+                      className="px-3 py-2 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors whitespace-nowrap"
+                    >
+                      Clear All
+                    </button>
+                  )}
+                </div>
+                {universalBlockedTokens.size > 0 ? (
+                  <div className="flex flex-wrap gap-1.5 max-h-[400px] overflow-y-auto p-3 bg-zinc-50/50 rounded-lg border border-zinc-100">
+                    {Array.from(universalBlockedTokens).sort().map(token => (
+                      <span key={token} className="inline-flex items-center gap-1 px-2 py-1 bg-red-50 text-red-600 border border-red-100 rounded-md text-xs font-medium">
+                        {token}
+                        <button onClick={() => setUniversalBlockedTokens(prev => { const next = new Set(prev); next.delete(token); return next; })} className="text-red-300 hover:text-red-500 transition-colors">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="py-8 text-center text-xs text-zinc-400 bg-zinc-50/50 rounded-lg border border-zinc-100">
+                    No universally blocked tokens. Add tokens above or star them in Token Management → Blocked tab.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Settings > How it Works */}
+            {settingsSubTab === 'how-it-works' && (
+              <div className="p-6 space-y-6 text-zinc-600 leading-relaxed">
+                <p className="text-sm">The tool processes keywords through a 4-step pipeline to group semantically identical phrases together.</p>
+                <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-zinc-900 mb-2">1. Normalization</h3>
+                  <ul className="list-disc pl-5 space-y-1.5 text-xs">
+                    <li><strong>Lowercase:</strong> All keywords converted to lowercase.</li>
+                    <li><strong>State Names:</strong> Full names → 2-letter abbreviations (e.g., "california" → "ca").</li>
+                    <li><strong>Synonyms:</strong> Common synonyms mapped to a base word (e.g., "cheap" → "affordable").</li>
+                    <li><strong>Numbers:</strong> Spelled-out numbers → digits (e.g., "one" → "1").</li>
+                  </ul>
+                </div>
+                <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-zinc-900 mb-2">2. Tokenization & Filtering</h3>
+                  <ul className="list-disc pl-5 space-y-1.5 text-xs">
+                    <li><strong>Splitting:</strong> Keywords split into individual tokens.</li>
+                    <li><strong>Stop Words:</strong> Common words removed (e.g., "a", "the", "is").</li>
+                    <li><strong>Ignored Tokens:</strong> Low-value words removed (e.g., "near", "me").</li>
+                  </ul>
+                </div>
+                <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-zinc-900 mb-2">3. Singularization & Sorting</h3>
+                  <ul className="list-disc pl-5 space-y-1.5 text-xs">
+                    <li><strong>Singularization:</strong> Plurals → singular ("shoes" → "shoe").</li>
+                    <li><strong>Sorting:</strong> Tokens sorted alphabetically so "shoe red" = "red shoe".</li>
+                  </ul>
+                </div>
+                <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-zinc-900 mb-2">4. Clustering & Page Name Selection</h3>
+                  <ul className="list-disc pl-5 space-y-1.5 text-xs">
+                    <li><strong>Grouping:</strong> Keywords with the same signature form one cluster.</li>
+                    <li><strong>Page Name:</strong> Highest search volume keyword becomes the representative name.</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {/* Settings > Dictionaries */}
+            {settingsSubTab === 'dictionaries' && (
+              <div className="p-6 space-y-6">
+                {/* Label Detection Rules */}
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-900 mb-3">Label Detection Rules</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><HelpCircle className="w-3.5 h-3.5 text-purple-500" />FAQ / Question</h4>
+                      <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(who|what|where|when|why|how|can|vs\.?|compare|is|are|do|does|will|would|should|could|which)\b/i</code>
+                    </div>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><ShoppingCart className="w-3.5 h-3.5 text-emerald-500" />Commercial</h4>
+                      <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(buy|price|cost|cheap|best|review|discount|coupon|sale|order|hire|service|services)\b/i</code>
+                    </div>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5 text-amber-500" />Local</h4>
+                      <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(near me|nearby|close to)\b/i</code>
+                    </div>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5 text-rose-500" />Year / Time</h4>
+                      <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(202\d|201\d)\b/i</code>
+                    </div>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><BookOpen className="w-3.5 h-3.5 text-blue-500" />Informational</h4>
+                      <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(guide|tutorial|tips|examples|meaning|definition|learn|course|training)\b/i</code>
+                    </div>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><Navigation className="w-3.5 h-3.5 text-indigo-500" />Navigational</h4>
+                      <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(login|sign in|contact|support|phone number|address|customer service|account)\b/i</code>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Dictionary tables */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>Stop Words</h4>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-3 max-h-48 overflow-y-auto flex flex-wrap gap-1">
+                      {Array.from(stopWords).sort().map(w => <span key={w} className="px-1.5 py-0.5 bg-white border border-zinc-100 rounded text-[10px] text-zinc-500">{w}</span>)}
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-orange-500"></span>Ignored Tokens</h4>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-3 max-h-48 overflow-y-auto flex flex-wrap gap-1">
+                      {Array.from(ignoredTokens).sort().map(w => <span key={w} className="px-1.5 py-0.5 bg-white border border-zinc-100 rounded text-[10px] text-zinc-500">{w}</span>)}
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>Synonym Mapping</h4>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl max-h-48 overflow-y-auto">
+                      <table className="w-full text-[10px]">
+                        <thead className="bg-zinc-100/50 sticky top-0"><tr><th className="px-3 py-1.5 text-left text-zinc-500 font-medium">Word</th><th className="px-3 py-1.5 text-left text-zinc-500 font-medium">Maps To</th></tr></thead>
+                        <tbody className="divide-y divide-zinc-100">{Object.entries(synonymMap).map(([w, r]) => <tr key={w}><td className="px-3 py-1 text-zinc-500">{w}</td><td className="px-3 py-1 text-zinc-800 font-medium">{r}</td></tr>)}</tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>State Normalization</h4>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl max-h-48 overflow-y-auto">
+                      <table className="w-full text-[10px]">
+                        <thead className="bg-zinc-100/50 sticky top-0"><tr><th className="px-3 py-1.5 text-left text-zinc-500 font-medium">Full Name</th><th className="px-3 py-1.5 text-left text-zinc-500 font-medium">Abbr</th></tr></thead>
+                        <tbody className="divide-y divide-zinc-100">{Object.entries(stateMap).map(([s, a]) => <tr key={s}><td className="px-3 py-1 text-zinc-500 capitalize">{s}</td><td className="px-3 py-1 text-zinc-800 font-medium uppercase">{a}</td></tr>)}</tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Number Normalization</h4>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl max-h-48 overflow-y-auto">
+                      <table className="w-full text-[10px]">
+                        <thead className="bg-zinc-100/50 sticky top-0"><tr><th className="px-3 py-1.5 text-left text-zinc-500 font-medium">Word</th><th className="px-3 py-1.5 text-left text-zinc-500 font-medium">Digit</th></tr></thead>
+                        <tbody className="divide-y divide-zinc-100">{Object.entries(numberMap).map(([w, d]) => <tr key={w}><td className="px-3 py-1 text-zinc-500">{w}</td><td className="px-3 py-1 text-zinc-800 font-medium">{d}</td></tr>)}</tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-700 mb-2 flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Countries (Removed)</h4>
+                    <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-3 max-h-48 overflow-y-auto flex flex-wrap gap-1">
+                      {Array.from(countries).sort().map(w => <span key={w} className="px-1.5 py-0.5 bg-white border border-zinc-100 rounded text-[10px] text-zinc-500 capitalize">{w}</span>)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Activity Log sub-tab */}
+        {mainTab === 'group' && groupSubTab === 'log' && (
+          <div className="max-w-4xl mx-auto mt-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <ActivityLog
+              entries={activityLog}
+              onClear={() => { setActivityLog([]); addToast('Activity log cleared', 'info'); }}
+            />
           </div>
         )}
 
@@ -5004,57 +5461,13 @@ export default function App() {
           </ErrorBoundary>
         </div>
 
-        {mainTab === 'group' && groupSubTab === 'how-it-works' && (
-          <div className="bg-white border border-zinc-200 rounded-2xl p-8 shadow-sm animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <h2 className="text-xl font-semibold text-zinc-900 mb-6">How the Clustering Logic Works</h2>
-            <div className="space-y-8 text-zinc-600 leading-relaxed">
-              <p className="text-lg">
-                The Keyword Cluster Tool processes your list of keywords to group semantically identical phrases together. 
-                This helps you identify the core "Page Names" or topics to target, reducing duplicate efforts.
-              </p>
-              
-              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-6">
-                <h3 className="text-lg font-medium text-zinc-900 mb-3">1. Normalization</h3>
-                <ul className="list-disc pl-5 space-y-2">
-                  <li><strong>Lowercase:</strong> All keywords are converted to lowercase.</li>
-                  <li><strong>State Names:</strong> Full US state names (e.g., "california", "new york") are converted to their 2-letter abbreviations (e.g., "ca", "ny").</li>
-                  <li><strong>Synonyms:</strong> Common synonyms are mapped to a single base word (e.g., "cheap" &rarr; "affordable", "buy" &rarr; "purchase").</li>
-                  <li><strong>Numbers:</strong> Spelled-out numbers (e.g., "one", "two") are converted to digits (e.g., "1", "2").</li>
-                </ul>
-              </div>
+        {/* How it Works — now inside Settings, kept here for backward compat rendering */}
 
-              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-6">
-                <h3 className="text-lg font-medium text-zinc-900 mb-3">2. Tokenization & Filtering</h3>
-                <ul className="list-disc pl-5 space-y-2">
-                  <li><strong>Splitting:</strong> Keywords are split into individual words (tokens) based on spaces and punctuation.</li>
-                  <li><strong>Stop Words:</strong> Common words that don't add semantic value (e.g., "a", "the", "is", "in") are completely removed.</li>
-                  <li><strong>Ignored Tokens:</strong> Specific words that don't change the core intent (e.g., "near", "me", "local") are also removed.</li>
-                </ul>
-              </div>
-
-              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-6">
-                <h3 className="text-lg font-medium text-zinc-900 mb-3">3. Singularization & Sorting</h3>
-                <ul className="list-disc pl-5 space-y-2">
-                  <li><strong>Singularization:</strong> Plural words are converted to singular (e.g., "shoes" becomes "shoe"). This ensures "red shoe" and "red shoes" match.</li>
-                  <li><strong>Sorting:</strong> The remaining tokens are sorted alphabetically. This ensures "shoe red" and "red shoe" generate the exact same signature.</li>
-                </ul>
-              </div>
-
-              <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-6">
-                <h3 className="text-lg font-medium text-zinc-900 mb-3">4. Clustering & Page Name Selection</h3>
-                <ul className="list-disc pl-5 space-y-2">
-                  <li><strong>Grouping:</strong> Keywords that produce the exact same final signature are grouped into a single cluster.</li>
-                  <li><strong>Page Name:</strong> Within each cluster, the keyword with the <strong>highest search volume</strong> is selected as the representative "Page Name" for the entire group.</li>
-                </ul>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {mainTab === 'group' && groupSubTab === 'dictionaries' && (
+        {/* Dictionaries content moved to Settings > Dictionaries sub-tab */}
+        {false && (
           <div className="space-y-8">
-            <div className="bg-white border border-zinc-200 rounded-2xl p-8 shadow-sm animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <h2 className="text-xl font-semibold text-zinc-900 mb-6">Label Detection Rules</h2>
+            <div className="bg-white border border-zinc-200 rounded-2xl p-8 shadow-sm">
+              <h2 className="text-xl font-semibold text-zinc-900 mb-6">Label Detection Rules (OLD - REMOVED)</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4">
                   <h4 className="font-medium text-zinc-800 mb-2 flex items-center gap-2">
@@ -5240,6 +5653,18 @@ export default function App() {
 
         {/* Saved Clusters removed */}
 
+        {/* Merge Confirm Modal */}
+        {isMergeModalOpen && tokenSummary && (
+          <MergeConfirmModal
+            isOpen={isMergeModalOpen}
+            tokens={mergeModalTokens}
+            tokenSummary={tokenSummary}
+            impact={results && clusterSummary ? computeMergeImpact(results, groupedClusters, approvedGroups, mergeModalTokens[0], mergeModalTokens.slice(1)) : { pagesAffected: 0, groupsAffected: 0, approvedGroupsAffected: 0, pageCollisions: 0 }}
+            universalBlockedTokens={universalBlockedTokens}
+            onConfirm={handleMergeTokens}
+            onCancel={() => { setIsMergeModalOpen(false); setMergeModalTokens([]); }}
+          />
+        )}
       </div>
     </div>
   );

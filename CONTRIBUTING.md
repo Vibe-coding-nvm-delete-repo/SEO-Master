@@ -53,8 +53,18 @@ If any check fails, the commit is blocked. Fix the issue and try again.
 - **Max ~800 lines** per utility file
 - **Types** go in `src/types.ts`
 - **Processing utilities** go in `src/processing.ts`
+- **Table column definitions** go in `src/tableConstants.ts`
+- **Shared table header** — use `src/TableHeader.tsx` (never duplicate header JSX)
+- **Label filter dropdown** — use `src/LabelFilterDropdown.tsx` (never duplicate)
 - **New hooks** go in `src/hooks/use<Name>.ts`
 - **New components** go in `src/components/<Name>.tsx`
+
+### Shared Table System
+All keyword management tabs share a single `TableHeader` component:
+- Column definitions live in `src/tableConstants.ts` (widths, sort keys, filter types)
+- To add a new tab: define a `ColumnDef[]` array in tableConstants, pass it to `<TableHeader>`
+- To change column widths/padding: edit `COL` or `CELL` constants — all tabs update automatically
+- Never hardcode column headers inline — always use the shared system
 
 ### Naming Conventions
 - **Files:** camelCase for utils (`processing.ts`), PascalCase for components (`GenerateTab.tsx`)

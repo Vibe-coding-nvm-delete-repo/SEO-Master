@@ -6,6 +6,7 @@ import { Settings, Star, Check, ChevronDown, Search, Eye, EyeOff, Loader2 } from
 import { db } from './firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { DEFAULT_SYSTEM_PROMPT } from './GroupReviewEngine';
+import { DEFAULT_AUTO_GROUP_PROMPT } from './AutoGroupEngine';
 
 // ============ Types ============
 
@@ -16,6 +17,8 @@ export interface GroupReviewSettingsData {
   temperature: number;
   maxTokens: number;
   systemPrompt: string;
+  autoGroupPrompt: string;
+  reasoningEffort: 'none' | 'low' | 'medium' | 'high';
 }
 
 interface OpenRouterModel {
@@ -29,6 +32,7 @@ export interface GroupReviewSettingsRef {
   getSettings: () => GroupReviewSettingsData;
   getSelectedModelObj: () => OpenRouterModel | undefined;
   hasApiKey: () => boolean;
+  updateSettings: (newSettings: GroupReviewSettingsData) => void;
 }
 
 // ============ Storage keys ============
@@ -57,6 +61,8 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
       temperature: 0.3,
       maxTokens: 0,
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      autoGroupPrompt: DEFAULT_AUTO_GROUP_PROMPT,
+      reasoningEffort: 'none' as const,
     };
   });
 
@@ -79,6 +85,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
     getSettings: () => settings,
     getSelectedModelObj: () => selectedModelObj,
     hasApiKey: () => settings.apiKey.trim().length > 10,
+    updateSettings: (newSettings: GroupReviewSettingsData) => setSettings(newSettings),
   }), [settings, selectedModelObj]);
 
   // Persist settings — localStorage immediate + Firestore debounced
@@ -112,6 +119,8 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           temperature: data.temperature ?? 0.3,
           maxTokens: data.maxTokens || 0,
           systemPrompt: data.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+          autoGroupPrompt: data.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+          reasoningEffort: data.reasoningEffort || 'none',
         };
         lastSavedRef.current = JSON.stringify(fsSettings);
         setSettings(fsSettings);
@@ -278,7 +287,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           <input
             type="range"
             min={1}
-            max={20}
+            max={100}
             value={settings.concurrency}
             onChange={(e) => setSettings(prev => ({ ...prev, concurrency: parseInt(e.target.value) }))}
             className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
@@ -286,8 +295,8 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         </div>
       </div>
 
-      {/* Row 2: Temperature + Max Tokens */}
-      <div className="grid grid-cols-2 gap-3">
+      {/* Row 2: Temperature + Max Tokens + Reasoning */}
+      <div className="grid grid-cols-3 gap-3">
         <div>
           <label className="block text-[10px] font-medium text-zinc-500 mb-1">Temperature ({settings.temperature})</label>
           <input
@@ -308,6 +317,19 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
             className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
           />
         </div>
+        <div>
+          <label className="block text-[10px] font-medium text-zinc-500 mb-1">Reasoning ({settings.reasoningEffort})</label>
+          <select
+            value={settings.reasoningEffort}
+            onChange={(e) => setSettings(prev => ({ ...prev, reasoningEffort: e.target.value as GroupReviewSettingsData['reasoningEffort'] }))}
+            className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+          >
+            <option value="none">None</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
       </div>
 
       {/* Row 3: System Prompt */}
@@ -323,6 +345,26 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         {settings.systemPrompt !== DEFAULT_SYSTEM_PROMPT && (
           <button
             onClick={() => setSettings(prev => ({ ...prev, systemPrompt: DEFAULT_SYSTEM_PROMPT }))}
+            className="mt-1 text-[10px] text-indigo-600 hover:text-indigo-700"
+          >
+            Reset to default prompt
+          </button>
+        )}
+      </div>
+
+      {/* Row 4: Auto-Group Prompt */}
+      <div>
+        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Auto-Group Prompt</label>
+        <textarea
+          value={settings.autoGroupPrompt}
+          onChange={(e) => setSettings(prev => ({ ...prev, autoGroupPrompt: e.target.value }))}
+          rows={4}
+          className="w-full px-2.5 py-2 text-xs font-mono border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y leading-relaxed"
+          placeholder="System prompt for auto-grouping pages by semantic similarity..."
+        />
+        {settings.autoGroupPrompt !== DEFAULT_AUTO_GROUP_PROMPT && (
+          <button
+            onClick={() => setSettings(prev => ({ ...prev, autoGroupPrompt: DEFAULT_AUTO_GROUP_PROMPT }))}
             className="mt-1 text-[10px] text-indigo-600 hover:text-indigo-700"
           >
             Reset to default prompt
