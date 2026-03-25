@@ -2,10 +2,12 @@ import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { ChevronDown, ChevronRight, Play, Square, CheckCircle2, AlertCircle, Loader2, ExternalLink, Copy, Settings, Zap, Search } from 'lucide-react';
 import ModelSelector from './ModelSelector';
 import SettingsControls from './SettingsControls';
-import { DEFAULT_AUTO_GROUP_PROMPT } from './AutoGroupEngine';
-import type { ClusterSummary, GroupedCluster, AutoGroupCluster, AutoGroupSuggestion, ActivityAction } from './types';
+import { DEFAULT_AUTO_GROUP_PROMPT, DEFAULT_RECONCILIATION_PROMPT } from './AutoGroupEngine';
+import type { ClusterSummary, GroupedCluster, AutoGroupCluster, AutoGroupSuggestion, ActivityAction, ReconciliationCandidate } from './types';
 import type { GroupReviewSettingsRef } from './GroupReviewSettings';
-import { buildTokenClusters, countCoveredPages, estimateCost, processAutoGroupQueue, setAutoGroupPrompt } from './AutoGroupEngine';
+import { buildCascadingClusters, countCoveredPages, estimateCost, processAutoGroupQueue, setAutoGroupPrompt, processReconciliation, applyReconciliationMerges, setReconciliationPrompt, getReconciliationPrompt } from './AutoGroupEngine';
+import { runCosineSimilarity, DEFAULT_EMBEDDING_MODEL } from './CosineEngine';
+import type { SimilarityPair, CosineCluster, CosineProgress } from './CosineEngine';
 import { processReviewQueue, type ReviewRequest } from './GroupReviewEngine';
 import { db } from './firebase';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
@@ -27,7 +29,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   persistedSuggestions,
   onSuggestionsChange,
 }) => {
-  const [subTab, setSubTab] = useState<'clusters' | 'auto-group'>('clusters');
+  const [subTab, setSubTab] = useState<'clusters' | 'auto-group' | 'cosine-test'>('clusters');
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
   // Initialize from persisted suggestions if available
   const [suggestions, setSuggestionsInternal] = useState<AutoGroupSuggestion[]>(persistedSuggestions || []);
@@ -50,7 +52,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   const [selectedSuggestions, setSelectedSuggestions] = useState<Set<string>>(new Set());
 
   // Sort state for Token Clusters
-  const [clusterSort, setClusterSort] = useState<{ key: 'pages' | 'volume' | 'kws' | 'kd' | 'confidence' | 'tokens'; dir: 'asc' | 'desc' }>({ key: 'pages', dir: 'desc' });
+  const [clusterSort, setClusterSort] = useState<{ key: 'pages' | 'volume' | 'kws' | 'kd' | 'confidence' | 'tokens' | 'stage'; dir: 'asc' | 'desc' }>({ key: 'stage', dir: 'desc' });
   // Sort state for Suggestions
   const [sugSort, setSugSort] = useState<{ key: 'name' | 'pages' | 'kws' | 'volume' | 'kd' | 'status' | 'qa'; dir: 'asc' | 'desc' }>({ key: 'volume', dir: 'desc' });
   const [sugSearch, setSugSearch] = useState('');
@@ -182,10 +184,92 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   const [qaMismatchPages, setQaMismatchPages] = useState<Map<string, string[]>>(new Map());
   const qaAbortRef = useRef<AbortController | null>(null);
 
+  // Reconciliation state (Step 2)
+  const [isRunningRecon, setIsRunningRecon] = useState(false);
+  const [reconProcessed, setReconProcessed] = useState(0);
+  const [reconTotal, setReconTotal] = useState(0);
+  const [reconCandidates, setReconCandidates] = useState<ReconciliationCandidate[]>([]);
+  const [reconCost, setReconCost] = useState(0);
+  const [reconTokens, setReconTokens] = useState(0);
+  const [reconPass, setReconPass] = useState(0);
+  const [reconComplete, setReconComplete] = useState(false);
+  const reconAbortRef = useRef<AbortController | null>(null);
+  const [reconElapsedMs, setReconElapsedMs] = useState(0);
+  const reconStartRef = useRef(0);
+
+  // Cosine similarity test state
+  const [cosineRunning, setCosineRunning] = useState(false);
+  const [cosineProgress, setCosineProgress] = useState<CosineProgress | null>(null);
+  const [cosinePairs, setCosinePairs] = useState<SimilarityPair[]>([]);
+  const [cosineClusters, setCosineClusters] = useState<CosineCluster[]>([]);
+  const [cosineThreshold, setCosineThreshold] = useState(0.85);
+  const [cosineModel, setCosineModel] = useState(DEFAULT_EMBEDDING_MODEL);
+  const [cosineExpandedClusters, setCosineExpandedClusters] = useState<Set<string>>(new Set());
+  const [cosineSort, setCosineSort] = useState<{ key: 'pages' | 'volume' | 'similarity'; dir: 'asc' | 'desc' }>({ key: 'similarity', dir: 'desc' });
+  const cosineAbortRef = useRef<AbortController | null>(null);
+
+  const handleRunCosine = useCallback(async () => {
+    if (!effectiveClusters || effectiveClusters.length < 2) return;
+    const settings = groupReviewSettingsRef.current?.getSettings();
+    if (!settings?.apiKey) return;
+
+    const controller = new AbortController();
+    cosineAbortRef.current = controller;
+    setCosineRunning(true);
+    setCosinePairs([]);
+    setCosineClusters([]);
+    setCosineProgress(null);
+
+    try {
+      console.log('[Cosine] Starting — pages:', effectiveClusters.length, 'threshold:', cosineThreshold, 'model:', cosineModel);
+      console.log('[Cosine] runCosineSimilarity function:', typeof runCosineSimilarity);
+      const result = await runCosineSimilarity(
+        effectiveClusters,
+        settings.apiKey,
+        cosineThreshold,
+        cosineModel,
+        controller.signal,
+        (progress) => setCosineProgress(progress)
+      );
+      console.log('[Cosine] Complete — pairs:', result.pairs.length, 'clusters:', result.clusters.length);
+      setCosinePairs(result.pairs);
+      setCosineClusters(result.clusters);
+      logAndToast('auto-group', `Cosine: ${result.pairs.length} pairs, ${result.clusters.length} clusters`, result.clusters.length, `Cosine similarity: found ${result.pairs.length} pairs → ${result.clusters.length} clusters (${Math.round(result.embeddingTimeMs)}ms embed, ${Math.round(result.computeTimeMs)}ms compute, $${result.cost.toFixed(4)})`, 'info');
+    } catch (e: any) {
+      console.error('[Cosine] ERROR:', e.message, '\nStack:', e.stack);
+      if (e.message !== 'Aborted') {
+        logAndToast('auto-group', `Cosine error: ${e.message}`, 0, `Cosine similarity error: ${e.message}`, 'error');
+      }
+    } finally {
+      setCosineRunning(false);
+      cosineAbortRef.current = null;
+    }
+  }, [effectiveClusters, cosineThreshold, cosineModel, groupReviewSettingsRef, logAndToast]);
+
+  const sortedCosineClusters = useMemo(() => {
+    const sorted = [...cosineClusters];
+    sorted.sort((a, b) => {
+      const dir = cosineSort.dir === 'asc' ? 1 : -1;
+      if (cosineSort.key === 'pages') return (a.pageCount - b.pageCount) * dir;
+      if (cosineSort.key === 'volume') return (a.totalVolume - b.totalVolume) * dir;
+      if (cosineSort.key === 'similarity') return (a.maxSimilarity - b.maxSimilarity) * dir;
+      return 0;
+    });
+    return sorted;
+  }, [cosineClusters, cosineSort]);
+
+  // Reconciliation timer
+  useEffect(() => {
+    if (!isRunningRecon) return;
+    reconStartRef.current = Date.now();
+    const interval = setInterval(() => setReconElapsedMs(Date.now() - reconStartRef.current), 1000);
+    return () => clearInterval(interval);
+  }, [isRunningRecon]);
+
   // Compute token clusters from ungrouped pages
   const clusters = useMemo(() => {
     if (!effectiveClusters || effectiveClusters.length < 2) return [];
-    return buildTokenClusters(effectiveClusters);
+    return buildCascadingClusters(effectiveClusters);
   }, [effectiveClusters]);
 
   const coveredPages = useMemo(() => countCoveredPages(clusters), [clusters]);
@@ -203,6 +287,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         case 'kws': return (a.keywordCount - b.keywordCount) * dir;
         case 'kd': return ((a.avgKd || 0) - (b.avgKd || 0)) * dir;
         case 'tokens': return (a.sharedTokens.length - b.sharedTokens.length) * dir;
+        case 'stage': return ((a.stage || 0) - (b.stage || 0)) * dir;
         case 'confidence': {
           const order = { high: 3, medium: 2, review: 1 };
           return ((order[a.confidence] || 0) - (order[b.confidence] || 0)) * dir;
@@ -292,18 +377,39 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     const qaSettings = groupReviewSettingsRef.current?.getSettings();
     if (qaSettings?.autoGroupPrompt) setAutoGroupPrompt(qaSettings.autoGroupPrompt);
 
-    // Cost estimate
+    // Split clusters: multi-page clusters go to LLM, single-page clusters become suggestions directly
+    const multiPageClusters = clusters.filter(c => c.pageCount >= 2);
+    const singlePageClusters = clusters.filter(c => c.pageCount === 1);
+
+    // Create suggestions from single-page clusters immediately (no LLM needed)
+    const singlePageSuggestions: AutoGroupSuggestion[] = singlePageClusters.map(c => {
+      const page = c.pages[0];
+      return {
+        id: `suggest_single_${page.tokens}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        sourceClusterId: c.id,
+        groupName: page.pageName,
+        pages: [page],
+        totalVolume: page.totalVolume,
+        keywordCount: page.keywordCount,
+        avgKd: page.avgKd,
+        status: 'pending' as const,
+        retryCount: 0,
+        stage: c.stage,
+      };
+    });
+
+    // Cost estimate (only for LLM clusters)
     const pricing = modelObj?.pricing || { prompt: '0.000001', completion: '0.000002' };
-    const est = estimateCost(clusters, pricing);
-    const proceed = window.confirm(`Auto-group will process ${clusters.length} clusters (~${clusters.reduce((s, c) => s + c.pageCount, 0)} pages).\n\nEstimated cost: $${est < 0.01 ? est.toFixed(4) : est.toFixed(2)}\n\nProceed?`);
+    const est = estimateCost(multiPageClusters, pricing);
+    const proceed = window.confirm(`Auto-group will process:\n• ${multiPageClusters.length} multi-page clusters → LLM (est: $${est < 0.01 ? est.toFixed(4) : est.toFixed(2)})\n• ${singlePageClusters.length} single-page groups → instant (free)\n\nProceed?`);
     if (!proceed) return;
 
     setIsRunning(true);
     setIsComplete(false);
     setProcessedCount(0);
     setInFlightCount(0);
-    setTotalToProcess(clusters.length);
-    setSuggestions([]);
+    setTotalToProcess(multiPageClusters.length);
+    setSuggestions(singlePageSuggestions); // Pre-populate with single-page groups
     setSelectedSuggestions(new Set());
     setTotalCost(0);
     setTotalPromptTokens(0);
@@ -314,10 +420,19 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     const controller = new AbortController();
     abortRef.current = controller;
 
-    let sugCount = 0;
+    let sugCount = singlePageSuggestions.length;
+
+    if (multiPageClusters.length === 0) {
+      // All clusters are single-page — skip LLM entirely
+      setIsComplete(true);
+      setIsRunning(false);
+      if (onSuggestionsChange) onSuggestionsChange(singlePageSuggestions);
+      logAndToast?.('auto-group', `Auto-grouped ${singlePageSuggestions.length} single-page groups (no LLM needed)`, singlePageSuggestions.length, `Created ${singlePageSuggestions.length} groups (all single-page, free)`, 'success');
+      return;
+    }
 
     await processAutoGroupQueue(
-      clusters,
+      multiPageClusters,
       {
         apiKey: activeSettings.apiKey,
         model: activeSettings.model,
@@ -331,9 +446,13 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       {
         onProcessing: () => setInFlightCount(p => p + 1),
         onCompleted: () => { setProcessedCount(p => p + 1); setInFlightCount(p => Math.max(0, p - 1)); },
-        onSuggestions: (_clusterId, newSuggestions) => {
-          sugCount += newSuggestions.length;
-          setSuggestions(prev => [...prev, ...newSuggestions]);
+        onSuggestions: (clusterId, newSuggestions) => {
+          // Tag suggestions with source cluster stage
+          const sourceCluster = clusters.find(c => c.id === clusterId);
+          const stage = sourceCluster?.stage || 0;
+          const tagged = newSuggestions.map(s => ({ ...s, stage }));
+          sugCount += tagged.length;
+          setSuggestions(prev => [...prev, ...tagged]);
         },
         onError: (clusterId, error) => {
           console.warn('Auto-group error for cluster', clusterId, error);
@@ -360,6 +479,71 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
     setIsRunning(false);
+  }, []);
+
+  // Run Reconciliation (Step 2) — compare all groups against each other to find semantic duplicates
+  const handleRunReconciliation = useCallback(async () => {
+    if (suggestions.length < 2 || !hasApiKey) return;
+    const activeSettings = getActiveSettings();
+    if (!activeSettings) return;
+
+    setIsRunningRecon(true);
+    setReconProcessed(0);
+    setReconTotal(Math.ceil(suggestions.length / 3));
+    setReconCost(0);
+    setReconTokens(0);
+    setReconComplete(false);
+    setReconCandidates([]); // Clear stale candidates from previous pass
+    setReconPass(prev => prev + 1);
+    setReconElapsedMs(0);
+
+    const controller = new AbortController();
+    reconAbortRef.current = controller;
+
+    try {
+      const candidates = await processReconciliation(
+        suggestions,
+        activeSettings,
+        {
+          onBatchProcessed: (_batchIdx, newCandidates) => {
+            setReconProcessed(prev => prev + 1);
+            setReconCandidates(prev => [...prev, ...newCandidates]);
+          },
+          onError: (_batchIdx, _error) => {
+            setReconProcessed(prev => prev + 1);
+          },
+          onCost: (pt, ct, cost) => {
+            setReconCost(prev => prev + cost);
+            setReconTokens(prev => prev + pt + ct);
+          },
+          onComplete: () => {
+            setReconComplete(true);
+            setIsRunningRecon(false);
+          },
+        },
+        controller.signal
+      );
+
+      // Auto-merge candidates
+      if (candidates.length > 0) {
+        const merged = applyReconciliationMerges(suggestions, candidates);
+        setSuggestions(merged);
+        if (onSuggestionsChange) onSuggestionsChange(merged);
+        logAndToast?.('auto-group', `Reconciliation pass ${reconPass + 1}: merged ${suggestions.length - merged.length} duplicate groups`, candidates.length, `Reconciled: ${suggestions.length} → ${merged.length} groups (${suggestions.length - merged.length} merged)`, 'info');
+      } else {
+        logAndToast?.('auto-group', `Reconciliation pass ${reconPass + 1}: no duplicates found`, 0, 'No duplicate groups found', 'info');
+      }
+    } catch (e: any) {
+      if (e.name !== 'AbortError') console.error('Reconciliation error:', e);
+    } finally {
+      setIsRunningRecon(false);
+      setReconComplete(true);
+    }
+  }, [suggestions, hasApiKey, getActiveSettings, reconPass, logAndToast, onSuggestionsChange]);
+
+  const handleStopRecon = useCallback(() => {
+    reconAbortRef.current?.abort();
+    setIsRunningRecon(false);
   }, []);
 
   // Run QA review on all suggestions
@@ -519,6 +703,12 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
             Auto-Group {suggestions.length > 0 && `(${suggestions.length})`}
           </button>
           <button
+            onClick={() => setSubTab('cosine-test')}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${subTab === 'cosine-test' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+          >
+            🧪 Cosine Test {cosineClusters.length > 0 && `(${cosineClusters.length})`}
+          </button>
+          <button
             onClick={() => setShowSettings(s => !s)}
             className={`p-1 rounded-md transition-colors ml-1 ${showSettings ? 'bg-indigo-100 text-indigo-600' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'}`}
             title="Auto-Group Settings"
@@ -571,7 +761,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         <div className="overflow-auto flex-1 max-h-[65vh]">
           {clusters.length === 0 ? (
             <div className="py-12 text-center text-sm text-zinc-400">
-              {totalPages < 2 ? 'Need at least 2 ungrouped pages to find clusters.' : 'No pages share 4+ tokens. Try grouping manually or adjust your processing settings.'}
+              {totalPages < 2 ? 'Need at least 2 ungrouped pages to find clusters.' : 'No token overlap clusters found. Pages may not share enough common tokens.'}
             </div>
           ) : (
             <table className="w-full text-left text-[12px]">
@@ -592,6 +782,9 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                   </th>
                   <th className="px-2 py-2 text-right w-[40px] cursor-pointer select-none hover:text-zinc-700" onClick={() => toggleClusterSort('kd')}>
                     KD <SortIcon active={clusterSort.key === 'kd'} dir={clusterSort.dir} />
+                  </th>
+                  <th className="px-2 py-2 text-center w-[40px] cursor-pointer select-none hover:text-zinc-700" onClick={() => toggleClusterSort('stage')}>
+                    Stage <SortIcon active={clusterSort.key === 'stage'} dir={clusterSort.dir} />
                   </th>
                   <th className="px-2 py-2 text-center w-[60px] cursor-pointer select-none hover:text-zinc-700" onClick={() => toggleClusterSort('confidence')}>
                     Confidence <SortIcon active={clusterSort.key === 'confidence'} dir={clusterSort.dir} />
@@ -620,6 +813,11 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                       <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{cluster.keywordCount.toLocaleString()}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{cluster.totalVolume.toLocaleString()}</td>
                       <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{cluster.avgKd !== null ? cluster.avgKd : '-'}</td>
+                      <td className="px-2 py-1.5 text-center">
+                        <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${cluster.stage >= 5 ? 'bg-emerald-100 text-emerald-700' : cluster.stage >= 4 ? 'bg-blue-100 text-blue-700' : cluster.stage >= 3 ? 'bg-amber-100 text-amber-700' : 'bg-zinc-100 text-zinc-500'}`}>
+                          {cluster.stage}
+                        </span>
+                      </td>
                       <td className="px-2 py-1.5 text-center">
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
                           cluster.confidence === 'high' ? 'bg-emerald-50 text-emerald-700' :
@@ -734,9 +932,46 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
             {/* Spacer */}
             <div className="flex-1" />
 
+            {/* Reconciliation inline progress */}
+            {isRunningRecon && (() => {
+              const reconPct = reconTotal > 0 ? Math.round((reconProcessed / reconTotal) * 100) : 0;
+              return (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="relative w-20 h-4 bg-zinc-100 rounded-full overflow-hidden border border-zinc-200">
+                    <div className="h-full rounded-full transition-all duration-500 bg-purple-400" style={{ width: `${reconPct}%` }} />
+                    <span className="absolute inset-0 flex items-center justify-center text-[9px] font-semibold text-zinc-700">Recon {reconPct}%</span>
+                  </div>
+                  <Loader2 className="w-3 h-3 animate-spin text-purple-500" />
+                  <span className="text-[10px] text-zinc-500 tabular-nums">{Math.floor(reconElapsedMs / 1000)}s</span>
+                  <span className="px-1 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">${reconCost < 0.01 ? reconCost.toFixed(4) : reconCost.toFixed(2)}</span>
+                  <button onClick={handleStopRecon} className="px-1.5 py-0.5 text-[10px] font-medium text-white bg-red-500 rounded hover:bg-red-600 transition-colors">Stop</button>
+                </div>
+              );
+            })()}
+
             {/* Action buttons — right side */}
-            {suggestions.length > 0 && !isRunning && !isRunningQA && (
+            {suggestions.length > 0 && !isRunning && !isRunningQA && !isRunningRecon && (
               <div className="flex items-center gap-1.5 shrink-0">
+                {/* Reconcile button */}
+                <button
+                  onClick={handleRunReconciliation}
+                  disabled={!hasApiKey || suggestions.length < 2}
+                  className="px-2.5 py-1 text-[11px] font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                  title="Compare all groups against each other to find semantic duplicates"
+                >
+                  <Zap className="w-3 h-3" />
+                  Reconcile{reconPass > 0 ? ` (Pass ${reconPass + 1})` : ''}
+                </button>
+                {/* Recon stats */}
+                {reconComplete && reconCandidates.length > 0 && (
+                  <span className="text-[10px] text-purple-600 font-semibold">{reconCandidates.length} merged</span>
+                )}
+                {reconComplete && reconCandidates.length === 0 && reconPass > 0 && (
+                  <span className="text-[10px] text-emerald-600 font-semibold">✓ Clean</span>
+                )}
+                {reconCost > 0 && (
+                  <span className="px-1 py-0.5 rounded text-[10px] font-medium bg-purple-50 text-purple-700">${reconCost < 0.01 ? reconCost.toFixed(4) : reconCost.toFixed(2)}</span>
+                )}
                 {/* QA button */}
                 {qaResults.size < suggestions.length && (
                   <button
@@ -931,7 +1166,16 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                         <td className="px-3 py-1.5">
                           {expandedSuggestions.has(suggestion.id) ? <ChevronDown className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />}
                         </td>
-                        <td className="px-3 py-1.5 font-medium text-zinc-700">{suggestion.groupName}</td>
+                        <td className="px-3 py-1.5 font-medium text-zinc-700">
+                          <span className="flex items-center gap-1.5">
+                            {suggestion.groupName}
+                            {suggestion.stage && (
+                              <span className={`text-[8px] font-bold px-1 py-0.5 rounded ${suggestion.stage >= 5 ? 'bg-emerald-100 text-emerald-700' : suggestion.stage >= 4 ? 'bg-blue-100 text-blue-700' : suggestion.stage >= 3 ? 'bg-amber-100 text-amber-700' : 'bg-zinc-100 text-zinc-500'}`} title={`Matched at ${suggestion.stage}-token overlap`}>
+                                S{suggestion.stage}
+                              </span>
+                            )}
+                          </span>
+                        </td>
                         <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{suggestion.pages.length}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{suggestion.keywordCount.toLocaleString()}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{suggestion.totalVolume.toLocaleString()}</td>
@@ -980,6 +1224,183 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               </table>
             )}
           </div>
+        </div>
+      )}
+      {/* Sub-tab 3: Cosine Similarity Test */}
+      {subTab === 'cosine-test' && (
+        <div className="flex-1 flex flex-col">
+          {/* Toolbar */}
+          <div className="px-3 py-2 border-b border-zinc-100 flex items-center gap-2">
+            {!cosineRunning ? (
+              <button
+                onClick={handleRunCosine}
+                disabled={!effectiveClusters || effectiveClusters.length < 2 || !groupReviewSettingsRef.current?.getSettings()?.apiKey}
+                className="px-3 py-1.5 text-xs font-medium text-white bg-cyan-600 rounded-lg hover:bg-cyan-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
+              >
+                <Zap className="w-3 h-3" />
+                Run Cosine Similarity ({effectiveClusters?.length || 0} pages)
+              </button>
+            ) : (
+              <button
+                onClick={() => cosineAbortRef.current?.abort()}
+                className="px-3 py-1.5 text-xs font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors flex items-center gap-1.5 shrink-0"
+              >
+                <Square className="w-3 h-3" />
+                Stop
+              </button>
+            )}
+
+            {/* Threshold slider */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="text-[10px] text-zinc-500">Threshold:</span>
+              <input
+                type="range"
+                min={50}
+                max={99}
+                value={Math.round(cosineThreshold * 100)}
+                onChange={(e) => setCosineThreshold(parseInt(e.target.value) / 100)}
+                className="w-20 h-1 accent-cyan-600"
+              />
+              <span className="text-[10px] font-mono text-zinc-700 w-8">{(cosineThreshold * 100).toFixed(0)}%</span>
+            </div>
+
+            {/* Embedding model selector */}
+            <div className="shrink-0 w-52">
+              <ModelSelector
+                apiKey={groupReviewSettingsRef.current?.getSettings()?.apiKey || ''}
+                selectedModel={cosineModel}
+                onSelectModel={setCosineModel}
+                label=""
+                compact
+              />
+            </div>
+
+            {/* Progress — clear phase messaging */}
+            {cosineProgress && (
+              <div className="flex items-center gap-1.5 shrink-0 max-w-[500px]">
+                {cosineRunning && <Loader2 className="w-3 h-3 animate-spin text-cyan-500 shrink-0" />}
+                {cosineProgress.phase === 'complete' && <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />}
+                {cosineProgress.phase === 'error' && <AlertCircle className="w-3 h-3 text-red-500 shrink-0" />}
+                {/* Progress bar */}
+                <div className="relative w-24 h-3.5 bg-zinc-100 rounded-full overflow-hidden border border-zinc-200 shrink-0">
+                  <div className={`h-full rounded-full transition-all duration-300 ${cosineProgress.phase === 'complete' ? 'bg-emerald-400' : cosineProgress.phase === 'error' ? 'bg-red-400' : 'bg-cyan-400'}`} style={{ width: `${cosineProgress.progress}%` }} />
+                  <span className="absolute inset-0 flex items-center justify-center text-[8px] font-semibold text-zinc-700">{cosineProgress.progress}%</span>
+                </div>
+                {/* Phase + detail */}
+                <div className="flex flex-col min-w-0">
+                  <span className="text-[10px] text-zinc-700 font-medium truncate">{cosineProgress.message}</span>
+                  <span className="text-[9px] text-zinc-400 truncate">{cosineProgress.detail}</span>
+                </div>
+                {/* Stats */}
+                {cosineProgress.pairsFound > 0 && <span className="text-[10px] text-cyan-600 font-semibold shrink-0">{cosineProgress.pairsFound} pairs</span>}
+                {cosineProgress.clustersFormed > 0 && <span className="text-[10px] text-violet-600 font-semibold shrink-0">{cosineProgress.clustersFormed} clusters</span>}
+                {cosineProgress.cost > 0 && <span className="px-1 py-0.5 rounded text-[10px] font-medium bg-cyan-50 text-cyan-700 shrink-0">${cosineProgress.cost.toFixed(4)}</span>}
+                {cosineProgress.elapsedMs > 0 && <span className="text-[10px] text-zinc-400 shrink-0">{(cosineProgress.elapsedMs / 1000).toFixed(1)}s</span>}
+              </div>
+            )}
+
+            <div className="flex-1" />
+            <span className="text-[10px] text-zinc-400">Uses OpenRouter Embeddings API · {cosineModel}</span>
+          </div>
+
+          {/* Results */}
+          <div className="overflow-auto flex-1 max-h-[60vh]">
+            {cosineClusters.length === 0 && !cosineRunning ? (
+              <div className="py-12 text-center text-sm text-zinc-400">
+                {cosinePairs.length === 0
+                  ? 'Click "Run Cosine Similarity" to embed all page names and find semantic matches.'
+                  : `Found ${cosinePairs.length} similar pairs but no multi-page clusters formed above ${(cosineThreshold * 100).toFixed(0)}% threshold.`
+                }
+              </div>
+            ) : (
+              <table className="w-full text-left text-[12px]">
+                <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 text-[10px] uppercase tracking-wider">
+                  <tr>
+                    <th className="px-3 py-2 w-8"></th>
+                    <th className="px-3 py-2">Cluster Pages</th>
+                    <th className="px-2 py-2 text-right w-[50px] cursor-pointer select-none hover:text-zinc-700" onClick={() => setCosineSort(p => ({ key: 'pages', dir: p.key === 'pages' && p.dir === 'desc' ? 'asc' : 'desc' }))}>
+                      Pages {cosineSort.key === 'pages' && (cosineSort.dir === 'desc' ? '↓' : '↑')}
+                    </th>
+                    <th className="px-2 py-2 text-right w-[70px] cursor-pointer select-none hover:text-zinc-700" onClick={() => setCosineSort(p => ({ key: 'volume', dir: p.key === 'volume' && p.dir === 'desc' ? 'asc' : 'desc' }))}>
+                      Vol. {cosineSort.key === 'volume' && (cosineSort.dir === 'desc' ? '↓' : '↑')}
+                    </th>
+                    <th className="px-2 py-2 text-right w-[40px]">KD</th>
+                    <th className="px-2 py-2 text-right w-[70px] cursor-pointer select-none hover:text-zinc-700" onClick={() => setCosineSort(p => ({ key: 'similarity', dir: p.key === 'similarity' && p.dir === 'desc' ? 'asc' : 'desc' }))}>
+                      Similarity {cosineSort.key === 'similarity' && (cosineSort.dir === 'desc' ? '↓' : '↑')}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100">
+                  {sortedCosineClusters.map(cluster => (
+                    <React.Fragment key={cluster.id}>
+                      <tr
+                        className="hover:bg-cyan-50/30 transition-colors cursor-pointer"
+                        onClick={() => {
+                          setCosineExpandedClusters(prev => {
+                            const next = new Set(prev);
+                            if (next.has(cluster.id)) next.delete(cluster.id);
+                            else next.add(cluster.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        <td className="px-3 py-1.5">
+                          {cosineExpandedClusters.has(cluster.id) ? <ChevronDown className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />}
+                        </td>
+                        <td className="px-3 py-1.5 font-medium text-zinc-700">
+                          {cluster.pages[0]?.pageName || '—'}
+                          {cluster.pageCount > 1 && <span className="text-zinc-400 ml-1.5 text-[10px]">+{cluster.pageCount - 1} more</span>}
+                        </td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{cluster.pageCount}</td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{cluster.totalVolume.toLocaleString()}</td>
+                        <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{cluster.avgKd !== null ? cluster.avgKd : '-'}</td>
+                        <td className="px-2 py-1.5 text-right">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                            cluster.maxSimilarity >= 0.95 ? 'bg-emerald-100 text-emerald-700' :
+                            cluster.maxSimilarity >= 0.90 ? 'bg-blue-100 text-blue-700' :
+                            cluster.maxSimilarity >= 0.85 ? 'bg-amber-100 text-amber-700' :
+                            'bg-zinc-100 text-zinc-600'
+                          }`}>
+                            {(cluster.maxSimilarity * 100).toFixed(1)}%
+                          </span>
+                        </td>
+                      </tr>
+                      {cosineExpandedClusters.has(cluster.id) && cluster.pages.map((page, pIdx) => (
+                        <tr key={`${cluster.id}-${pIdx}`} className="bg-cyan-50/20">
+                          <td className="px-3 py-1"></td>
+                          <td className="px-3 py-1 pl-8 text-[11px] text-zinc-600">
+                            <div className="flex items-center gap-1.5">
+                              <span>{page.pageName}</span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(page.pageName)}`, '_blank'); }}
+                                className="p-0.5 text-zinc-300 hover:text-blue-600 transition-opacity"
+                              >
+                                <ExternalLink className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="px-2 py-1 text-right text-[11px] text-zinc-500">-</td>
+                          <td className="px-2 py-1 text-right text-[11px] text-zinc-500 tabular-nums">{page.totalVolume.toLocaleString()}</td>
+                          <td className="px-2 py-1 text-right text-[11px] text-zinc-500 tabular-nums">{page.avgKd !== null ? page.avgKd : '-'}</td>
+                          <td className="px-2 py-1 text-right text-[11px] text-zinc-400">—</td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Summary stats at bottom */}
+          {cosinePairs.length > 0 && (
+            <div className="px-3 py-1.5 border-t border-zinc-100 bg-zinc-50/50 text-[10px] text-zinc-500 flex items-center gap-3">
+              <span><strong>{cosinePairs.length}</strong> similar pairs found above {(cosineThreshold * 100).toFixed(0)}%</span>
+              <span><strong>{cosineClusters.length}</strong> clusters formed ({cosineClusters.reduce((s, c) => s + c.pageCount, 0)} pages)</span>
+              <span>Highest: <strong>{cosinePairs[0] ? `${(cosinePairs[0].similarity * 100).toFixed(1)}%` : '-'}</strong></span>
+              <span>Lowest: <strong>{cosinePairs[cosinePairs.length - 1] ? `${(cosinePairs[cosinePairs.length - 1].similarity * 100).toFixed(1)}%` : '-'}</strong></span>
+            </div>
+          )}
         </div>
       )}
     </div>

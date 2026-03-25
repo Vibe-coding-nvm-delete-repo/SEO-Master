@@ -16,6 +16,7 @@ interface ModelSelectorProps {
   onToggleStar?: (modelId: string) => void;
   label?: string;
   compact?: boolean;
+  modelFilter?: 'all' | 'embedding' | 'chat';
 }
 
 const LS_MODELS_CACHE_KEY = 'kwg_openrouter_models_cache';
@@ -36,6 +37,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
   onToggleStar,
   label = 'Model',
   compact = false,
+  modelFilter = 'all',
 }) => {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -59,10 +61,12 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
   useEffect(() => {
     if (!apiKey || apiKey.length < 10) { setModels([]); return; }
 
-    // Check cache first
+    // Check cache first (separate cache per filter type)
+    const cacheKey = `${LS_MODELS_CACHE_KEY}_${modelFilter}`;
+    const cacheTsKey = `${LS_MODELS_CACHE_TS}_${modelFilter}`;
     try {
-      const cachedTs = localStorage.getItem(LS_MODELS_CACHE_TS);
-      const cached = localStorage.getItem(LS_MODELS_CACHE_KEY);
+      const cachedTs = localStorage.getItem(cacheTsKey);
+      const cached = localStorage.getItem(cacheKey);
       if (cachedTs && cached && Date.now() - parseInt(cachedTs) < CACHE_TTL_MS) {
         setModels(JSON.parse(cached));
         return;
@@ -79,15 +83,21 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
       return r.json();
     }).then(data => {
       if (cancelled) return;
-      const parsed: ModelInfo[] = (data.data || [])
+      const allModels: ModelInfo[] = (data.data || [])
         .filter((m: any) => m.pricing)
         .map((m: any) => ({ id: m.id, name: m.name || m.id, pricing: m.pricing, context_length: m.context_length }))
         .sort((a: ModelInfo, b: ModelInfo) => a.name.localeCompare(b.name));
+      // Filter by model type
+      const parsed = modelFilter === 'embedding'
+        ? allModels.filter(m => m.id.includes('embed') || m.id.includes('e5-') || m.id.includes('bge-') || m.id.includes('gte-') || m.id.includes('nomic') || m.name.toLowerCase().includes('embed'))
+        : modelFilter === 'chat'
+        ? allModels.filter(m => !m.id.includes('embed') && !m.name.toLowerCase().includes('embed'))
+        : allModels;
       setModels(parsed);
-      // Cache
+      // Cache (per filter type)
       try {
-        localStorage.setItem(LS_MODELS_CACHE_KEY, JSON.stringify(parsed));
-        localStorage.setItem(LS_MODELS_CACHE_TS, String(Date.now()));
+        localStorage.setItem(cacheKey, JSON.stringify(parsed));
+        localStorage.setItem(cacheTsKey, String(Date.now()));
       } catch {}
     }).catch(e => {
       if (!cancelled) setError(e.message);
@@ -95,7 +105,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [apiKey]);
+  }, [apiKey, modelFilter]);
 
   // Selected model object
   const selectedObj = useMemo(() => models.find(m => m.id === selectedModel), [models, selectedModel]);

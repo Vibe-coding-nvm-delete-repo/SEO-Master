@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildTokenClusters, countCoveredPages, estimateCost, parseAutoGroupResponse, buildAutoGroupPrompt } from './AutoGroupEngine';
-import type { ClusterSummary, AutoGroupCluster } from './types';
+import { buildTokenClusters, buildCascadingClusters, countCoveredPages, estimateCost, parseAutoGroupResponse, buildAutoGroupPrompt, applyReconciliationMerges } from './AutoGroupEngine';
+import type { ClusterSummary, AutoGroupCluster, AutoGroupSuggestion, ReconciliationCandidate } from './types';
 
 // Helper to create a mock ClusterSummary
 function makePage(pageName: string, tokens: string[], volume = 1000, kwCount = 10): ClusterSummary {
@@ -26,29 +26,35 @@ describe('buildTokenClusters', () => {
     expect(buildTokenClusters([])).toEqual([]);
   });
 
-  it('returns empty for single page', () => {
+  it('creates single-page group for lone page with 2+ tokens', () => {
     const pages = [makePage('test page', ['a', 'b', 'c', 'd'])];
-    expect(buildTokenClusters(pages)).toEqual([]);
+    const clusters = buildTokenClusters(pages);
+    expect(clusters.length).toBe(1);
+    expect(clusters[0].pageCount).toBe(1);
+    expect(clusters[0].stage).toBe(1); // single-page stage
   });
 
-  it('returns empty when pages share fewer than 4 tokens', () => {
+  it('clusters pages sharing 3 tokens at stage 3 (cascading)', () => {
     const pages = [
       makePage('page a', ['x', 'y', 'z']),
-      makePage('page b', ['x', 'y', 'w']),
+      makePage('page b', ['x', 'y', 'z']),
     ];
-    expect(buildTokenClusters(pages)).toEqual([]);
+    // These have identical signatures → identical cluster
+    const clusters = buildTokenClusters(pages);
+    expect(clusters.length).toBe(1);
+    expect(clusters[0].isIdentical).toBe(true);
   });
 
-  it('clusters two pages sharing exactly 4 tokens', () => {
+  it('cascading: 3-token overlap pages cluster at stage 3', () => {
     const pages = [
       makePage('reverse mortgage rates', ['home', 'loan', 'price', 'reverse'], 5000),
       makePage('reverse mortgage calculator', ['calculator', 'home', 'loan', 'reverse'], 3000),
     ];
     const clusters = buildTokenClusters(pages);
-    // They share 3 tokens (home, loan, reverse) — NOT 4. So no cluster unless they share 4.
-    // Actually: page1 tokens = [home, loan, price, reverse], page2 = [calculator, home, loan, reverse]
-    // Shared: home, loan, reverse = 3 tokens. Not enough for 4-token overlap.
-    expect(clusters.length).toBe(0);
+    // They share 3 tokens (home, loan, reverse) — cascading catches this at stage 3
+    const multiPageCluster = clusters.find(c => c.pageCount >= 2);
+    expect(multiPageCluster).toBeDefined();
+    expect(multiPageCluster!.stage).toBe(3);
   });
 
   it('clusters pages with 4+ shared tokens', () => {
@@ -99,14 +105,16 @@ describe('buildTokenClusters', () => {
     if (cluster) expect(cluster.confidence).toBe('medium');
   });
 
-  it('assigns review confidence to large clusters (>20 pages)', () => {
-    const tokens = ['best', 'home', 'loan', 'reverse'];
+  it('assigns review confidence to large clusters with low stage', () => {
     const pages = Array.from({ length: 25 }, (_, i) =>
-      makePage(`page ${i}`, [...tokens, `unique${i}`], 1000 * (i + 1))
+      makePage(`page ${i}`, ['a', 'b', `unique${i}`], 1000 * (i + 1))
     );
     const clusters = buildTokenClusters(pages);
-    const cluster = clusters.find(c => c.pageCount >= 21 && !c.isIdentical);
-    if (cluster) expect(cluster.confidence).toBe('review');
+    // Single-page clusters at stage 1 should be 'review'
+    const singleClusters = clusters.filter(c => c.pageCount === 1);
+    for (const c of singleClusters) {
+      expect(c.confidence).toBe('review');
+    }
   });
 
   it('does not assign a page to multiple clusters', () => {
@@ -121,21 +129,21 @@ describe('buildTokenClusters', () => {
     expect(allPageTokens.length).toBe(unique.size); // No duplicates
   });
 
-  it('handles pages with fewer than 4 tokens gracefully', () => {
+  it('cascading handles pages with fewer than 4 tokens', () => {
     const pages = [
-      makePage('short', ['a', 'b'], 1000),
+      makePage('short a', ['a', 'b'], 1000),
+      makePage('short b', ['a', 'b'], 2000),  // identical to short a
       makePage('also short', ['a', 'c'], 2000),
       makePage('long enough', ['a', 'b', 'c', 'd', 'e'], 3000),
     ];
-    // Short pages excluded from 4-token overlap, but may still be in identical clusters
     const clusters = buildTokenClusters(pages);
-    // No 4-token overlap possible with only 2-3 token pages
-    const overlapClusters = clusters.filter(c => !c.isIdentical);
-    for (const c of overlapClusters) {
-      for (const p of c.pages) {
-        expect(p.tokenArr.length).toBeGreaterThanOrEqual(4);
-      }
-    }
+    // short a + short b = identical cluster (2 tokens)
+    // also short = single-page cluster
+    // long enough = single-page cluster
+    expect(clusters.length).toBeGreaterThanOrEqual(1);
+    const identicalCluster = clusters.find(c => c.isIdentical);
+    expect(identicalCluster).toBeDefined();
+    expect(identicalCluster!.pageCount).toBe(2);
   });
 
   it('sorts clusters by confidence then volume', () => {
@@ -165,7 +173,7 @@ describe('countCoveredPages', () => {
     const p2 = makePage('page 2', ['a', 'b', 'c', 'e']);
     const clusters: AutoGroupCluster[] = [{
       id: 'test', sharedTokens: ['a', 'b', 'c'], pages: [p1, p2],
-      totalVolume: 2000, keywordCount: 20, pageCount: 2, avgKd: null, confidence: 'high', isIdentical: false,
+      totalVolume: 2000, keywordCount: 20, pageCount: 2, avgKd: null, confidence: 'high', isIdentical: false, stage: 4,
     }];
     expect(countCoveredPages(clusters)).toBe(2);
   });
@@ -181,7 +189,7 @@ describe('estimateCost', () => {
       id: 'test', sharedTokens: ['a', 'b', 'c', 'd'],
       pages: [makePage('test', ['a', 'b', 'c', 'd'])],
       totalVolume: 1000, keywordCount: 10, avgKd: null, pageCount: 1,
-      confidence: 'high', isIdentical: false,
+      confidence: 'high', isIdentical: false, stage: 4,
     };
     const cost = estimateCost([cluster], { prompt: '0.000001', completion: '0.000002' });
     expect(cost).toBeGreaterThan(0);
@@ -197,7 +205,7 @@ describe('buildAutoGroupPrompt', () => {
         makePage('best home loans', ['best', 'home', 'loan'], 5000),
       ],
       totalVolume: 6000, keywordCount: 20, avgKd: null, pageCount: 2,
-      confidence: 'high', isIdentical: false,
+      confidence: 'high', isIdentical: false, stage: 4,
     };
     const { system, user } = buildAutoGroupPrompt(cluster);
     expect(system).toContain('SEO grouping expert');
@@ -216,7 +224,7 @@ describe('parseAutoGroupResponse', () => {
       makePage('home loan rates', ['home', 'loan', 'rate'], 2000),
     ],
     totalVolume: 10000, keywordCount: 30, avgKd: null, pageCount: 3,
-    confidence: 'high', isIdentical: false,
+    confidence: 'high', isIdentical: false, stage: 4,
   };
 
   it('parses valid JSON response', () => {
@@ -295,5 +303,146 @@ describe('parseAutoGroupResponse', () => {
     const suggestions = parseAutoGroupResponse(response, cluster);
     expect(suggestions[0].status).toBe('pending');
     expect(suggestions[0].retryCount).toBe(0);
+  });
+});
+
+// ─── Cascading Clusters Tests ───
+
+describe('buildCascadingClusters', () => {
+  it('cascades from max tokens down to 2', () => {
+    const pages = [
+      makePage('5 token page a', ['a', 'b', 'c', 'd', 'e'], 5000),
+      makePage('5 token page b', ['a', 'b', 'c', 'd', 'f'], 4000),
+      makePage('3 token page', ['a', 'b', 'g'], 3000),
+      makePage('3 token page 2', ['a', 'b', 'h'], 2000),
+      makePage('2 token page', ['a', 'i'], 1000),
+    ];
+    const clusters = buildCascadingClusters(pages);
+    // 5-token pages share 4 tokens (a,b,c,d) → stage 4 cluster
+    const stage4 = clusters.find(c => c.stage === 4 && c.pageCount === 2);
+    expect(stage4).toBeDefined();
+    // 3-token pages share 2 tokens (a,b) → stage 2 cluster
+    const stage2 = clusters.find(c => c.stage === 2 && c.pageCount === 2);
+    expect(stage2).toBeDefined();
+    // 2-token page becomes single-page group
+    const single = clusters.find(c => c.pageCount === 1 && c.pages[0].pageName === '2 token page');
+    expect(single).toBeDefined();
+    expect(single!.stage).toBe(1);
+  });
+
+  it('higher stages get priority over lower stages', () => {
+    const pages = [
+      makePage('p1', ['a', 'b', 'c', 'd', 'e'], 5000),
+      makePage('p2', ['a', 'b', 'c', 'd', 'f'], 4000),
+      makePage('p3', ['a', 'b', 'c', 'g', 'h'], 3000),
+    ];
+    const clusters = buildCascadingClusters(pages);
+    // p1+p2 share 4 tokens → stage 4
+    // p3 shares only 3 with p1 (a,b,c) → but p1 already assigned at stage 4
+    // p3 should NOT be in p1's cluster, should be separate
+    const stage4 = clusters.find(c => c.stage === 4);
+    expect(stage4).toBeDefined();
+    expect(stage4!.pages.map(p => p.pageName)).not.toContain('p3');
+  });
+
+  it('excludes 1-token pages', () => {
+    const pages = [
+      makePage('one token', ['a'], 1000),
+      makePage('two tokens', ['a', 'b'], 2000),
+    ];
+    const clusters = buildCascadingClusters(pages);
+    const oneTokenCluster = clusters.find(c => c.pages.some(p => p.pageName === 'one token'));
+    expect(oneTokenCluster).toBeUndefined();
+  });
+
+  it('identical pages cluster at their token count stage', () => {
+    const pages = [
+      makePage('page a', ['x', 'y', 'z'], 1000),
+      makePage('page b', ['x', 'y', 'z'], 2000),
+    ];
+    const clusters = buildCascadingClusters(pages);
+    expect(clusters.length).toBe(1);
+    expect(clusters[0].isIdentical).toBe(true);
+    expect(clusters[0].stage).toBe(3); // 3 tokens = stage 3
+  });
+
+  it('no page appears in multiple clusters', () => {
+    const pages = Array.from({ length: 20 }, (_, i) =>
+      makePage(`page ${i}`, ['a', 'b', 'c', `t${i}`], 1000 * (i + 1))
+    );
+    const clusters = buildCascadingClusters(pages);
+    const allTokens = clusters.flatMap(c => c.pages.map(p => p.tokens));
+    const unique = new Set(allTokens);
+    expect(allTokens.length).toBe(unique.size);
+  });
+});
+
+// ─── Reconciliation Merge Tests ───
+
+describe('applyReconciliationMerges', () => {
+  function makeSuggestion(name: string, volume: number, pageCount = 1): AutoGroupSuggestion {
+    return {
+      id: `sug_${name}`,
+      sourceClusterId: 'test',
+      groupName: name,
+      pages: Array.from({ length: pageCount }, (_, i) => makePage(`${name} page ${i}`, ['a', 'b'], volume / pageCount)),
+      totalVolume: volume,
+      keywordCount: pageCount * 5,
+      avgKd: 50,
+      status: 'pending',
+      retryCount: 0,
+    };
+  }
+
+  it('merges two suggestions (higher volume absorbs lower)', () => {
+    const suggestions = [
+      makeSuggestion('fast payday loans', 50000, 3),
+      makeSuggestion('quick payday loans', 30000, 2),
+    ];
+    const candidates: ReconciliationCandidate[] = [{
+      id: 'test', groupA: { name: 'fast payday loans', idx: 0, volume: 50000, pages: 3 },
+      groupB: { name: 'quick payday loans', idx: 1, volume: 30000, pages: 2 },
+      confidence: 92, reason: 'synonyms',
+    }];
+    const merged = applyReconciliationMerges(suggestions, candidates);
+    expect(merged.length).toBe(1);
+    expect(merged[0].groupName).toBe('fast payday loans'); // Higher vol wins
+    expect(merged[0].pages.length).toBe(5); // 3 + 2
+  });
+
+  it('handles chain merges (A↔B + B↔C → all into highest vol)', () => {
+    const suggestions = [
+      makeSuggestion('group a', 10000),
+      makeSuggestion('group b', 50000),
+      makeSuggestion('group c', 30000),
+    ];
+    const candidates: ReconciliationCandidate[] = [
+      { id: 'c1', groupA: { name: 'group a', idx: 0, volume: 10000, pages: 1 }, groupB: { name: 'group b', idx: 1, volume: 50000, pages: 1 }, confidence: 90, reason: 'same' },
+      { id: 'c2', groupA: { name: 'group b', idx: 1, volume: 50000, pages: 1 }, groupB: { name: 'group c', idx: 2, volume: 30000, pages: 1 }, confidence: 88, reason: 'same' },
+    ];
+    const merged = applyReconciliationMerges(suggestions, candidates);
+    expect(merged.length).toBe(1);
+    expect(merged[0].groupName).toBe('group b'); // Highest vol
+    expect(merged[0].pages.length).toBe(3);
+  });
+
+  it('respects dismissed candidates', () => {
+    const suggestions = [
+      makeSuggestion('group a', 50000),
+      makeSuggestion('group b', 30000),
+    ];
+    const candidates: ReconciliationCandidate[] = [{
+      id: 'test', groupA: { name: 'group a', idx: 0, volume: 50000, pages: 1 },
+      groupB: { name: 'group b', idx: 1, volume: 30000, pages: 1 },
+      confidence: 92, reason: 'same', dismissed: true,
+    }];
+    const merged = applyReconciliationMerges(suggestions, candidates);
+    expect(merged.length).toBe(2); // Not merged — dismissed
+  });
+
+  it('returns original suggestions when no candidates', () => {
+    const suggestions = [makeSuggestion('a', 1000), makeSuggestion('b', 2000)];
+    const merged = applyReconciliationMerges(suggestions, []);
+    expect(merged.length).toBe(2);
   });
 });

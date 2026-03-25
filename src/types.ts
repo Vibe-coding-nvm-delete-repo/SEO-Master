@@ -111,6 +111,17 @@ export interface AutoGroupCluster {
   pageCount: number;
   confidence: 'high' | 'medium' | 'review';
   isIdentical: boolean;  // true if all pages have 100% token overlap
+  stage: number;         // token overlap stage (e.g., 6 = 6 shared tokens, 2 = 2 shared tokens)
+}
+
+export interface ReconciliationCandidate {
+  id: string;
+  groupA: { name: string; idx: number; volume: number; pages: number };
+  groupB: { name: string; idx: number; volume: number; pages: number };
+  confidence: number;
+  reason: string;
+  merged?: boolean;
+  dismissed?: boolean;
 }
 
 export interface AutoGroupSuggestion {
@@ -123,6 +134,7 @@ export interface AutoGroupSuggestion {
   avgKd: number | null;
   status: 'pending' | 'processing' | 'approved' | 'mismatch' | 'error' | 'manual-review';
   retryCount: number;
+  stage?: number;  // which cascade stage produced this group
   reviewReason?: string;
   reviewMismatchedPages?: string[];
   reviewCost?: number;

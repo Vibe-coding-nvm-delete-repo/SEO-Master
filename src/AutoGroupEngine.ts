@@ -1,7 +1,7 @@
 // AutoGroupEngine.ts — Pure logic for auto-grouping ungrouped pages by token overlap + LLM semantic grouping
 // No React dependencies. Handles clustering, cost estimation, prompt building, response parsing, queue processing.
 
-import type { ClusterSummary, AutoGroupCluster, AutoGroupSuggestion } from './types';
+import type { ClusterSummary, AutoGroupCluster, AutoGroupSuggestion, ReconciliationCandidate } from './types';
 import type { ReviewEngineConfig } from './GroupReviewEngine';
 
 // ─── Token Cluster Computation (no API, pure logic) ───
@@ -25,17 +25,45 @@ function combinations<T>(arr: T[], k: number): T[][] {
 
 /** Cap tokens at MAX_TOKENS_PER_PAGE for combination generation */
 const MAX_TOKENS_PER_PAGE = 12;
-const MIN_SHARED_TOKENS = 4;
+
+/** Helper to build cluster stats */
+function buildClusterStats(pages: ClusterSummary[]): { totalVolume: number; keywordCount: number; avgKd: number | null } {
+  const totalVolume = pages.reduce((s, p) => s + p.totalVolume, 0);
+  const keywordCount = pages.reduce((s, p) => s + p.keywordCount, 0);
+  let totalKd = 0, kdCount = 0;
+  pages.forEach(p => { if (p.avgKd !== null) { totalKd += p.avgKd * p.keywordCount; kdCount += p.keywordCount; } });
+  return { totalVolume, keywordCount, avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null };
+}
+
+/** Helper to score confidence */
+function scoreConfidence(pageCount: number, stage: number): 'high' | 'medium' | 'review' {
+  if (stage >= 5 || pageCount <= 5) return 'high';
+  if (stage >= 4 || pageCount <= 15) return 'medium';
+  return 'review';
+}
 
 /**
- * Build token clusters from ungrouped pages.
- * Finds groups of pages sharing 4+ identical tokens via combination hashing.
- * Also identifies pages with 100% identical token signatures.
+ * Build cascading token clusters from ungrouped pages.
+ * Cascades from max token overlap down to 2-token overlap.
+ * Each stage removes matched pages from the pool before the next stage runs.
+ * Pages with <2 tokens or no matches become 1-page clusters.
  */
-export function buildTokenClusters(pages: ClusterSummary[]): AutoGroupCluster[] {
-  if (!pages || pages.length < 2) return [];
+export function buildCascadingClusters(pages: ClusterSummary[]): AutoGroupCluster[] {
+  if (!pages || pages.length === 0) return [];
 
-  // Phase 1: Find 100% identical signature groups
+  const pageIndex = new Map<string, ClusterSummary>();
+  for (const p of pages) pageIndex.set(p.tokens, p);
+
+  // Find max token count across all pages
+  let maxTokens = 0;
+  for (const p of pages) {
+    if (p.tokenArr.length > maxTokens) maxTokens = p.tokenArr.length;
+  }
+
+  const allClusters: AutoGroupCluster[] = [];
+  const assignedPages = new Set<string>(); // Track by tokens (unique per page)
+
+  // Phase 1: Find 100% identical signature groups (any stage)
   const signatureMap = new Map<string, ClusterSummary[]>();
   for (const page of pages) {
     const sig = page.tokens;
@@ -44,119 +72,111 @@ export function buildTokenClusters(pages: ClusterSummary[]): AutoGroupCluster[] 
     else signatureMap.set(sig, [page]);
   }
 
-  const identicalClusters: AutoGroupCluster[] = [];
-  const assignedPages = new Set<string>(); // Track by tokens (unique per page)
-
   for (const [sig, group] of signatureMap) {
     if (group.length >= 2) {
-      const totalVolume = group.reduce((s, p) => s + p.totalVolume, 0);
-      const keywordCount = group.reduce((s, p) => s + p.keywordCount, 0);
-      let totalKd = 0, kdCount = 0;
-      group.forEach(p => { if (p.avgKd !== null) { totalKd += p.avgKd * p.keywordCount; kdCount += p.keywordCount; } });
-      identicalClusters.push({
+      const stats = buildClusterStats(group);
+      const stage = group[0].tokenArr.length; // identical = all tokens match
+      allClusters.push({
         id: `identical_${sig}`,
-        sharedTokens: group[0].tokenArr.slice().sort(),
+        sharedTokens: [...group[0].tokenArr].sort(),
         pages: group,
-        totalVolume,
-        keywordCount,
-        avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
+        ...stats,
         pageCount: group.length,
         confidence: 'high',
         isIdentical: true,
+        stage,
       });
       for (const p of group) assignedPages.add(p.tokens);
     }
   }
 
-  // Phase 2: Build inverted index for remaining pages
-  const remainingPages = pages.filter(p => !assignedPages.has(p.tokens));
-  // Also include identical-cluster pages for 4-token overlap (they might overlap with OTHER pages too)
-  const allForOverlap = pages.filter(p => p.tokenArr.length >= MIN_SHARED_TOKENS);
+  // Phase 2: Cascade from maxTokens down to 2
+  for (let stage = Math.min(maxTokens, MAX_TOKENS_PER_PAGE); stage >= 2; stage--) {
+    // Only consider pages not yet assigned and with enough tokens for this stage
+    const remainingPages = pages.filter(p => !assignedPages.has(p.tokens) && p.tokenArr.length >= stage);
+    if (remainingPages.length < 2) continue;
 
-  // Hash: sorted 4-token combo key → Set<page tokens string>
-  const comboMap = new Map<string, Set<string>>();
+    // Build combo map for this stage
+    const comboMap = new Map<string, Set<string>>();
+    for (const page of remainingPages) {
+      const tokens = page.tokenArr.length > MAX_TOKENS_PER_PAGE
+        ? page.tokenArr.slice(0, MAX_TOKENS_PER_PAGE)
+        : page.tokenArr;
+      const sortedTokens = [...tokens].sort();
+      const combos = combinations(sortedTokens, stage);
+      for (const combo of combos) {
+        const key = combo.join('|');
+        const existing = comboMap.get(key);
+        if (existing) existing.add(page.tokens);
+        else comboMap.set(key, new Set([page.tokens]));
+      }
+    }
 
-  for (const page of allForOverlap) {
-    // Cap tokens for combination generation
-    const tokens = page.tokenArr.length > MAX_TOKENS_PER_PAGE
-      ? page.tokenArr.slice(0, MAX_TOKENS_PER_PAGE)
-      : page.tokenArr;
+    // Form clusters (2+ pages sharing this many tokens)
+    const stageClusters: Array<{ sharedTokens: string[]; pageTokens: Set<string> }> = [];
+    for (const [key, pageTokensSet] of comboMap) {
+      if (pageTokensSet.size >= 2) {
+        stageClusters.push({ sharedTokens: key.split('|'), pageTokens: pageTokensSet });
+      }
+    }
 
-    const combos = combinations(tokens.slice().sort(), MIN_SHARED_TOKENS);
-    for (const combo of combos) {
-      const key = combo.join('|');
-      const existing = comboMap.get(key);
-      if (existing) existing.add(page.tokens);
-      else comboMap.set(key, new Set([page.tokens]));
+    // Sort by page count desc (larger clusters get priority)
+    stageClusters.sort((a, b) => b.pageTokens.size - a.pageTokens.size);
+
+    // Assign pages to clusters (greedy, largest first, only unassigned)
+    for (const { sharedTokens, pageTokens } of stageClusters) {
+      const unassigned = [...pageTokens].filter(t => !assignedPages.has(t));
+      if (unassigned.length < 2) continue;
+
+      const clusterPages = unassigned.map(t => pageIndex.get(t)!).filter(Boolean);
+      if (clusterPages.length < 2) continue;
+
+      const stats = buildClusterStats(clusterPages);
+      allClusters.push({
+        id: `stage${stage}_${sharedTokens.join('_')}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        sharedTokens,
+        pages: clusterPages,
+        ...stats,
+        pageCount: clusterPages.length,
+        confidence: scoreConfidence(clusterPages.length, stage),
+        isIdentical: false,
+        stage,
+      });
+
+      for (const t of unassigned) assignedPages.add(t);
     }
   }
 
-  // Phase 3: Form clusters from combo groups (only groups with 2+ pages)
-  const pageIndex = new Map<string, ClusterSummary>();
-  for (const p of pages) pageIndex.set(p.tokens, p);
-
-  // Sort combo groups by: shared token count (all 4 here), then page count desc
-  const comboClusters: Array<{ sharedTokens: string[]; pageTokens: Set<string> }> = [];
-  for (const [key, pageTokensSet] of comboMap) {
-    if (pageTokensSet.size >= 2) {
-      comboClusters.push({ sharedTokens: key.split('|'), pageTokens: pageTokensSet });
+  // Phase 3: Any remaining unmatched pages with 2+ tokens become 1-page clusters
+  // (1-token pages are excluded per spec)
+  for (const page of pages) {
+    if (!assignedPages.has(page.tokens) && page.tokenArr.length >= 2) {
+      const stats = buildClusterStats([page]);
+      allClusters.push({
+        id: `single_${page.tokens}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        sharedTokens: [...page.tokenArr].sort(),
+        pages: [page],
+        ...stats,
+        pageCount: 1,
+        confidence: 'review',
+        isIdentical: false,
+        stage: 1, // single-page, lowest stage
+      });
+      assignedPages.add(page.tokens);
     }
   }
 
-  // Sort by page count desc (larger clusters first → they get priority in assignment)
-  comboClusters.sort((a, b) => b.pageTokens.size - a.pageTokens.size);
-
-  // Phase 4: Assign pages to clusters (greedy, largest first)
-  // A page can only belong to ONE non-identical cluster
-  const assignedToOverlap = new Set<string>();
-  const overlapClusters: AutoGroupCluster[] = [];
-
-  for (const { sharedTokens, pageTokens } of comboClusters) {
-    // Filter to only unassigned pages (not already in an overlap cluster)
-    const unassigned = [...pageTokens].filter(t => !assignedToOverlap.has(t));
-    if (unassigned.length < 2) continue;
-
-    const clusterPages = unassigned.map(t => pageIndex.get(t)!).filter(Boolean);
-    if (clusterPages.length < 2) continue;
-
-    const totalVolume = clusterPages.reduce((s, p) => s + p.totalVolume, 0);
-    const keywordCount = clusterPages.reduce((s, p) => s + p.keywordCount, 0);
-    let totalKd = 0, kdCount = 0;
-    clusterPages.forEach(p => { if (p.avgKd !== null) { totalKd += p.avgKd * p.keywordCount; kdCount += p.keywordCount; } });
-    const avgKd = kdCount > 0 ? Math.round(totalKd / kdCount) : null;
-
-    // Confidence scoring
-    let confidence: 'high' | 'medium' | 'review';
-    if (clusterPages.length <= 8) confidence = 'high';
-    else if (clusterPages.length <= 20) confidence = 'medium';
-    else confidence = 'review';
-
-    overlapClusters.push({
-      id: `overlap_${sharedTokens.join('_')}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      sharedTokens,
-      pages: clusterPages,
-      totalVolume,
-      keywordCount,
-      avgKd,
-      pageCount: clusterPages.length,
-      confidence,
-      isIdentical: false,
-    });
-
-    for (const t of unassigned) assignedToOverlap.add(t);
-  }
-
-  // Combine identical + overlap clusters, sort by confidence then volume
-  const confidenceOrder = { high: 0, medium: 1, review: 2 };
-  const allClusters = [...identicalClusters, ...overlapClusters];
+  // Sort by stage desc (tightest matches first), then volume desc
   allClusters.sort((a, b) => {
-    const confDiff = confidenceOrder[a.confidence] - confidenceOrder[b.confidence];
-    if (confDiff !== 0) return confDiff;
+    if (b.stage !== a.stage) return b.stage - a.stage;
     return b.totalVolume - a.totalVolume;
   });
 
   return allClusters;
 }
+
+// Keep old name as alias for backward compatibility
+export const buildTokenClusters = buildCascadingClusters;
 
 /** Count total pages covered by clusters (deduped) */
 export function countCoveredPages(clusters: AutoGroupCluster[]): number {
@@ -474,4 +494,291 @@ export async function processAutoGroupQueue(
   if (callbacks.onComplete) {
     callbacks.onComplete(totalProcessed, totalSuggestionsCount);
   }
+}
+
+// ─── Reconciliation Engine (Step 2: Compare groups against each other) ───
+
+const DEFAULT_RECONCILIATION_PROMPT = `You are comparing SEO keyword page groups to find semantic duplicates.
+
+You will receive 3 group names to CHECK, and a numbered list of ALL existing groups.
+
+RULES:
+- Flag groups ONLY if they have IDENTICAL core semantic intent (just different wording)
+- Synonyms with same intent = DUPLICATE (e.g., "cash advance" ↔ "payday loans", "auto loan" ↔ "car loan")
+- Different sub-intents = NOT duplicates (e.g., "payday loan calculator" ↔ "payday loans")
+- Different locations = NEVER duplicates (e.g., "loans Houston" ↔ "loans Dallas")
+- Generic/broad pages should NOT be merged into specific groups (e.g., "loans" should NOT merge into "payday loans")
+- When in doubt, do NOT flag as duplicate
+
+Return JSON only:
+{
+  "duplicates": [
+    { "checkIdx": 1, "matchIdx": 47, "confidence": 92, "reason": "brief explanation" }
+  ]
+}
+If no duplicates found: { "duplicates": [] }`;
+
+let customReconciliationPrompt: string | null = null;
+
+export function setReconciliationPrompt(prompt: string | null): void {
+  customReconciliationPrompt = prompt;
+}
+
+export function getReconciliationPrompt(): string {
+  return customReconciliationPrompt || DEFAULT_RECONCILIATION_PROMPT;
+}
+
+export { DEFAULT_RECONCILIATION_PROMPT };
+
+export interface ReconciliationCallbacks {
+  onBatchProcessed: (batchIdx: number, candidates: ReconciliationCandidate[]) => void;
+  onError: (batchIdx: number, error: string) => void;
+  onCost: (promptTokens: number, completionTokens: number, cost: number) => void;
+  onComplete: (totalBatches: number, totalCandidates: number) => void;
+}
+
+export async function processReconciliation(
+  groups: AutoGroupSuggestion[],
+  config: ReviewEngineConfig,
+  callbacks: ReconciliationCallbacks,
+  signal: AbortSignal
+): Promise<ReconciliationCandidate[]> {
+  if (groups.length < 2) {
+    callbacks.onComplete(0, 0);
+    return [];
+  }
+
+  // Build numbered group list
+  const groupNames = groups.map(g => g.groupName);
+  const numberedList = groupNames.map((name, idx) => `${idx + 1}. ${name}`).join('\n');
+
+  // Batch 3 at a time
+  const BATCH_SIZE = 3;
+  const batches: number[][] = [];
+  for (let i = 0; i < groups.length; i += BATCH_SIZE) {
+    batches.push(Array.from({ length: Math.min(BATCH_SIZE, groups.length - i) }, (_, j) => i + j));
+  }
+
+  const allCandidates: ReconciliationCandidate[] = [];
+  let queueIdx = 0;
+  let totalProcessed = 0;
+
+  const processNext = async (): Promise<void> => {
+    while (queueIdx < batches.length && !signal.aborted) {
+      const batchIdx = queueIdx++;
+      const batch = batches[batchIdx];
+
+      const checkList = batch.map(idx => `${idx + 1}. ${groupNames[idx]}`).join('\n');
+
+      const userPrompt = `CHECK THESE ${batch.length} GROUPS for duplicates:\n${checkList}\n\nFULL LIST OF ALL ${groupNames.length} GROUPS:\n${numberedList}\n\nFind any semantic duplicates. Return JSON.`;
+
+      try {
+        const body: any = {
+          model: config.model,
+          messages: [
+            { role: 'system', content: getReconciliationPrompt() },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: config.temperature,
+          response_format: { type: 'json_object' },
+        };
+        if (config.maxTokens > 0) body.max_tokens = config.maxTokens;
+        if (config.reasoningEffort && config.reasoningEffort !== 'none') {
+          body.reasoning = { effort: config.reasoningEffort };
+        }
+
+        const maxRetries = 5;
+        let responseData: any = null;
+        let result: string | null = null;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          if (signal.aborted) return;
+
+          const timeoutController = new AbortController();
+          const timeoutId = setTimeout(() => timeoutController.abort(), 60000);
+          const globalAbortHandler = () => timeoutController.abort();
+          signal.addEventListener('abort', globalAbortHandler, { once: true });
+
+          let res: Response;
+          try {
+            res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${config.apiKey}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': window.location.origin,
+              },
+              body: JSON.stringify(body),
+              signal: timeoutController.signal,
+            });
+          } finally {
+            clearTimeout(timeoutId);
+            signal.removeEventListener('abort', globalAbortHandler);
+          }
+
+          if (res.status === 429) {
+            if (attempt < maxRetries) {
+              await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt), 30000)));
+              continue;
+            }
+            callbacks.onError(batchIdx, 'Rate limited');
+            result = null;
+            break;
+          }
+
+          if (!res.ok) {
+            callbacks.onError(batchIdx, `API ${res.status}`);
+            result = null;
+            break;
+          }
+
+          responseData = await res.json();
+          result = responseData.choices?.[0]?.message?.content || '';
+          break;
+        }
+
+        // Track cost
+        if (responseData && callbacks.onCost) {
+          const promptTokens = responseData.usage?.prompt_tokens || 0;
+          const completionTokens = responseData.usage?.completion_tokens || 0;
+          const promptPrice = parseFloat(config.modelPricing?.prompt || '0');
+          const completionPrice = parseFloat(config.modelPricing?.completion || '0');
+          callbacks.onCost(promptTokens, completionTokens, (promptTokens * promptPrice) + (completionTokens * completionPrice));
+        }
+
+        // Parse response
+        if (result) {
+          const candidates = parseReconciliationResponse(result, groups, batchIdx);
+          if (candidates.length > 0) {
+            allCandidates.push(...candidates);
+            callbacks.onBatchProcessed(batchIdx, candidates);
+          }
+        }
+
+        totalProcessed++;
+      } catch (e: any) {
+        if (e.name === 'AbortError') return;
+        callbacks.onError(batchIdx, e.message || 'Unknown error');
+        totalProcessed++;
+      }
+    }
+  };
+
+  const workerCount = Math.min(config.concurrency || 5, batches.length);
+  const workers = Array.from({ length: workerCount }, () => processNext());
+  await Promise.all(workers);
+
+  callbacks.onComplete(totalProcessed, allCandidates.length);
+  return allCandidates;
+}
+
+function parseReconciliationResponse(content: string, groups: AutoGroupSuggestion[], batchIdx: number): ReconciliationCandidate[] {
+  let jsonStr = content.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+
+  let parsed: { duplicates: Array<{ checkIdx: number; matchIdx: number; confidence: number; reason: string }> };
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try { parsed = JSON.parse(jsonMatch[0]); } catch { return []; }
+    } else {
+      return [];
+    }
+  }
+
+  if (!parsed?.duplicates || !Array.isArray(parsed.duplicates)) return [];
+
+  const candidates: ReconciliationCandidate[] = [];
+  for (const dup of parsed.duplicates) {
+    const checkIdx = (dup.checkIdx || 0) - 1; // Convert from 1-indexed
+    const matchIdx = (dup.matchIdx || 0) - 1;
+
+    // Validate indices
+    if (checkIdx < 0 || checkIdx >= groups.length || matchIdx < 0 || matchIdx >= groups.length) continue;
+    if (checkIdx === matchIdx) continue; // Can't match self
+
+    // Deduplicate: ensure we don't already have this pair (A↔B = B↔A)
+    const pairKey = [Math.min(checkIdx, matchIdx), Math.max(checkIdx, matchIdx)].join(':');
+    const groupA = groups[checkIdx];
+    const groupB = groups[matchIdx];
+
+    candidates.push({
+      id: `recon_${pairKey}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      groupA: { name: groupA.groupName, idx: checkIdx, volume: groupA.totalVolume, pages: groupA.pages.length },
+      groupB: { name: groupB.groupName, idx: matchIdx, volume: groupB.totalVolume, pages: groupB.pages.length },
+      confidence: dup.confidence || 0,
+      reason: dup.reason || '',
+    });
+  }
+
+  return candidates;
+}
+
+/** Merge reconciliation candidates into suggestions — higher volume group absorbs lower */
+export function applyReconciliationMerges(
+  suggestions: AutoGroupSuggestion[],
+  candidates: ReconciliationCandidate[]
+): AutoGroupSuggestion[] {
+  // Build union-find for chain merges (A↔B + B↔C = all merge into highest vol)
+  const parent = new Map<number, number>();
+  const find = (x: number): number => {
+    if (!parent.has(x)) return x;
+    const p = find(parent.get(x)!);
+    parent.set(x, p);
+    return p;
+  };
+  const union = (a: number, b: number): void => {
+    const pa = find(a), pb = find(b);
+    if (pa === pb) return;
+    // Higher volume becomes parent
+    if (suggestions[pa].totalVolume >= suggestions[pb].totalVolume) {
+      parent.set(pb, pa);
+    } else {
+      parent.set(pa, pb);
+    }
+  };
+
+  // Only merge non-dismissed candidates
+  for (const c of candidates) {
+    if (c.dismissed) continue;
+    union(c.groupA.idx, c.groupB.idx);
+  }
+
+  // Group all suggestions by their root parent
+  const mergeGroups = new Map<number, number[]>();
+  for (let i = 0; i < suggestions.length; i++) {
+    const root = find(i);
+    const existing = mergeGroups.get(root);
+    if (existing) existing.push(i);
+    else mergeGroups.set(root, [i]);
+  }
+
+  // Build merged suggestions
+  const merged: AutoGroupSuggestion[] = [];
+  for (const [rootIdx, memberIndices] of mergeGroups) {
+    if (memberIndices.length === 1) {
+      merged.push(suggestions[memberIndices[0]]);
+      continue;
+    }
+
+    // Merge all members into the root (highest volume)
+    const root = suggestions[rootIdx];
+    const allPages: ClusterSummary[] = [...root.pages];
+    for (const idx of memberIndices) {
+      if (idx === rootIdx) continue;
+      allPages.push(...suggestions[idx].pages);
+    }
+
+    const stats = buildClusterStats(allPages);
+    merged.push({
+      ...root,
+      pages: allPages,
+      ...stats,
+    });
+  }
+
+  return merged;
 }

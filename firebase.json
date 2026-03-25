@@ -5,5 +5,9 @@
     "rewrites": [
       { "source": "**", "destination": "/index.html" }
     ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "database": "ai-studio-ce311d87-660a-4b45-9478-db6c56d1e645"
   }
 }

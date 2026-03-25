@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
 import pluralize from 'pluralize';
-import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList } from 'lucide-react';
+import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries, misspellingMap } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, stateRegex, capitalizeWords, normalizeState, detectForeignEntity, synonymRegex, multiWordLocationsRegex, pluralizeCache, misspellingRegex, prefixPattern, localIntentRegex, stem, getLabelColor } from './processing';
 import { auth, db, googleProvider } from './firebase';
@@ -693,6 +693,9 @@ export default function App() {
   const [approvedGroups, setApprovedGroups] = useState<GroupedCluster[]>([]);
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
   const activityLogRef = useRef(activityLog);
+  // Cloud sync status: 'synced' | 'syncing' | 'error' | 'offline'
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<'synced' | 'syncing' | 'error' | 'offline'>('synced');
+  const lastSyncTimeRef = useRef<number>(0);
   useEffect(() => { activityLogRef.current = activityLog; }, [activityLog]);
   const [autoGroupSuggestions, setAutoGroupSuggestions] = useState<AutoGroupSuggestion[]>([]);
   const autoGroupSuggestionsRef = useRef(autoGroupSuggestions);
@@ -989,6 +992,7 @@ export default function App() {
 
   // Save project data to Firestore in chunks
   const saveProjectDataToFirestore = async (projectId: string, data: any) => {
+    setCloudSyncStatus('syncing');
     try {
       const chunksRef = collection(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION);
 
@@ -1048,7 +1052,14 @@ export default function App() {
         }
       };
 
-      // Meta chunk (stats, tokens, grouped — smaller data)
+      // Chunk autoGroupSuggestions (can be large with 900+ groups)
+      const suggestions: any[] = data.autoGroupSuggestions || [];
+      const suggestionChunks: any[][] = [];
+      for (let i = 0; i < suggestions.length; i += CHUNK_SIZE) {
+        suggestionChunks.push(suggestions.slice(i, i + CHUNK_SIZE));
+      }
+
+      // Meta chunk (stats, tokens, grouped — smaller data, no large arrays)
       addToBatch('meta', {
         type: 'meta',
         stats: data.stats || null,
@@ -1058,10 +1069,13 @@ export default function App() {
         approvedGroups: data.approvedGroups || [],
         blockedTokens: data.blockedTokens || [],
         labelSections: data.labelSections || [],
+        activityLog: (data.activityLog || []).slice(0, 500),
+        tokenMergeRules: data.tokenMergeRules || [],
         updatedAt: new Date().toISOString(),
         resultChunkCount: resultChunks.length,
         clusterChunkCount: clusterChunks.length,
         blockedChunkCount: blockedChunks.length,
+        suggestionChunkCount: suggestionChunks.length,
       });
 
       // Result chunks
@@ -1079,9 +1093,14 @@ export default function App() {
         addToBatch(`blocked_${idx}`, { type: 'blocked', index: idx, data: chunk });
       });
 
+      // Auto-group suggestion chunks
+      suggestionChunks.forEach((chunk, idx) => {
+        addToBatch(`suggestions_${idx}`, { type: 'suggestions', index: idx, data: chunk });
+      });
+
       if (ops > 0) writeBatches.push(batch.commit());
       await Promise.all(writeBatches);
-      console.log(`Firestore save SUCCESS: ${resultChunks.length} result chunks, ${clusterChunks.length} cluster chunks, ${blockedChunks.length} blocked chunks`);
+      console.log(`Firestore save SUCCESS: ${resultChunks.length} result, ${clusterChunks.length} cluster, ${blockedChunks.length} blocked, ${suggestionChunks.length} suggestion chunks`);
     } catch (e) {
       console.warn('Firestore data save error:', e);
     }
@@ -1098,6 +1117,7 @@ export default function App() {
       const resultChunks: { index: number; data: any[] }[] = [];
       const clusterChunks: { index: number; data: any[] }[] = [];
       const blockedChunks: { index: number; data: any[] }[] = [];
+      const suggestionChunks: { index: number; data: any[] }[] = [];
 
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
@@ -1105,6 +1125,7 @@ export default function App() {
         else if (d.type === 'results') resultChunks.push({ index: d.index, data: d.data });
         else if (d.type === 'clusters') clusterChunks.push({ index: d.index, data: d.data });
         else if (d.type === 'blocked') blockedChunks.push({ index: d.index, data: d.data });
+        else if (d.type === 'suggestions') suggestionChunks.push({ index: d.index, data: d.data });
       });
 
       if (!meta) return null;
@@ -1113,6 +1134,7 @@ export default function App() {
       const results = resultChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
       const clusterSummary = clusterChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
       const blockedKeywords = blockedChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
+      const autoGroupSuggestions = suggestionChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
 
       return {
         results: results.length > 0 ? results : null,
@@ -1125,6 +1147,9 @@ export default function App() {
         blockedTokens: meta.blockedTokens || [],
         blockedKeywords,
         labelSections: meta.labelSections || [],
+        activityLog: meta.activityLog || [],
+        tokenMergeRules: meta.tokenMergeRules || [],
+        autoGroupSuggestions,
       };
     } catch (e) {
       console.warn('Firestore data load error:', e);
@@ -3511,8 +3536,8 @@ export default function App() {
   // Global Tab key shortcut: press Tab anywhere to group selected pages
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Tab' && !e.shiftKey) {
-        // Tab in Pages (Ungrouped) → Group selected clusters
+      if (e.key === 'Tab' || e.key === 'Shift') {
+        // Tab or Shift in Pages (Ungrouped) → Group selected clusters
         if (activeTab === 'pages' && selectedClusters.size > 0 && groupNameInput.trim()) {
           e.preventDefault();
           e.stopPropagation();
