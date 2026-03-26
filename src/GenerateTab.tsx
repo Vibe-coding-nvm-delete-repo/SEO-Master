@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Loader2, Play, Square, Settings, ChevronDown, Search, Check, AlertCircle, X, Trash2, RotateCcw, Copy, Clock, Download, Zap, ScrollText, RefreshCw, Globe, HelpCircle, Star } from 'lucide-react';
 import { db } from './firebase';
@@ -303,7 +304,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
           setIsLoaded(true);
           return;
         }
-      } catch (_error) {
+      } catch {
         // Best-effort local fallback; keep default rows on read failure.
       }
       if (alive) {
@@ -457,7 +458,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
 
   // Balance state
   const [balance, setBalance] = useState<number | null>(null);
-  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [, setBalanceLoading] = useState(false);
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
@@ -808,7 +809,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       // data.data.total_credits and data.data.total_usage in USD
       const remaining = (data.data?.total_credits ?? 0) - (data.data?.total_usage ?? 0);
       setBalance(remaining);
-    } catch (_error) {
+    } catch {
       // Ignore balance fetch failures to avoid noisy UI errors.
     }
     setBalanceLoading(false);

@@ -30,7 +30,8 @@
 - **IndexedDB saves are serialized** with the same queue as Firestore writes (same order as local mutations). Previously IDB used concurrent writes — an older save could finish last and overwrite a newer one, so a refresh showed stale “ungrouped” state.
 - **Coalesced persist flushes:** many rapid mutations (e.g. auto-group spam) set a dirty flag; one async worker loops until quiet, always building the payload from **`latest.current`**. That avoids a deep queue of 50+ full Firestore writes and keeps the server much closer to the UI when the user pauses or refreshes.
 - **Crash-safety IDB checkpoints:** every state mutation now writes an immediate best-effort snapshot to IndexedDB before queued Firestore flushes, and auto-group suggestion edits also checkpoint instantly. This reduces data loss if the tab crashes or reloads before coalesced cloud writes finish.
-- **Database targeting hardening:** Firestore now defaults to the workspace's named database (`first-db`) when `VITE_FIRESTORE_DATABASE_ID` is not set, preventing "missing projects" states caused by reading from the wrong (default) database.
+- **Database targeting hard lock:** Firestore is now pinned to the workspace database (`first-db`) at runtime. `VITE_FIRESTORE_DATABASE_ID` cannot switch databases anymore; non-matching values are ignored and logged as configuration errors.
+- **DB lock tests:** database resolution is centralized (`resolveFirestoreDatabaseId`) and covered by tests that enforce lock behavior for missing, matching, and invalid env values.
 - Chunk hydration reconciles `meta` chunk counts with visible chunk docs so mid-save Firestore snapshots cannot drop grouped/approved rows; grouped/approved chunk docs are stamped with `saveId` and hydration rejects snapshots where chunk `saveId` doesn’t match `meta.saveId`
 - Active project ID persisted in localStorage for session restore
 

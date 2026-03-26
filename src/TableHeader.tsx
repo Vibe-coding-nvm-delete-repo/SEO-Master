@@ -4,7 +4,7 @@ import type { ColumnDef } from './tableConstants';
 import { CELL } from './tableConstants';
 import LabelFilterDropdown from './LabelFilterDropdown';
 import { db } from './firebase';
-import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 
 export interface FilterBag {
   minLen: string; setMinLen: (v: string) => void;

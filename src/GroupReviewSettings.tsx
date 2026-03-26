@@ -2,7 +2,7 @@
 // Shared settings live in Firestore.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, useImperativeHandle, forwardRef } from 'react';
-import { Settings, Star, Check, ChevronDown, Search, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Star, Check, ChevronDown, Search, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { db } from './firebase';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { DEFAULT_SYSTEM_PROMPT } from './GroupReviewEngine';
@@ -153,7 +153,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', FS_DOC), (snap) => {
       const remote = snap.exists() ? snap.data() : null;
-      setSettings(prev => {
+      setSettings(() => {
         const merged: GroupReviewSettingsData = {
           apiKey: remote?.apiKey || '',
           selectedModel: remote?.selectedModel || '',

@@ -179,6 +179,8 @@ const EMPTY: PersistedState = {
   fileName: null,
 };
 
+const SESSION_CLIENT_ID = `c_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -261,7 +263,7 @@ export function useProjectPersistence(options: {
   // ── Save infrastructure ───────────────────────────────────────────────
   // Unique per browser session — written to Firestore meta doc so the
   // onSnapshot listener can recognise (and skip) our own save echoes.
-  const clientIdRef = useRef('c_' + Math.random().toString(36).slice(2) + Date.now().toString(36));
+  const clientIdRef = useRef(SESSION_CLIENT_ID);
   const projectLoadingRef = useRef(false);
   const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
   const saveCounterRef = useRef(0);
@@ -467,7 +469,9 @@ export function useProjectPersistence(options: {
   // projectsRef defined above (with other refs) so the listener isn't torn down/recreated
   // when projects changes — recreating it fires immediately with potentially stale Firestore
   // state, which wipes in-flight data (e.g. CSV upload results not yet saved to Firestore).
-  projectsRef.current = projects;
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
 
   useEffect(() => {
     const pid = activeProjectIdRef.current;
@@ -589,7 +593,6 @@ export function useProjectPersistence(options: {
       () => {},
     );
     return () => { if (typeof unsub === 'function') unsub(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId, applyViewState]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────

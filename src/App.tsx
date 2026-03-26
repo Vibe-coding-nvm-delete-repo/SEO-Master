@@ -1,4 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable react-hooks/exhaustive-deps */
+/* eslint-disable prefer-const */
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
 import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb } from 'lucide-react';
@@ -1529,7 +1531,6 @@ export default function App() {
     });
 
     return () => { if (typeof unsub === 'function') unsub(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearProject, mapProjectsSnapshot]);
 
 
@@ -3709,7 +3710,6 @@ export default function App() {
         g.reviewStatus === 'reviewing' ? { ...g, reviewStatus: 'pending' as const } : g
       );
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount; persistence is stable
   }, []);
 
   // Grouping rate tracker â€" estimates remaining time to group all ungrouped pages
@@ -4295,7 +4295,7 @@ FAILURE CONDITIONS TO AVOID:
   // Auto-correct page if it exceeds total (e.g. after filtering reduces results)
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages);
-  }, [totalPages]); // eslint-disable-line -- only react to totalPages changes, not currentPage
+  }, [totalPages]);
 
   const filteredCount = activeTab === 'pages' ? sortedClusters.length :
                        activeTab === 'grouped' ? filteredSortedGrouped.length :

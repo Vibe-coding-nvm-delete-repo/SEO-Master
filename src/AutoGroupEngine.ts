@@ -1102,7 +1102,7 @@ export async function processReconciliation(
   return allCandidates;
 }
 
-function parseReconciliationResponse(content: string, groups: AutoGroupSuggestion[], batchIdx: number): ReconciliationCandidate[] {
+function parseReconciliationResponse(content: string, groups: AutoGroupSuggestion[], _batchIdx: number): ReconciliationCandidate[] {
   let jsonStr = content.trim();
   const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();

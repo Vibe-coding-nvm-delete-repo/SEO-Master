@@ -100,7 +100,6 @@ const FeedbackModal: React.FC<FeedbackModalProps> = ({ isOpen, onClose, authorEm
     kind,
     issueTryingTo,
     issueWhatHappened,
-    issueExpected,
     featureNeed,
     featureIdea,
   ]);

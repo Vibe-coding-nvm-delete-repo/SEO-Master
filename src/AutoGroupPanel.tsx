@@ -1,4 +1,6 @@
 /* eslint-disable no-irregular-whitespace */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { ChevronDown, ChevronRight, Play, Square, CheckCircle2, AlertCircle, Loader2, ExternalLink, Copy, Settings, Zap, Search, Download } from 'lucide-react';
 import ModelSelector from './ModelSelector';

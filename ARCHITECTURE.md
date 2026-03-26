@@ -110,30 +110,36 @@ SEO Master Tool
 
 ## Component Architecture
 
-```
-App.tsx (5,246 lines — monolithic, planned for extraction)
-├── ErrorBoundary (class component)
-├── KeywordRow (React.memo)
-├── ClusterRow (React.memo)
-├── TokenRow (React.memo)
-├── GroupedClusterRow (React.memo)
-└── App() function
-    ├── ~125 useState calls
-    ├── ~12 useEffect blocks
-    ├── ~30 useMemo computations
-    └── ~15 useCallback functions
+### Current shape (high-risk concentration)
 
-GenerateTab.tsx (2,020 lines)
-├── GenerateTabInstance (the actual UI, React.memo)
-└── GenerateTab (wrapper with sub-tab switching)
+- `App.tsx` (6217 lines): top-level orchestration + heavy domain logic are still co-located
+- `AutoGroupPanel.tsx` (3867 lines): settings, execution, review, and multiple views in one component
+- `GenerateTab.tsx` (1852 lines): persistence, queue execution, and UI composition mixed together
+- `AutoGroupEngine.ts` (1203 lines): orchestration + helper logic still tightly coupled
+- `useProjectPersistence.ts` (840 lines): central sync boundary with high correctness sensitivity
 
-GroupReviewSettings.tsx (338 lines)
-GroupReviewEngine.ts (generates AI review requests)
-processing.ts (298 lines — utilities extracted from App.tsx)
-types.ts (104 lines — shared TypeScript interfaces)
-dictionaries.ts (791 lines — synonym maps, stop words, etc.)
-firebase.ts (12 lines — SDK initialization)
-```
+### Refactor target state
+
+- `App.tsx` becomes a composition shell (routing, provider wiring, high-level coordination only)
+- Domain logic moves to focused hooks:
+  - `useProjectLifecycle`
+  - `useKeywordWorkspace`
+  - `useGroupingActions`
+  - `useTokenActions`
+  - `useNavigationState`
+- `AutoGroupPanel.tsx` split into pipeline hooks + dedicated views (`Toolbar`, suggestions, duplicates, cosine stages)
+- `GenerateTab.tsx` split into:
+  - persistence hook
+  - generation queue hook
+  - settings/table/log view components
+- persistence operations converge on one shared contract so all modules follow identical save/snapshot semantics
+
+### Priority policy
+
+Refactor execution order follows `REFACTOR_PLAN.md`:
+1. P0 data integrity + multi-user sync
+2. P1 monolith splits in active demand paths (`App`, `AutoGroupPanel`, `GenerateTab`)
+3. P2/P3 reuse, performance, test/accessibility debt
 
 ## Performance Considerations
 

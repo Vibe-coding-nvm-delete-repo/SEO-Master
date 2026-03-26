@@ -426,7 +426,8 @@ export function executeMergeCascade(
   const newClusterMap = new Map(newClusters.map(c => [c.tokens, c]));
 
   // Phase 3: Update groups
-  let { updatedGroups, emptyGroupNames } = updateGroupsAfterMerge(groupedClusters, signatureMap, newClusterMap);
+  const { updatedGroups: initialUpdatedGroups, emptyGroupNames } = updateGroupsAfterMerge(groupedClusters, signatureMap, newClusterMap);
+  let updatedGroups = initialUpdatedGroups;
 
   // Phase 4: Handle cross-group conflicts
   updatedGroups = handleCrossGroupConflict(updatedGroups);

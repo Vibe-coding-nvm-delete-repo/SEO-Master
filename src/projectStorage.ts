@@ -1,5 +1,5 @@
 import { db } from './firebase';
-import { collection, deleteDoc, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, setDoc, writeBatch } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDocFromServer, getDocs, getDocsFromServer, setDoc, writeBatch } from 'firebase/firestore';
 import type {
   ActivityLogEntry,
   AutoGroupSuggestion,
@@ -388,7 +388,7 @@ export const saveProjectToFirestore = async (project: Project) => {
     if (idx >= 0) projects[idx] = project;
     else projects.push(project);
     localStorage.setItem(LS_PROJECTS_KEY, JSON.stringify(projects));
-  } catch (_error) {
+  } catch {
     // Ignore localStorage write failures (quota/private mode).
   }
 };
@@ -708,7 +708,7 @@ export const loadProjectsFromFirestore = async (): Promise<Project[]> => {
       // Cache to localStorage so projects survive Firestore quota errors
       try {
         localStorage.setItem(LS_PROJECTS_KEY, JSON.stringify(firestoreProjects));
-      } catch (_error) {
+      } catch {
         // Ignore localStorage write failures (quota/private mode).
       }
       return firestoreProjects;
@@ -725,7 +725,7 @@ export const loadProjectsFromFirestore = async (): Promise<Project[]> => {
           return projects;
         }
       }
-    } catch (_error) {
+    } catch {
       // Ignore localStorage read failures and fall through to empty list.
     }
   }

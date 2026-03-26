@@ -318,8 +318,7 @@ async function runTests() {
   // ── Test 20 ──
   console.log('\nTest 20: forceFlush clears pending updates');
   {
-    let resolved = false;
-    const m = makeMock({ fn: async () => { resolved = true; return ok(); } });
+    const m = makeMock({ fn: async () => ok() });
     const q = makeQueue(1);
     const e = createGenerationEngine(q, { rateLimit: 1, minLen: 0, maxLen: 0, maxRetries: 3 }, m.cb);
     e.spawnWorkers(1);
