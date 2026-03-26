@@ -124,6 +124,15 @@ export interface ReconciliationCandidate {
   dismissed?: boolean;
 }
 
+export type AutoGroupSuggestionSource =
+  | 'llm-v1'
+  | 'v1-singleton'
+  | 'cosine'
+  | 'cosine-singleton'
+  | 'two-token-llm'
+  | 'two-token-standalone'
+  | 'single-token';
+
 export interface AutoGroupSuggestion {
   id: string;
   sourceClusterId: string;
@@ -135,6 +144,9 @@ export interface AutoGroupSuggestion {
   status: 'pending' | 'processing' | 'approved' | 'mismatch' | 'error' | 'manual-review';
   retryCount: number;
   stage?: number;  // which cascade stage produced this group
+  source?: AutoGroupSuggestionSource;
+  assignmentConfidence?: number;
+  assignmentReason?: string;
   reviewReason?: string;
   reviewMismatchedPages?: string[];
   reviewCost?: number;
@@ -163,4 +175,23 @@ export interface Stats {
   clusters: number;
   tokens: number;
   totalVolume: number;
+}
+
+/** User-submitted product feedback (issues / features). Stored in Firestore + IndexedDB. */
+export interface FeedbackEntry {
+  id: string;
+  kind: 'issue' | 'feature';
+  body: string;
+  /** Lower = higher priority (listed first). */
+  priority: number;
+  createdAt: string;
+  authorEmail: string | null;
+  /** Normalized tags (e.g. csv-import, mobile). */
+  tags: string[];
+  /** Issue: 1–4 severity (disruption). Null on legacy docs. */
+  issueSeverity: 1 | 2 | 3 | 4 | null;
+  /** Feature: 1–4 impact / importance. Null on legacy docs. */
+  featureImpact: 1 | 2 | 3 | 4 | null;
+  /** Up to 3 screenshot URLs (Firebase Storage). */
+  attachmentUrls?: string[];
 }

@@ -42,6 +42,102 @@ function scoreConfidence(pageCount: number, stage: number): 'high' | 'medium' | 
   return 'review';
 }
 
+function normalizeWords(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function buildSuggestionFromPages(
+  id: string,
+  sourceClusterId: string,
+  pages: ClusterSummary[],
+  source: AutoGroupSuggestion['source'],
+  stage?: number
+): AutoGroupSuggestion {
+  const sorted = [...pages].sort((a, b) => b.totalVolume - a.totalVolume);
+  const stats = buildClusterStats(sorted);
+
+  return {
+    id,
+    sourceClusterId,
+    groupName: sorted[0]?.pageName || sourceClusterId,
+    pages: sorted,
+    ...stats,
+    status: 'pending',
+    retryCount: 0,
+    stage,
+    source,
+  };
+}
+
+export interface AutoGroupBatchAssignment {
+  pageId: string;
+  page: string;
+  targetGroupName: string;
+}
+
+export interface AutoGroupBatchPromptInput {
+  batch: ClusterSummary[];
+  existingGroupNames: string[];
+}
+
+export function buildAutoGroupSuggestionFromPages(
+  id: string,
+  sourceClusterId: string,
+  pages: ClusterSummary[],
+  source: AutoGroupSuggestion['source'] = 'llm-v1',
+  stage?: number
+): AutoGroupSuggestion {
+  return buildSuggestionFromPages(id, sourceClusterId, pages, source, stage);
+}
+
+export function buildTwoTokenBatchClusters(pages: ClusterSummary[], batchSize = 40): AutoGroupCluster[] {
+  const twoTokenPages = pages
+    .filter(page => page.tokenArr.length === 2)
+    .sort((a, b) => {
+      const tokenCmp = a.tokens.localeCompare(b.tokens);
+      if (tokenCmp !== 0) return tokenCmp;
+      return b.totalVolume - a.totalVolume;
+    });
+
+  const batches: AutoGroupCluster[] = [];
+  for (let i = 0; i < twoTokenPages.length; i += batchSize) {
+    const batchPages = twoTokenPages.slice(i, i + batchSize);
+    if (batchPages.length === 0) continue;
+    const stats = buildClusterStats(batchPages);
+    batches.push({
+      id: `two_token_batch_${i / batchSize}`,
+      sharedTokens: [],
+      pages: batchPages,
+      ...stats,
+      pageCount: batchPages.length,
+      confidence: 'review',
+      isIdentical: false,
+      stage: 2,
+    });
+  }
+
+  return batches;
+}
+
+export function buildSingleTokenSuggestions(pages: ClusterSummary[]): AutoGroupSuggestion[] {
+  return pages
+    .filter(page => page.tokenArr.length === 1)
+    .sort((a, b) => b.totalVolume - a.totalVolume)
+    .map(page =>
+      buildSuggestionFromPages(
+        `single_token_${page.tokens}`,
+        `single_token_${page.tokens}`,
+        [page],
+        'single-token',
+        1
+      )
+    );
+}
+
 /**
  * Build cascading token clusters from ungrouped pages.
  * Cascades from max token overlap down to 2-token overlap.
@@ -249,6 +345,62 @@ Respond with valid JSON only. No explanation outside the JSON:
   ]
 }`;
 
+const DEFAULT_TWO_TOKEN_GROUP_PROMPT = `You are a strict SEO grouping expert. You will receive a batch of SHORT page names where each page has exactly 2 tokens.
+
+Your job is to group ONLY exact semantic matches. The goal is precision, not recall.
+
+STRICT RULES:
+1. Only group pages if they represent the SAME exact search intent.
+2. Single-page groups are expected and correct.
+3. If there is any ambiguity, keep pages separate.
+4. Different locations are never a match.
+5. Generic vs specific pages are never a match.
+6. Tool, comparison, review, informational, pricing, legal, and transactional intents must stay separate.
+7. Wording changes can still be the same intent if the semantic meaning is exact.
+
+Examples:
+- "car loan" + "auto loan" = same group
+- "cash advance" + "payday loans" = same group only if they clearly mean the same product/service
+- "mortgage rates" + "mortgage calculator" = separate
+- "payday loans houston" + "payday loans dallas" = separate
+- "loans" + "payday loans" = separate
+
+Respond with valid JSON only:
+{
+  "groups": [
+    { "pages": ["page 1", "page 2"], "theme": "brief shared intent" }
+  ]
+}`;
+
+const DEFAULT_SHORT_ASSIGNMENT_PROMPT = `You are deciding whether a short SEO group should merge into one existing long-form SEO group.
+
+You will receive:
+- ONE short group (usually 2-token pages)
+- A numbered shortlist of candidate existing groups
+
+Merge ONLY if one candidate has the SAME exact search intent.
+
+STRICT RULES:
+1. Exact semantic match only.
+2. If uncertain, return no match.
+3. Different locations are never a match.
+4. Generic vs specific pages are never a match.
+5. Tool, comparison, review, pricing, legal, informational, and transactional intent differences mean no match.
+
+Return JSON only:
+{
+  "matchIdx": 3,
+  "confidence": 91,
+  "reason": "brief explanation"
+}
+
+If none should match:
+{
+  "matchIdx": null,
+  "confidence": 0,
+  "reason": "no exact semantic match"
+}`;
+
 // Allow custom prompt override
 let customAutoGroupPrompt: string | null = null;
 
@@ -261,6 +413,183 @@ export function getAutoGroupPrompt(): string {
 }
 
 export { DEFAULT_AUTO_GROUP_PROMPT };
+
+export const DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT = `You are a strict SEO grouping engine.
+
+Assign each page to exactly one target group name.
+
+STRICT RULES:
+1. A page may join an existing group only if the page and group name represent the same exact search intent.
+2. Minor lexical variation is allowed only when it does not change meaning in any way.
+3. If intent, specificity, purpose, modifier, location, or user need changes, do not join it.
+4. When in doubt, keep the page separate by assigning it to itself.
+5. Single-page groups are correct when no exact match exists.
+6. Do not merge broad vs specific, informational vs transactional, comparison, tool, review, pricing, legal, or location-specific intents unless they are truly the same exact intent.
+7. targetGroupName must be either an existing group name or one of the current batch page names.
+8. Never invent a new name.
+
+Return JSON only:
+{"assignments":[{"pageId":"P1","page":"page name","targetGroupName":"existing group or batch page"}]}`;
+
+export const DEFAULT_AUTO_GROUP_QA_PROMPT = `You are a strict SEO QA reviewer.
+
+You will receive:
+1. A group name
+2. The pages currently assigned to that group
+
+Your job is to decide whether every page is a strict exact semantic match for the group name.
+
+STRICT RULES:
+1. Use strict matching.
+2. A page belongs only if it represents the same exact search intent as the group name.
+3. Minor lexical variation is allowed only when it does not change semantic meaning in any way.
+4. If a page is broader, narrower, different in intent, tool-related, comparison-based, informational vs transactional, review-based, pricing-based, legal, or location-specific in a way that changes meaning, it is a mismatch.
+5. When in doubt, mark the page as a mismatch.
+
+Return valid JSON only:
+{ "status": "approve" | "mismatch", "mismatched_pages": [], "reason": "brief explanation" }`;
+
+export const DEFAULT_COSINE_SUMMARY_PROMPT = `You write strict semantic intent summaries for SEO page names.
+
+You will receive a batch of page ids and page names.
+
+Write exactly one sentence per page that describes the exact complete semantic core intent of that page.
+
+STRICT RULES:
+1. Be strict and literal.
+2. Do not broaden the meaning.
+3. Do not add assumptions not clearly supported by the page name.
+4. Do not merge nearby intents into one description.
+5. Keep each summary concise and factual.
+6. Preserve important modifiers like location, intent, audience, comparison, pricing, reviews, tools, requirements, and timing if they are present.
+
+Return JSON only:
+{"summaries":[{"pageId":"P1","summary":"one sentence"}]}`;
+
+export function buildAutoGroupBatchPrompt(input: AutoGroupBatchPromptInput): { system: string; user: string } {
+  const batchPages = input.batch
+    .sort((a, b) => b.totalVolume - a.totalVolume)
+    .map((page, idx) => `P${idx + 1} | ${page.pageName} | vol: ${page.totalVolume}`)
+    .join('\n');
+
+  const existingGroups = input.existingGroupNames.length > 0
+    ? input.existingGroupNames.join('\n')
+    : 'None';
+
+  return {
+    system: DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT,
+    user:
+      `Batch pages (${input.batch.length}):\n${batchPages}\n\n` +
+      `Existing group names:\n${existingGroups}\n\n` +
+      `Every batch page must appear exactly once in assignments.\n` +
+      `Return the pageId for each assignment. targetGroupName must be an existing group name or the exact page name of the batch anchor page.`,
+  };
+}
+
+export function buildCosineSummaryPrompt(batch: ClusterSummary[]): { system: string; user: string } {
+  const pageLines = batch
+    .map((page, idx) => `P${idx + 1} | ${page.pageName}`)
+    .join('\n');
+
+  return {
+    system: DEFAULT_COSINE_SUMMARY_PROMPT,
+    user:
+      `Write one strict semantic intent sentence for each page.\n\n` +
+      `Pages (${batch.length}):\n${pageLines}\n\n` +
+      `Every pageId must appear exactly once in the JSON response.`,
+  };
+}
+
+export function parseAutoGroupBatchResponse(
+  content: string,
+  batch: ClusterSummary[],
+  existingGroupNames: string[]
+): AutoGroupBatchAssignment[] {
+  let jsonStr = content.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+
+  let parsed: { assignments?: Array<{ pageId?: string; page?: string; targetGroupName?: string }> };
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      return [];
+    }
+  }
+
+  const pageIds = batch.map((page, idx) => ({ id: `P${idx + 1}`, page }));
+  const validPageIds = new Map(pageIds.map(({ id, page }) => [id.toLowerCase(), page]));
+  const validPageNames = new Map<string, ClusterSummary[]>();
+  for (const page of batch) {
+    const normalized = page.pageName.toLowerCase().trim();
+    validPageNames.set(normalized, [...(validPageNames.get(normalized) || []), page]);
+  }
+  const existingLookup = new Map(existingGroupNames.map(name => [name.toLowerCase().trim(), name]));
+  const assignments = new Map<string, AutoGroupBatchAssignment>();
+
+  for (const entry of parsed.assignments || []) {
+    const normalizedPageId = String(entry.pageId || '').toLowerCase().trim();
+    const normalizedPage = String(entry.page || '').toLowerCase().trim();
+    const normalizedTarget = String(entry.targetGroupName || '').toLowerCase().trim();
+    const page =
+      validPageIds.get(normalizedPageId)
+      || (validPageNames.get(normalizedPage)?.length === 1 ? validPageNames.get(normalizedPage)?.[0] : undefined);
+    if (!page) continue;
+    const canonicalPageId = pageIds.find(item => item.page.tokens === page.tokens)?.id || '';
+
+    const batchTargetById = validPageIds.get(normalizedTarget);
+    const batchTargetByName = validPageNames.get(normalizedTarget)?.[0];
+    const existingTarget = existingLookup.get(normalizedTarget);
+    const targetGroupName = existingTarget || batchTargetById?.pageName || batchTargetByName?.pageName || page.pageName;
+
+    assignments.set(page.tokens, { pageId: canonicalPageId, page: page.pageName, targetGroupName });
+  }
+
+  for (const { id, page } of pageIds) {
+    if (!assignments.has(page.tokens)) {
+      assignments.set(page.tokens, { pageId: id, page: page.pageName, targetGroupName: page.pageName });
+    }
+  }
+
+  return batch.map(page => assignments.get(page.tokens)!);
+}
+
+export function parseCosineSummaryResponse(content: string, batch: ClusterSummary[]): string[] {
+  let jsonStr = content.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+
+  let parsed: { summaries?: Array<{ pageId?: string; summary?: string }> };
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return batch.map(page => page.pageName);
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      return batch.map(page => page.pageName);
+    }
+  }
+
+  const pageIds = batch.map((page, idx) => ({ id: `P${idx + 1}`.toLowerCase(), page }));
+  const summaryByToken = new Map<string, string>();
+
+  for (const entry of parsed.summaries || []) {
+    const normalizedPageId = String(entry.pageId || '').toLowerCase().trim();
+    const matched = pageIds.find(item => item.id === normalizedPageId);
+    const summary = String(entry.summary || '').trim();
+    if (!matched || !summary) continue;
+    summaryByToken.set(matched.page.tokens, summary);
+  }
+
+  return batch.map(page => summaryByToken.get(page.tokens) || page.pageName);
+}
 
 export function buildAutoGroupPrompt(cluster: AutoGroupCluster): { system: string; user: string } {
   const pageList = cluster.pages
@@ -347,6 +676,102 @@ export function parseAutoGroupResponse(
   return suggestions;
 }
 
+export function buildTwoTokenPrompt(cluster: AutoGroupCluster): { system: string; user: string } {
+  const pageList = cluster.pages
+    .sort((a, b) => b.totalVolume - a.totalVolume)
+    .map(p => `- "${p.pageName}" (vol: ${p.totalVolume.toLocaleString()}, kws: ${p.keywordCount.toLocaleString()})`)
+    .join('\n');
+
+  return {
+    system: DEFAULT_TWO_TOKEN_GROUP_PROMPT,
+    user: `These are short pages with exactly 2 tokens each.\n\n${pageList}\n\nGroup only exact semantic matches. Many pages should remain single-page groups. Return JSON.`,
+  };
+}
+
+export function buildSuggestionsFromCosineClusters(
+  pages: ClusterSummary[],
+  cosineClusters: Array<{ id: string; pages: ClusterSummary[] }>
+): { suggestions: AutoGroupSuggestion[]; unmatchedPages: ClusterSummary[] } {
+  const matched = new Set<string>();
+  const suggestions = cosineClusters.map(cluster => {
+    cluster.pages.forEach(page => matched.add(page.tokens));
+    const stage = Math.max(...cluster.pages.map(page => page.tokenArr.length), 3);
+    return buildSuggestionFromPages(
+      `cosine_group_${cluster.id}`,
+      `cosine_group_${cluster.id}`,
+      cluster.pages,
+      'cosine',
+      stage
+    );
+  });
+
+  const unmatchedPages = pages.filter(page => !matched.has(page.tokens));
+  return { suggestions, unmatchedPages };
+}
+
+export function buildSingletonSuggestions(
+  pages: ClusterSummary[],
+  source: AutoGroupSuggestion['source']
+): AutoGroupSuggestion[] {
+  return pages.map(page =>
+    buildSuggestionFromPages(
+      `${source}_${page.tokens}`,
+      `${source}_${page.tokens}`,
+      [page],
+      source,
+      page.tokenArr.length
+    )
+  );
+}
+
+function getSuggestionTokenSet(suggestion: AutoGroupSuggestion): Set<string> {
+  const tokens = new Set<string>();
+  for (const page of suggestion.pages) {
+    for (const token of page.tokenArr) tokens.add(token);
+  }
+  for (const word of normalizeWords(suggestion.groupName)) tokens.add(word);
+  return tokens;
+}
+
+export function buildAssignmentCandidates(
+  shortGroup: AutoGroupSuggestion,
+  targetGroups: AutoGroupSuggestion[],
+  limit = 20
+): AutoGroupSuggestion[] {
+  if (targetGroups.length <= limit) return targetGroups;
+
+  const shortTokens = getSuggestionTokenSet(shortGroup);
+  const scored = targetGroups.map(group => {
+    const targetTokens = getSuggestionTokenSet(group);
+    let shared = 0;
+    shortTokens.forEach(token => { if (targetTokens.has(token)) shared++; });
+
+    const sameLocation =
+      shortGroup.pages.some(page => page.locationCity || page.locationState)
+        ? group.pages.some(page =>
+            page.locationCity === shortGroup.pages[0]?.locationCity &&
+            page.locationState === shortGroup.pages[0]?.locationState
+          )
+        : !group.pages.some(page => page.locationCity || page.locationState);
+
+    const broadnessPenalty = group.pages[0]?.tokenArr.length === 1 ? 10 : 0;
+    const score = (shared * 100) + (sameLocation ? 25 : -50) + Math.log10(Math.max(group.totalVolume, 1)) - broadnessPenalty;
+    return { group, score };
+  });
+
+  const shortlist = scored
+    .sort((a, b) => b.score - a.score || b.group.totalVolume - a.group.totalVolume)
+    .slice(0, Math.max(5, limit - 5))
+    .map(item => item.group);
+
+  const extraTopVolume = [...targetGroups]
+    .sort((a, b) => b.totalVolume - a.totalVolume)
+    .filter(group => !shortlist.some(existing => existing.id === group.id))
+    .slice(0, 5);
+
+  return [...shortlist, ...extraTopVolume].slice(0, limit);
+}
+
 // ─── Queue Processing (concurrent API calls) ───
 
 export interface AutoGroupCallbacks {
@@ -358,11 +783,16 @@ export interface AutoGroupCallbacks {
   onComplete?: (totalProcessed: number, totalSuggestions: number) => void;
 }
 
+export interface AutoGroupQueueOptions {
+  promptBuilder?: (cluster: AutoGroupCluster) => { system: string; user: string };
+}
+
 export async function processAutoGroupQueue(
   clusters: AutoGroupCluster[],
   config: ReviewEngineConfig,
   callbacks: AutoGroupCallbacks,
-  signal: AbortSignal
+  signal: AbortSignal,
+  options: AutoGroupQueueOptions = {}
 ): Promise<void> {
   // Sort clusters by page count desc (largest first — highest impact)
   const queue = [...clusters].sort((a, b) => b.pageCount - a.pageCount);
@@ -376,7 +806,7 @@ export async function processAutoGroupQueue(
       callbacks.onProcessing(cluster.id);
 
       try {
-        const { system, user } = buildAutoGroupPrompt(cluster);
+        const { system, user } = (options.promptBuilder || buildAutoGroupPrompt)(cluster);
         const maxRateLimitRetries = 5;
 
         let result: string | null = null;
@@ -715,6 +1145,201 @@ function parseReconciliationResponse(content: string, groups: AutoGroupSuggestio
   }
 
   return candidates;
+}
+
+export interface ShortGroupAssignment {
+  shortGroupId: string;
+  targetGroupId: string | null;
+  confidence: number;
+  reason: string;
+}
+
+export interface ShortGroupAssignmentCallbacks {
+  onProcessed: (processed: number, total: number, assignment: ShortGroupAssignment | null) => void;
+  onError: (shortGroupId: string, error: string) => void;
+  onCost: (promptTokens: number, completionTokens: number, cost: number) => void;
+  onComplete: (processed: number, merged: number) => void;
+}
+
+function buildShortAssignmentPrompt(
+  shortGroup: AutoGroupSuggestion,
+  candidates: AutoGroupSuggestion[]
+): { system: string; user: string } {
+  const shortPages = shortGroup.pages.map(page => `- "${page.pageName}"`).join('\n');
+  const candidateList = candidates.map((group, idx) => {
+    const samplePages = group.pages.slice(0, 3).map(page => page.pageName).join(' | ');
+    return `${idx + 1}. ${group.groupName} (pages: ${group.pages.length}, sample: ${samplePages})`;
+  }).join('\n');
+
+  return {
+    system: DEFAULT_SHORT_ASSIGNMENT_PROMPT,
+    user: `SHORT GROUP:\nName: ${shortGroup.groupName}\nPages:\n${shortPages}\n\nCANDIDATE EXISTING GROUPS:\n${candidateList}\n\nReturn the numbered exact semantic match, or null if none match exactly.`,
+  };
+}
+
+function parseShortAssignmentResponse(
+  content: string,
+  shortGroup: AutoGroupSuggestion,
+  candidates: AutoGroupSuggestion[]
+): ShortGroupAssignment | null {
+  let jsonStr = content.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+
+  let parsed: { matchIdx: number | null; confidence?: number; reason?: string };
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try { parsed = JSON.parse(jsonMatch[0]); } catch { return null; }
+    } else {
+      return null;
+    }
+  }
+
+  if (parsed.matchIdx === null || parsed.matchIdx === undefined) {
+    return {
+      shortGroupId: shortGroup.id,
+      targetGroupId: null,
+      confidence: 0,
+      reason: parsed.reason || 'No exact semantic match',
+    };
+  }
+
+  const candidate = candidates[(parsed.matchIdx || 0) - 1];
+  if (!candidate) return null;
+
+  return {
+    shortGroupId: shortGroup.id,
+    targetGroupId: candidate.id,
+    confidence: parsed.confidence || 0,
+    reason: parsed.reason || '',
+  };
+}
+
+export async function processShortGroupAssignments(
+  shortGroups: AutoGroupSuggestion[],
+  targetGroups: AutoGroupSuggestion[],
+  config: ReviewEngineConfig,
+  callbacks: ShortGroupAssignmentCallbacks,
+  signal: AbortSignal
+): Promise<ShortGroupAssignment[]> {
+  if (shortGroups.length === 0 || targetGroups.length === 0) {
+    callbacks.onComplete(0, 0);
+    return [];
+  }
+
+  const assignments: ShortGroupAssignment[] = [];
+  let queueIdx = 0;
+  let processed = 0;
+
+  const processNext = async (): Promise<void> => {
+    while (queueIdx < shortGroups.length && !signal.aborted) {
+      const shortGroup = shortGroups[queueIdx++];
+      const candidates = buildAssignmentCandidates(shortGroup, targetGroups);
+
+      try {
+        const { system, user } = buildShortAssignmentPrompt(shortGroup, candidates);
+        const body: any = {
+          model: config.model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          temperature: config.temperature,
+          response_format: { type: 'json_object' },
+        };
+        if (config.maxTokens > 0) body.max_tokens = config.maxTokens;
+        if (config.reasoningEffort && config.reasoningEffort !== 'none') {
+          body.reasoning = { effort: config.reasoningEffort };
+        }
+
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${config.apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': window.location.origin,
+          },
+          body: JSON.stringify(body),
+          signal,
+        });
+
+        if (!res.ok) {
+          callbacks.onError(shortGroup.id, `API ${res.status}`);
+          processed++;
+          callbacks.onProcessed(processed, shortGroups.length, null);
+          continue;
+        }
+
+        const responseData = await res.json();
+        if (callbacks.onCost) {
+          const promptTokens = responseData.usage?.prompt_tokens || 0;
+          const completionTokens = responseData.usage?.completion_tokens || 0;
+          const promptPrice = parseFloat(config.modelPricing?.prompt || '0');
+          const completionPrice = parseFloat(config.modelPricing?.completion || '0');
+          callbacks.onCost(promptTokens, completionTokens, (promptTokens * promptPrice) + (completionTokens * completionPrice));
+        }
+
+        const result = responseData.choices?.[0]?.message?.content || '';
+        const assignment = parseShortAssignmentResponse(result, shortGroup, candidates);
+        if (assignment) assignments.push(assignment);
+        processed++;
+        callbacks.onProcessed(processed, shortGroups.length, assignment);
+      } catch (e: any) {
+        if (e.name === 'AbortError') return;
+        callbacks.onError(shortGroup.id, e.message || 'Unknown error');
+        processed++;
+        callbacks.onProcessed(processed, shortGroups.length, null);
+      }
+    }
+  };
+
+  const workerCount = Math.min(config.concurrency || 5, shortGroups.length);
+  await Promise.all(Array.from({ length: workerCount }, () => processNext()));
+  callbacks.onComplete(processed, assignments.filter(item => item.targetGroupId).length);
+  return assignments;
+}
+
+export function applyShortGroupAssignments(
+  longGroups: AutoGroupSuggestion[],
+  shortGroups: AutoGroupSuggestion[],
+  assignments: ShortGroupAssignment[]
+): AutoGroupSuggestion[] {
+  const assignedByShortId = new Map(assignments.map(item => [item.shortGroupId, item]));
+  const mergedLongGroups = longGroups.map(group => ({ ...group, pages: [...group.pages] }));
+  const longGroupById = new Map(mergedLongGroups.map(group => [group.id, group]));
+  const remainingShortGroups: AutoGroupSuggestion[] = [];
+
+  for (const shortGroup of shortGroups) {
+    const assignment = assignedByShortId.get(shortGroup.id);
+    if (assignment?.targetGroupId) {
+      const target = longGroupById.get(assignment.targetGroupId);
+      if (target) {
+        const mergedPages = [...target.pages, ...shortGroup.pages];
+        const stats = buildClusterStats(mergedPages);
+        target.pages = mergedPages;
+        target.keywordCount = stats.keywordCount;
+        target.totalVolume = stats.totalVolume;
+        target.avgKd = stats.avgKd;
+        target.assignmentConfidence = assignment.confidence;
+        target.assignmentReason = assignment.reason;
+      } else {
+        remainingShortGroups.push(shortGroup);
+      }
+    } else {
+      remainingShortGroups.push({
+        ...shortGroup,
+        source: shortGroup.source || 'two-token-standalone',
+        assignmentConfidence: assignment?.confidence,
+        assignmentReason: assignment?.reason,
+      });
+    }
+  }
+
+  return [...mergedLongGroups, ...remainingShortGroups]
+    .sort((a, b) => b.totalVolume - a.totalVolume);
 }
 
 /** Merge reconciliation candidates into suggestions — higher volume group absorbs lower */

@@ -1,26 +1,51 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
-import pluralize from 'pluralize';
-import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff } from 'lucide-react';
-import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries, misspellingMap } from './dictionaries';
-import { citySet, cityFirstWords, stateSet, stateRegex, capitalizeWords, normalizeState, detectForeignEntity, synonymRegex, multiWordLocationsRegex, pluralizeCache, misspellingRegex, prefixPattern, localIntentRegex, stem, getLabelColor } from './processing';
+import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb } from 'lucide-react';
+import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries } from './dictionaries';
+import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr, getLabelColor } from './processing';
 import { auth, db, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { collection, doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
 import { GoogleGenAI } from '@google/genai';
 import GenerateTab from './GenerateTab';
+import FeedbackTab from './FeedbackTab';
+import FeatureIdeasTab from './FeatureIdeasTab';
+import FeedbackModalHost from './FeedbackModalHost';
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
 import { processReviewQueue, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
 import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion } from './types';
-import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows } from './tokenMerge';
+import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows, computeSignature, mergeTokenArr } from './tokenMerge';
 import MergeConfirmModal from './MergeConfirmModal';
 import { useToast } from './ToastContext';
 import ActivityLog from './ActivityLog';
 import AutoGroupPanel from './AutoGroupPanel';
 import TableHeader, { type FilterBag } from './TableHeader';
-import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, KEYWORDS_COLUMNS, BLOCKED_COLUMNS } from './tableConstants';
+import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, BLOCKED_COLUMNS } from './tableConstants';
+import {
+  buildProjectDataPayloadFromChunkDocs,
+  loadProjectDataFromFirestore,
+  deleteFromIDB,
+  deleteProjectDataFromFirestore,
+  deleteProjectFromFirestore,
+  loadProjectsFromFirestore,
+  saveAppPrefsToFirestore,
+  saveAppPrefsToIDB,
+  saveProjectToFirestore,
+  saveToIDB,
+  type ProjectDataPayload,
+} from './projectStorage';
+import {
+  createEmptyProjectViewState,
+  loadProjectDataForView,
+  loadSavedWorkspacePrefs,
+  toProjectViewState,
+  type ProjectViewState,
+} from './projectWorkspace';
+import { useProjectPersistence } from './useProjectPersistence';
+import { parseTokenMgmtSearchTerms, tokenIncludesAnyTerm } from './tokenMgmtSearch';
 
-// Error boundary — catches any unhandled React error and shows recovery UI instead of white screen
+// Error boundary â€" catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
 const ErrorBoundary = (() => {
   type Props = { children: React.ReactNode; fallbackLabel?: string };
@@ -53,98 +78,334 @@ const ErrorBoundary = (() => {
   return Comp as React.ComponentType<Props>;
 })();
 
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
+type MainTab = 'group' | 'generate' | 'feedback' | 'feature-ideas';
+
+/** Group area sub-routes (under /seo-magic/group/...). */
+type GroupSubTab = 'data' | 'projects' | 'settings' | 'log';
+
+/** Settings screen sub-tabs (path under /seo-magic/group/settings/...). */
+type SettingsSubTab = 'general' | 'how-it-works' | 'dictionaries' | 'blocked';
+
+const SETTINGS_TAB_TO_SEG: Record<SettingsSubTab, string> = {
+  general: 'general',
+  'how-it-works': 'how-it-works',
+  dictionaries: 'dictionaries',
+  blocked: 'blocked',
+};
+
+function settingsSegToTab(seg: string): SettingsSubTab | null {
+  const map: Record<string, SettingsSubTab> = {
+    general: 'general',
+    'how-it-works': 'how-it-works',
+    dictionaries: 'dictionaries',
+    blocked: 'blocked',
+  };
+  return map[seg] ?? null;
 }
 
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string;
-    email?: string | null;
-    emailVerified?: boolean;
-    isAnonymous?: boolean;
-    tenantId?: string | null;
-    providerInfo?: any[];
+/** URL segment for this app (matches SEO Magic branding). All main tabs live under /{slug}/... */
+const APP_URL_SLUG = 'seo-magic';
+const APP_BASE_PATH = `/${APP_URL_SLUG}`;
+
+interface ParsedAppLocation {
+  mainTab: MainTab;
+  groupSubTab: GroupSubTab | null;
+  /** Project slug when path is /seo-magic/group/data/:key */
+  dataRouteProjectKey: string | null;
+  /** Settings inner tab when path is /seo-magic/group/settings/:segment */
+  settingsSubTab: SettingsSubTab | null;
+}
+
+/** Parse pathname into main tab, group sub-tab, and optional data-route project key. */
+function parseAppPath(pathname: string): ParsedAppLocation {
+  const p = pathname.replace(/\/$/, '') || '/';
+  const base = APP_BASE_PATH;
+
+  if (p === `${base}/feedback` || p === '/feedback') {
+    return { mainTab: 'feedback', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
   }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
+  if (p === `${base}/feature-ideas` || p === '/feature-ideas') {
+    return { mainTab: 'feature-ideas', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
   }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  if (p === `${base}/generate` || p === '/generate') {
+    return { mainTab: 'generate', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  // Short aliases (canonicalized on load to /group/...)
+  if (p === `${base}/log` || p === '/log') {
+    return { mainTab: 'group', groupSubTab: 'log', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${base}/settings` || p === '/settings') {
+    return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: 'general' };
+  }
+
+  const groupPrefix = `${base}/group`;
+  if (p === groupPrefix || p === `${groupPrefix}/`) {
+    return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${groupPrefix}/projects`) {
+    return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${groupPrefix}/settings` || p === `${groupPrefix}/settings/`) {
+    return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: 'general' };
+  }
+  if (p.startsWith(`${groupPrefix}/settings/`)) {
+    const rest = p.slice(`${groupPrefix}/settings/`.length);
+    const seg = (rest.split('/')[0] || 'general').trim();
+    const st = settingsSegToTab(seg) ?? 'general';
+    return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: st };
+  }
+  if (p === `${groupPrefix}/log`) {
+    return { mainTab: 'group', groupSubTab: 'log', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${groupPrefix}/data`) {
+    return { mainTab: 'group', groupSubTab: 'data', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p.startsWith(`${groupPrefix}/data/`)) {
+    const raw = p.slice(`${groupPrefix}/data/`.length);
+    try {
+      const key = decodeURIComponent(raw) || null;
+      return { mainTab: 'group', groupSubTab: 'data', dataRouteProjectKey: key, settingsSubTab: null };
+    } catch {
+      return { mainTab: 'group', groupSubTab: 'data', dataRouteProjectKey: raw || null, settingsSubTab: null };
+    }
+  }
+
+  // Legacy: /seo-magic without /group (older deploys)
+  if (p === base || p === `${base}/`) {
+    return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+
+  return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
 }
 
-const KeywordRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurrentPage, labelColorMap }: {
-  row: ProcessedRow;
-  selectedTokens: Set<string>;
-  setSelectedTokens: (s: Set<string>) => void;
-  setCurrentPage: (p: number) => void;
-  labelColorMap: Map<string, { border: string; bg: string; text: string; sectionName: string }>;
-}) => (
-  <tr className="hover:bg-zinc-50/50 transition-colors">
-    <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 break-words">{row.pageName}</td>
-    <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
-      <div className="flex flex-wrap gap-1">
-        {row.tokenArr.map((token, i) => {
-          const labelColor = labelColorMap.get(token);
-          return (
-          <button
-            key={i}
-            onClick={() => {
-              const newTokens = new Set(selectedTokens);
-              if (newTokens.has(token)) newTokens.delete(token);
-              else newTokens.add(token);
-              setSelectedTokens(newTokens);
-              setCurrentPage(1);
-            }}
-            className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-            style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-            title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
-          >
-            {token}
-          </button>
-          );
-        })}
-      </div>
-    </td>
-    <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">{row.pageNameLen}</td>
-    <td className="px-2 py-0.5 text-zinc-700">{row.keyword}</td>
-    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-      {row.searchVolume.toLocaleString()}
-    </td>
-    <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-      {row.kd !== null ? row.kd : '-'}
-    </td>
-    <td className="px-3 py-0.5 text-zinc-600">{row.label}</td>
-    <td className="px-3 py-0.5 text-zinc-600">{row.locationCity || '-'}</td>
-    <td className="px-3 py-0.5 text-zinc-600">{row.locationState || '-'}</td>
-  </tr>
-));
+/** Shorthand: extract just the mainTab from a pathname. */
+function pathToMainTab(pathname: string): MainTab {
+  return parseAppPath(pathname).mainTab;
+}
+
+function buildMainPath(
+  tab: MainTab,
+  groupSub?: GroupSubTab,
+  dataProjectKey?: string | null,
+  settingsSub?: SettingsSubTab | null,
+): string {
+  if (tab === 'feedback') return `${APP_BASE_PATH}/feedback`;
+  if (tab === 'generate') return `${APP_BASE_PATH}/generate`;
+  if (tab === 'feature-ideas') return `${APP_BASE_PATH}/feature-ideas`;
+  const g = groupSub ?? 'projects';
+  if (g === 'data') {
+    if (dataProjectKey) {
+      return `${APP_BASE_PATH}/group/data/${encodeURIComponent(dataProjectKey)}`;
+    }
+    return `${APP_BASE_PATH}/group/data`;
+  }
+  if (g === 'settings') {
+    const st = settingsSub ?? 'general';
+    return `${APP_BASE_PATH}/group/settings/${SETTINGS_TAB_TO_SEG[st]}`;
+  }
+  return `${APP_BASE_PATH}/group/${g}`;
+}
+
+type GroupDataTab = 'pages' | 'grouped' | 'approved' | 'blocked' | 'auto-group';
+
+interface FilteredAutoGroupRunStats {
+  status: 'idle' | 'running' | 'complete' | 'error';
+  totalPages: number;
+  groupsCreated: number;
+  pagesGrouped: number;
+  pagesRemaining: number;
+  totalVolumeGrouped: number;
+  cost: number;
+  promptTokens: number;
+  completionTokens: number;
+  elapsedMs: number;
+  error?: string;
+}
+
+interface FilteredAutoGroupJob {
+  id: string;
+  pages: ClusterSummary[];
+  filterSummary: string;
+  settings: GroupReviewSettingsData;
+  modelPricing?: { prompt: string; completion: string };
+}
+
+function buildGroupedClusterFromPages(
+  pages: ClusterSummary[],
+  hasReviewApi: boolean,
+  existing?: Partial<GroupedCluster>
+): GroupedCluster {
+  const sortedPages = [...pages].sort((a, b) => b.totalVolume - a.totalVolume);
+  const totalVolume = sortedPages.reduce((sum, page) => sum + page.totalVolume, 0);
+  const keywordCount = sortedPages.reduce((sum, page) => sum + page.keywordCount, 0);
+  let totalKd = 0;
+  let kdCount = 0;
+  for (const page of sortedPages) {
+    if (page.avgKd !== null) {
+      totalKd += page.avgKd * page.keywordCount;
+      kdCount += page.keywordCount;
+    }
+  }
+  return {
+    id: existing?.id || `llm_group_${sortedPages[0]?.tokens || Date.now()}`,
+    groupName: sortedPages[0]?.pageName || existing?.groupName || 'Untitled group',
+    clusters: sortedPages,
+    totalVolume,
+    keywordCount,
+    avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
+    reviewStatus: sortedPages.length === 1 ? 'approve' : (hasReviewApi ? 'pending' : existing?.reviewStatus),
+  };
+}
+
+function mergeGroupedClustersByName(
+  existingGroups: GroupedCluster[],
+  incomingGroups: GroupedCluster[],
+  hasReviewApi: boolean
+): GroupedCluster[] {
+  const byName = new Map<string, { template: GroupedCluster; pages: ClusterSummary[] }>();
+  const seedGroups = [...existingGroups, ...incomingGroups];
+
+  for (const group of seedGroups) {
+    const key = group.groupName.trim().toLowerCase();
+    const existing = byName.get(key);
+    if (!existing) {
+      byName.set(key, { template: group, pages: [...group.clusters] });
+      continue;
+    }
+    const mergedPages = [...existing.pages];
+    for (const page of group.clusters) {
+      if (!mergedPages.some(item => item.tokens === page.tokens)) mergedPages.push(page);
+    }
+    const preferredTemplate = existing.template.totalVolume >= group.totalVolume ? existing.template : group;
+    byName.set(key, { template: preferredTemplate, pages: mergedPages });
+  }
+
+  return [...byName.values()]
+    .map(({ template, pages }) => buildGroupedClusterFromPages(pages, hasReviewApi, template))
+    .sort((a, b) => b.totalVolume - a.totalVolume);
+}
+
+function slugifyProjectName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-') || 'project';
+}
+
+function stableProjectSuffix(projectId: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < projectId.length; i++) {
+    hash ^= projectId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `p${(hash >>> 0).toString(16).padStart(8, '0').slice(0, 6)}`;
+}
+
+function projectUrlKey(project: Project): string {
+  return `${slugifyProjectName(project.name)}--${stableProjectSuffix(project.id)}`;
+}
+
+function escapeJsonFromModelResponse(content: string): string | null {
+  const trimmed = content.trim();
+  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) return codeBlockMatch[1].trim();
+  const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+  return jsonMatch ? jsonMatch[0] : null;
+}
+
+function parseFilteredAutoGroupResponse(
+  content: string,
+  pages: ClusterSummary[]
+): ClusterSummary[][] {
+  const json = escapeJsonFromModelResponse(content);
+  if (!json) return [];
+
+  const idToPage = new Map<string, ClusterSummary>(pages.map((page, idx) => [`P${idx + 1}`, page]));
+  const nameToPages = new Map<string, ClusterSummary[]>();
+  for (const page of pages) {
+    const key = page.pageName.trim().toLowerCase();
+    const existing = nameToPages.get(key);
+    if (existing) existing.push(page);
+    else nameToPages.set(key, [page]);
+  }
+
+  const consumed = new Set<string>();
+  const resolvedGroups: ClusterSummary[][] = [];
+
+  const takePageByRef = (pageRef: unknown): ClusterSummary | null => {
+    const pageKey = String(pageRef ?? '').trim();
+    if (!pageKey) return null;
+    const byId = idToPage.get(pageKey);
+    if (byId && !consumed.has(byId.tokens)) return byId;
+    const candidates = nameToPages.get(pageKey.toLowerCase()) || [];
+    return candidates.find(candidate => !consumed.has(candidate.tokens)) || null;
+  };
+
+  const parsed = JSON.parse(json) as {
+    groups?: Array<{ pageIds?: string[]; pages?: string[]; pageNames?: string[]; page_names?: string[] }>;
+    assignments?: Array<{
+      pageId?: string;
+      page?: string;
+      targetGroupName?: string;
+      groupName?: string;
+    }>;
+  };
+
+  if (!Array.isArray(parsed.groups) && !Array.isArray(parsed.assignments)) return [];
+
+  if (Array.isArray(parsed.groups)) {
+    for (const group of parsed.groups) {
+      let resolvedPages: ClusterSummary[] = [];
+
+      if (Array.isArray(group.pageIds) && group.pageIds.length > 0) {
+        resolvedPages = group.pageIds
+          .map(pageId => takePageByRef(pageId))
+          .filter((page): page is ClusterSummary => !!page);
+      } else {
+        const refs = Array.isArray(group.pages) && group.pages.length > 0
+          ? group.pages
+          : Array.isArray(group.pageNames) && group.pageNames.length > 0
+            ? group.pageNames
+            : Array.isArray(group.page_names) && group.page_names.length > 0
+              ? group.page_names
+              : [];
+        for (const pageName of refs) {
+          const nextPage = takePageByRef(pageName);
+          if (nextPage) resolvedPages.push(nextPage);
+        }
+      }
+
+      const dedupedPages = resolvedPages.filter(page => {
+        if (consumed.has(page.tokens)) return false;
+        consumed.add(page.tokens);
+        return true;
+      });
+
+      if (dedupedPages.length > 0) resolvedGroups.push(dedupedPages);
+    }
+  }
+
+  if (resolvedGroups.length === 0 && Array.isArray(parsed.assignments)) {
+    const groupedAssignments = new Map<string, ClusterSummary[]>();
+    for (const assignment of parsed.assignments) {
+      const page = takePageByRef(assignment.pageId || assignment.page);
+      if (!page) continue;
+      const rawTarget = String(assignment.targetGroupName || assignment.groupName || page.pageName).trim();
+      const key = rawTarget.toLowerCase();
+      const existing = groupedAssignments.get(key) || [];
+      existing.push(page);
+      groupedAssignments.set(key, existing);
+      consumed.add(page.tokens);
+    }
+    for (const groupPages of groupedAssignments.values()) {
+      if (groupPages.length > 0) resolvedGroups.push(groupPages);
+    }
+  }
+
+  return resolvedGroups;
+}
 
 const ClusterRow = React.memo(({
   row,
@@ -160,7 +421,8 @@ const ClusterRow = React.memo(({
   generateBrief,
   briefLoading,
   brief,
-  labelColorMap
+  labelColorMap,
+  onBlockToken
 }: {
   row: ClusterSummary;
   isExpanded: boolean;
@@ -171,6 +433,7 @@ const ClusterRow = React.memo(({
   setSelectedTokens: (s: Set<string>) => void;
   setCurrentPage: (p: number) => void;
   onMiddleClick: (e: React.MouseEvent) => void;
+  onBlockToken?: (token: string) => void;
   saveCluster: (c: ClusterSummary) => void;
   generateBrief: (c: ClusterSummary) => void;
   briefLoading: string | null;
@@ -179,8 +442,7 @@ const ClusterRow = React.memo(({
 }) => (
   <>
     <tr 
-      className="hover:bg-zinc-50/50 transition-colors cursor-pointer"
-      onClick={() => toggleCluster(row.pageName)}
+      className="hover:bg-zinc-50/50 transition-colors"
       onAuxClick={onMiddleClick}
     >
       <td className="px-3 py-0.5 text-center" onClick={(e) => e.stopPropagation()}>
@@ -193,11 +455,17 @@ const ClusterRow = React.memo(({
       </td>
       <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
         <div className="flex items-center gap-1.5 group/name">
-          {isExpanded ? (
-            <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
-          ) : (
-            <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
-          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleCluster(row.pageName); }}
+            className="shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
+            title={isExpanded ? 'Collapse row' : 'Expand row'}
+          >
+            {isExpanded ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+          </button>
           <span className="break-words">{row.pageName}</span>
           <button
             onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.pageName)}`, '_blank'); }}
@@ -224,6 +492,10 @@ const ClusterRow = React.memo(({
               key={i}
               onClick={(e) => {
                 e.stopPropagation();
+                if ((e.ctrlKey || e.metaKey) && onBlockToken) {
+                  onBlockToken(token);
+                  return;
+                }
                 const newTokens = new Set(selectedTokens);
                 if (newTokens.has(token)) newTokens.delete(token);
                 else newTokens.add(token);
@@ -232,7 +504,7 @@ const ClusterRow = React.memo(({
               }}
               className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
               style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-              title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
+              title={labelColor ? `${labelColor ? `Label: ${labelColor.sectionName} · ` : ''}Ctrl+click to block` : 'Ctrl+click to block'}
             >
               {token}
             </button>
@@ -372,7 +644,8 @@ const GroupedClusterRow = React.memo(({
   onGroupSelect,
   onSubClusterSelect,
   labelColorMap,
-  groupActionButton
+  groupActionButton,
+  onBlockToken
 }: {
   row: GroupedCluster;
   isExpanded: boolean;
@@ -380,6 +653,7 @@ const GroupedClusterRow = React.memo(({
   toggleGroup: (id: string) => void;
   toggleSubCluster: (id: string) => void;
   selectedTokens: Set<string>;
+  onBlockToken?: (token: string) => void;
   setSelectedTokens: (s: Set<string>) => void;
   setCurrentPage: (p: number) => void;
   isGroupSelected: boolean;
@@ -391,8 +665,7 @@ const GroupedClusterRow = React.memo(({
 }) => (
   <>
     <tr 
-      className="hover:bg-zinc-50/50 transition-colors cursor-pointer"
-      onClick={() => toggleGroup(row.id)}
+      className="hover:bg-zinc-50/50 transition-colors"
     >
       <td className="px-3 py-0.5" onClick={(e) => e.stopPropagation()}>
         <input 
@@ -404,11 +677,17 @@ const GroupedClusterRow = React.memo(({
       </td>
       <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
         <div className="flex items-center gap-1.5 group/gname">
-          {isExpanded ? (
-            <ChevronDown className="w-4 h-4 text-zinc-400 shrink-0" />
-          ) : (
-            <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
-          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleGroup(row.id); }}
+            className="shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
+            title={isExpanded ? 'Collapse group' : 'Expand group'}
+          >
+            {isExpanded ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+          </button>
           <span className="break-words">{row.groupName}</span>
           <button
             onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.groupName)}`, '_blank'); }}
@@ -440,6 +719,10 @@ const GroupedClusterRow = React.memo(({
                   key={token}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if ((e.ctrlKey || e.metaKey) && onBlockToken) {
+                      onBlockToken(token);
+                      return;
+                    }
                     const newTokens = new Set(selectedTokens);
                     if (newTokens.has(token)) newTokens.delete(token);
                     else newTokens.add(token);
@@ -448,7 +731,7 @@ const GroupedClusterRow = React.memo(({
                   }}
                   className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
                   style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                  title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
+                  title={labelColor ? `${labelColor.sectionName} · Ctrl+click to block` : 'Ctrl+click to block'}
                 >
                   {token}
                 </button>
@@ -464,9 +747,9 @@ const GroupedClusterRow = React.memo(({
             <Loader2 className="w-3 h-3 animate-spin" />
           </span>
         ) : row.reviewStatus === 'approve' ? (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700" title={row.reviewReason || 'All pages match'}>✓</span>
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700" title={row.reviewReason || 'All pages match'}>{'\u2713'}</span>
         ) : row.reviewStatus === 'mismatch' ? (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 cursor-help" title={`Mismatched: ${(row.reviewMismatchedPages || []).join(', ')}\n${row.reviewReason || ''}`}>✗</span>
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 cursor-help" title={`Mismatched: ${(row.reviewMismatchedPages || []).join(', ')}\n${row.reviewReason || ''}`}>{'\u2717'}</span>
         ) : row.reviewStatus === 'error' ? (
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 cursor-help" title={row.reviewReason || 'Review error'}>!</span>
         ) : (
@@ -514,8 +797,7 @@ const GroupedClusterRow = React.memo(({
       return (
         <React.Fragment key={cIdx}>
           <tr 
-            className="bg-indigo-50/40 hover:bg-indigo-50/70 transition-colors cursor-pointer border-b border-zinc-100"
-            onClick={() => toggleSubCluster(subId)}
+            className="bg-indigo-50/40 hover:bg-indigo-50/70 transition-colors border-b border-zinc-100"
           >
             <td className="px-3 py-0.5" onClick={(e) => e.stopPropagation()}>
               <input 
@@ -527,11 +809,17 @@ const GroupedClusterRow = React.memo(({
             </td>
             <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
               <div className="flex items-center gap-1.5 pl-6 group/sub">
-                {isSubExpanded ? (
-                  <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                ) : (
-                  <ChevronRight className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleSubCluster(subId); }}
+                  className="shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
+                  title={isSubExpanded ? 'Collapse row' : 'Expand row'}
+                >
+                  {isSubExpanded ? (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  )}
+                </button>
                 <span className="text-[12px] break-words">{cluster.pageName}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(cluster.pageName)}`, '_blank'); }}
@@ -558,6 +846,10 @@ const GroupedClusterRow = React.memo(({
                     key={i}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if ((e.ctrlKey || e.metaKey) && onBlockToken) {
+                        onBlockToken(token);
+                        return;
+                      }
                       const newTokens = new Set(selectedTokens);
                       if (newTokens.has(token)) newTokens.delete(token);
                       else newTokens.add(token);
@@ -566,7 +858,7 @@ const GroupedClusterRow = React.memo(({
                     }}
                     className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
                     style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                    title={labelColor ? `Label: ${labelColor.sectionName}` : undefined}
+                    title={labelColor ? `${labelColor.sectionName} · Ctrl+click to block` : 'Ctrl+click to block'}
                   >
                     {token}
                   </button>
@@ -574,7 +866,7 @@ const GroupedClusterRow = React.memo(({
                 })}
               </div>
             </td>
-            {/* Sub-cluster review status — red dot if this page is flagged as mismatched */}
+            {/* Sub-cluster review status â€" red dot if this page is flagged as mismatched */}
             <td className="px-1.5 py-0.5 text-center">
               {row.reviewMismatchedPages?.includes(cluster.pageName) ? (
                 <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="Flagged as mismatched" />
@@ -622,27 +914,99 @@ const GroupedClusterRow = React.memo(({
   </>
 ));
 
-export default function App() {
-  const [mainTab, setMainTab] = useState<'group' | 'generate'>('group');
-  const [groupSubTab, setGroupSubTab] = useState<'data' | 'projects' | 'settings' | 'log'>('data');
-  const [settingsSubTab, setSettingsSubTab] = useState<'general' | 'how-it-works' | 'dictionaries' | 'blocked'>('general');
+// Auto-clear stale caches when the Firebase project changes
+const CURRENT_PROJECT_ID = 'new-final-8edfc';
+(() => {
+  const key = 'kwg_firebase_project';
+  const stored = localStorage.getItem(key);
+  if (stored && stored !== CURRENT_PROJECT_ID) {
+    // Firebase project changed — nuke all local caches to prevent stale data
+    console.log('[MIGRATION] Firebase project changed from', stored, 'to', CURRENT_PROJECT_ID, '— clearing caches');
+    localStorage.clear();
+    indexedDB.deleteDatabase('kwg_database');
+  }
+  localStorage.setItem(key, CURRENT_PROJECT_ID);
+})();
 
-  // Starred models — shared across Generate tab and Group Review
-  const [starredModels, setStarredModels] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem('kwg_starred_models');
-      if (saved) return new Set(JSON.parse(saved));
-    } catch {}
-    return new Set();
+export default function App() {
+  const [mainTab, setMainTab] = useState<MainTab>(() => {
+    if (typeof window === 'undefined') return 'group';
+    return parseAppPath(window.location.pathname).mainTab;
   });
-  useEffect(() => {
-    getDoc(doc(db, 'app_settings', 'starred_models')).then(snap => {
-      if (snap.exists()) {
-        const ids: string[] = snap.data()?.ids || [];
-        setStarredModels(new Set(ids));
-        try { localStorage.setItem('kwg_starred_models', JSON.stringify(ids)); } catch {}
+  const [groupSubTab, setGroupSubTab] = useState<GroupSubTab>(() => {
+    if (typeof window === 'undefined') return 'projects';
+    return parseAppPath(window.location.pathname).groupSubTab ?? 'projects';
+  });
+  const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>(() => {
+    if (typeof window === 'undefined') return 'general';
+    return parseAppPath(window.location.pathname).settingsSubTab ?? 'general';
+  });
+  const navigateMainTab = useCallback((tab: MainTab) => {
+    setMainTab(tab);
+    const path =
+      tab === 'group'
+        ? buildMainPath('group', 'projects')
+        : tab === 'generate'
+          ? buildMainPath('generate')
+          : tab === 'feedback'
+            ? buildMainPath('feedback')
+            : buildMainPath('feature-ideas');
+    if (typeof window !== 'undefined') {
+      const cur = window.location.pathname.replace(/\/$/, '') || '/';
+      const next = path.replace(/\/$/, '') || '/';
+      if (cur !== next) {
+        window.history.pushState({ kwgMainTab: tab }, '', path);
       }
-    }).catch(() => {});
+    }
+  }, []);
+  // Canonicalize legacy URLs to /seo-magic/group/... and top-level slugs
+  useEffect(() => {
+    const p = window.location.pathname.replace(/\/$/, '') || '/';
+    const base = APP_BASE_PATH;
+    if (p === '/feedback') {
+      window.history.replaceState({}, '', `${base}/feedback`);
+      return;
+    }
+    if (p === '/generate') {
+      window.history.replaceState({}, '', `${base}/generate`);
+      return;
+    }
+    if (p === '/feature-ideas') {
+      window.history.replaceState({}, '', `${base}/feature-ideas`);
+      return;
+    }
+    if (p === '/' || p === '') {
+      window.history.replaceState({}, '', `${base}/group/projects`);
+      return;
+    }
+    if (p === base || p === `${base}/`) {
+      window.history.replaceState({}, '', `${base}/group/projects`);
+      return;
+    }
+    if (p === '/log' || p === `${base}/log`) {
+      window.history.replaceState({}, '', `${base}/group/log`);
+      return;
+    }
+    if (p === '/settings' || p === `${base}/settings`) {
+      window.history.replaceState({}, '', buildMainPath('group', 'settings', undefined, 'general'));
+      return;
+    }
+    if (p === `${base}/group/settings` || p === `${base}/group/settings/`) {
+      window.history.replaceState({}, '', buildMainPath('group', 'settings', undefined, 'general'));
+    }
+  }, []);
+  // Starred models â€" shared across Generate tab and Group Review
+  const [starredModels, setStarredModels] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'app_settings', 'starred_models'), (snap) => {
+      if (!snap.exists()) {
+        setStarredModels(new Set());
+        return;
+      }
+      const ids: string[] = snap.data()?.ids || [];
+      setStarredModels(new Set(ids));
+    }, () => {});
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
   const toggleStarModel = useCallback((modelId: string) => {
     setStarredModels(prev => {
@@ -650,13 +1014,83 @@ export default function App() {
       if (next.has(modelId)) next.delete(modelId);
       else next.add(modelId);
       const arr = [...next];
-      try { localStorage.setItem('kwg_starred_models', JSON.stringify(arr)); } catch {}
       setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch(() => {});
       return next;
     });
   }, []);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const { addToast } = useToast();
+
+  // -- Project persistence hook -- single source of truth for all 14 persisted state variables --
+  const persistence = useProjectPersistence({ projects, setProjects, addToast });
+  const {
+    results, clusterSummary, tokenSummary, groupedClusters,
+    approvedGroups, blockedKeywords, activityLog, stats,
+    datasetStats, autoGroupSuggestions, tokenMergeRules,
+    blockedTokens, labelSections, fileName,
+    activeProjectId, setActiveProjectId,
+    loadProject, clearProject,
+    // Transitional setters (will be removed as mutations replace them)
+    setResults, setClusterSummary, setTokenSummary, setGroupedClusters,
+    setApprovedGroups, setBlockedKeywords, setActivityLog, setStats,
+    setDatasetStats, setAutoGroupSuggestions, setTokenMergeRules,
+    setBlockedTokens, setLabelSections, setFileName,
+    refs: persistenceRefs,
+  } = persistence;
+
+  // Convenience aliases for transitional refs (used by legacy code during migration)
+  const activeProjectIdRef = persistenceRefs.activeProjectId;
+  const resultsRef = persistenceRefs.results;
+  const clusterSummaryRef = persistenceRefs.clusterSummary;
+  const tokenSummaryRef = persistenceRefs.tokenSummary;
+  const groupedClustersRef = persistenceRefs.groupedClusters;
+  const approvedGroupsRef = persistenceRefs.approvedGroups;
+  const blockedKeywordsRef = persistenceRefs.blockedKeywords;
+  const activityLogRef = persistenceRefs.activityLog;
+  const statsRef = persistenceRefs.stats;
+  const datasetStatsRef = persistenceRefs.datasetStats;
+  const autoGroupSuggestionsRef = persistenceRefs.autoGroupSuggestions;
+  const tokenMergeRulesRef = persistenceRefs.tokenMergeRules;
+  const blockedTokensRef = persistenceRefs.blockedTokens;
+  const labelSectionsRef = persistenceRefs.labelSections;
+  const fileNameRef = persistenceRefs.fileName;
+
+  const navigateGroupSub = useCallback((sub: GroupSubTab) => {
+    setMainTab('group');
+    setGroupSubTab(sub);
+    let path: string;
+    if (sub === 'data' && activeProjectId) {
+      const proj = projects.find((p) => p.id === activeProjectId);
+      const key = proj ? projectUrlKey(proj) : activeProjectId;
+      path = buildMainPath('group', 'data', key);
+    } else if (sub === 'settings') {
+      path = buildMainPath('group', 'settings', undefined, settingsSubTab ?? 'general');
+    } else {
+      path = buildMainPath('group', sub);
+    }
+    if (typeof window !== 'undefined') {
+      const cur = window.location.pathname.replace(/\/$/, '') || '/';
+      const next = path.replace(/\/$/, '') || '/';
+      if (cur !== next) {
+        window.history.pushState({ kwgGroupSub: sub }, '', path);
+      }
+    }
+  }, [activeProjectId, projects, settingsSubTab]);
+
+  const navigateSettingsSub = useCallback((st: SettingsSubTab) => {
+    setMainTab('group');
+    setGroupSubTab('settings');
+    setSettingsSubTab(st);
+    const path = buildMainPath('group', 'settings', undefined, st);
+    if (typeof window !== 'undefined') {
+      const cur = window.location.pathname.replace(/\/$/, '') || '/';
+      const next = path.replace(/\/$/, '') || '/';
+      if (cur !== next) {
+        window.history.pushState({ kwgSettingsSub: st }, '', path);
+      }
+    }
+  }, []);
+
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isProjectLoading, setIsProjectLoading] = useState(false);
   const [editingProjectName, setEditingProjectName] = useState(false);
@@ -667,11 +1101,6 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<number>(0);
-  const [results, setResults] = useState<ProcessedRow[] | null>(null);
-  const [clusterSummary, setClusterSummary] = useState<ClusterSummary[] | null>(null);
-  const [tokenSummary, setTokenSummary] = useState<TokenSummary[] | null>(null);
-  const [groupedClusters, setGroupedClusters] = useState<GroupedCluster[]>([]);
-  const [blockedKeywords, setBlockedKeywords] = useState<BlockedKeyword[]>([]);
   const [selectedClusters, setSelectedClusters] = useState<Set<string>>(new Set());
   const [groupNameInput, setGroupNameInput] = useState<string>('');
   const [expandedGroupedClusters, setExpandedGroupedClusters] = useState<Set<string>>(new Set());
@@ -679,33 +1108,36 @@ export default function App() {
   // AI Group Review
   const [showGroupReviewSettings, setShowGroupReviewSettings] = useState(false);
   const groupReviewSettingsRef = useRef<GroupReviewSettingsRef>(null);
+  const [groupReviewSettingsSnapshot, setGroupReviewSettingsSnapshot] = useState<GroupReviewSettingsData | null>(null);
+  const [groupReviewSettingsHydrated, setGroupReviewSettingsHydrated] = useState(false);
   const reviewAbortRef = useRef<AbortController | null>(null);
   const reviewProcessingRef = useRef(false);
-  // Debounced QA re-review — when pages are removed from groups, wait 5s then re-trigger QA
+  const filteredAutoGroupAbortRef = useRef<AbortController | null>(null);
+  const activeFilteredAutoGroupJobRef = useRef<FilteredAutoGroupJob | null>(null);
+  const [isRunningFilteredAutoGroup, setIsRunningFilteredAutoGroup] = useState(false);
+  const [pendingFilteredAutoGroupTokens, setPendingFilteredAutoGroupTokens] = useState<Set<string>>(new Set());
+  const [filteredAutoGroupQueue, setFilteredAutoGroupQueue] = useState<FilteredAutoGroupJob[]>([]);
+  const [filteredAutoGroupStats, setFilteredAutoGroupStats] = useState<FilteredAutoGroupRunStats>({
+    status: 'idle',
+    totalPages: 0,
+    groupsCreated: 0,
+    pagesGrouped: 0,
+    pagesRemaining: 0,
+    totalVolumeGrouped: 0,
+    cost: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    elapsedMs: 0,
+  });
+  // Debounced QA re-review
   const reReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reReviewGroupIds = useRef<Set<string>>(new Set());
   // Ungrouping: track selected groups and sub-clusters within groups
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
   const [selectedSubClusters, setSelectedSubClusters] = useState<Set<string>>(new Set()); // key: "groupId::clusterTokens"
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [datasetStats, setDatasetStats] = useState<{ cities: number, states: number, numbers: number, faqs: number, commercial: number, local: number, year: number, informational: number, navigational: number } | null>(null);
-  const [activeTab, setActiveTab] = useState<'pages' | 'grouped' | 'approved' | 'blocked' | 'auto-group'>('pages');
-  const [approvedGroups, setApprovedGroups] = useState<GroupedCluster[]>([]);
-  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
-  const activityLogRef = useRef(activityLog);
-  // Cloud sync status: 'synced' | 'syncing' | 'error' | 'offline'
-  const [cloudSyncStatus, setCloudSyncStatus] = useState<'synced' | 'syncing' | 'error' | 'offline'>('synced');
-  const lastSyncTimeRef = useRef<number>(0);
-  useEffect(() => { activityLogRef.current = activityLog; }, [activityLog]);
-  const [autoGroupSuggestions, setAutoGroupSuggestions] = useState<AutoGroupSuggestion[]>([]);
-  const autoGroupSuggestionsRef = useRef(autoGroupSuggestions);
-  useEffect(() => { autoGroupSuggestionsRef.current = autoGroupSuggestions; }, [autoGroupSuggestions]);
-  const [tokenMergeRules, setTokenMergeRules] = useState<TokenMergeRule[]>([]);
-  const tokenMergeRulesRef = useRef(tokenMergeRules);
-  useEffect(() => { tokenMergeRulesRef.current = tokenMergeRules; }, [tokenMergeRules]);
+  const [activeTab, setActiveTab] = useState<GroupDataTab>('pages');
   const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
   const [mergeModalTokens, setMergeModalTokens] = useState<string[]>([]);
-  const { addToast } = useToast();
   const [, startTransition] = useTransition();
   const switchTab = useCallback((tab: typeof activeTab) => {
     startTransition(() => {
@@ -719,7 +1151,6 @@ export default function App() {
   }, []);
   const [statsExpanded, setStatsExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const setSearchImmediate = useCallback((value: string) => {
@@ -759,41 +1190,33 @@ export default function App() {
   const [selectedMgmtTokens, setSelectedMgmtTokens] = useState<Set<string>>(new Set());
   const [tokenMgmtPage, setTokenMgmtPage] = useState(1);
   const tokenMgmtPerPage = 100;
-  const [tokenMgmtSubTab, setTokenMgmtSubTab] = useState<'current' | 'all' | 'blocked'>('current');
-  const [blockedTokens, setBlockedTokens] = useState<Set<string>>(new Set());
+  const [tokenMgmtSubTab, setTokenMgmtSubTab] = useState<'current' | 'all' | 'merge' | 'blocked'>('current');
+  const [expandedMergeParents, setExpandedMergeParents] = useState<Set<string>>(new Set());
 
-  // Universal blocked tokens — persists across ALL projects (global, not project-specific)
-  const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem('kwg_universal_blocked');
-      if (saved) return new Set<string>(JSON.parse(saved));
-    } catch {}
-    return new Set<string>();
-  });
+  // Universal blocked tokens â€" persists across ALL projects (global, not project-specific)
+  const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(new Set<string>());
 
-  // Persist universal blocked to localStorage + Firestore on every change
+  // Persist universal blocked to Firestore on every change
   const universalBlockedInitRef = useRef(true);
   useEffect(() => {
     if (universalBlockedInitRef.current) { universalBlockedInitRef.current = false; return; }
     const arr = Array.from(universalBlockedTokens);
-    localStorage.setItem('kwg_universal_blocked', JSON.stringify(arr));
     setDoc(doc(db, 'app_settings', 'universal_blocked'), { tokens: arr, updatedAt: new Date().toISOString() }).catch(() => {});
   }, [universalBlockedTokens]);
 
-  // Load universal blocked from Firestore on mount (fallback if localStorage is empty)
+  // Load universal blocked from Firestore on mount
   useEffect(() => {
-    if (universalBlockedTokens.size > 0) return; // Already loaded from localStorage
-    getDoc(doc(db, 'app_settings', 'universal_blocked')).then(snap => {
-      if (snap.exists()) {
-        const data = snap.data();
-        if (data?.tokens?.length > 0) {
-          setUniversalBlockedTokens(new Set<string>(data.tokens));
-        }
+    const unsub = onSnapshot(doc(db, 'app_settings', 'universal_blocked'), (snap) => {
+      if (!snap.exists()) {
+        setUniversalBlockedTokens(new Set<string>());
+        return;
       }
-    }).catch(() => {});
+      const data = snap.data();
+      setUniversalBlockedTokens(new Set<string>(Array.isArray(data?.tokens) ? data.tokens : []));
+    }, () => {});
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
 
-  const [labelSections, setLabelSections] = useState<LabelSection[]>([]);
   const [isLabelSidebarOpen, setIsLabelSidebarOpen] = useState(true);
   const [labelSortConfigs, setLabelSortConfigs] = useState<Record<string, { key: 'token' | 'kws' | 'vol' | 'kd'; direction: 'asc' | 'desc' }>>({});
 
@@ -803,507 +1226,312 @@ export default function App() {
   const [briefLoading, setBriefLoading] = useState<string | null>(null);
   const [briefs, setBriefs] = useState<Record<string, string>>({});
 
-  // ============ Storage layer: localStorage for small data, IndexedDB for large project data ============
-  const LS_PROJECTS_KEY = 'kwg_projects';
-  const LS_SAVED_CLUSTERS_KEY = 'kwg_saved_clusters';
-  const IDB_NAME = 'kwg_database';
-  const IDB_STORE = 'project_data';
-  const IDB_VERSION = 2;
 
-  const loadFromLS = <T,>(key: string, fallback: T): T => {
+  const getProjectKeyFromUrl = useCallback((): string | null => {
     try {
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch { return fallback; }
-  };
-  const saveToLS = (key: string, data: any) => {
-    try { localStorage.setItem(key, JSON.stringify(data)); } catch (e) { console.warn('localStorage save error:', e); }
-  };
+      const pathKey = parseAppPath(window.location.pathname).dataRouteProjectKey;
+      if (pathKey) return pathKey;
+      return new URLSearchParams(window.location.search).get('project');
+    } catch {
+      return null;
+    }
+  }, []);
 
-  // IndexedDB helpers for large project data
-  const openIDB = (): Promise<IDBDatabase> => {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(IDB_NAME, IDB_VERSION);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(IDB_STORE)) {
-          db.createObjectStore(IDB_STORE, { keyPath: 'projectId' });
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+  const resolveProjectIdFromUrlKey = useCallback((projectKey: string | null, projectList: Project[]): string | null => {
+    if (!projectKey) return null;
+    if (projectList.some(project => project.id === projectKey)) return projectKey;
+    const matched = projectList.find(project => projectUrlKey(project) === projectKey);
+    return matched?.id || null;
+  }, []);
+
+  const mapProjectsSnapshot = useCallback((snapshot: any): Project[] => {
+    const liveProjects: Project[] = [];
+    snapshot.forEach((docSnap: any) => {
+      const data = docSnap.data();
+      liveProjects.push({
+        id: docSnap.id,
+        name: data.name || '',
+        description: data.description || '',
+        createdAt: data.createdAt || new Date().toISOString(),
+        uid: data.uid || 'local',
+        fileName: data.fileName,
+      });
     });
-  };
+    return liveProjects;
+  }, []);
 
-  const saveToIDB = async (projectId: string, data: any) => {
+  const syncProjectIdToUrl = useCallback((projectId: string | null, projectList: Project[]) => {
     try {
-      // JSON round-trip to ensure clean, serializable plain objects
-      const cleanData = JSON.parse(JSON.stringify(data));
-      const record = { projectId, ...cleanData };
-      const db = await openIDB();
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      const putRequest = tx.objectStore(IDB_STORE).put(record);
-      putRequest.onerror = (e) => console.error('IndexedDB put error:', putRequest.error, e);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => { console.log('IndexedDB save SUCCESS for', projectId, 'keys:', Object.keys(cleanData), 'resultCount:', cleanData.results?.length); resolve(); };
-        tx.onerror = () => { console.error('IndexedDB tx error:', tx.error); reject(tx.error); };
-        tx.onabort = () => { console.error('IndexedDB tx ABORTED:', tx.error); reject(tx.error); };
-      });
-      db.close();
-    } catch (e) {
-      console.error('IndexedDB save error:', e);
-    }
-  };
-
-  const loadFromIDB = async (projectId: string): Promise<any | null> => {
-    try {
-      const db = await openIDB();
-      const tx = db.transaction(IDB_STORE, 'readonly');
-      const request = tx.objectStore(IDB_STORE).get(projectId);
-      return new Promise((resolve, reject) => {
-        request.onsuccess = () => { db.close(); resolve(request.result || null); };
-        request.onerror = () => { db.close(); reject(request.error); };
-      });
-    } catch (e) {
-      console.error('IndexedDB load error:', e);
-      return null;
-    }
-  };
-
-  const deleteFromIDB = async (projectId: string) => {
-    try {
-      const db = await openIDB();
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).delete(projectId);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-      db.close();
-    } catch (e) {
-      console.error('IndexedDB delete error:', e);
-    }
-  };
-
-  const LS_ACTIVE_PROJECT_KEY = 'kwg_active_project';
-  const FIRESTORE_PROJECTS_COLLECTION = 'projects';
-
-  // Save project metadata to Firestore
-  const saveProjectToFirestore = async (project: Project) => {
-    try {
-      await setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), {
-        ...project,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (e) {
-      console.warn('Firestore save error (project metadata):', e);
-    }
-  };
-
-  // Delete project metadata from Firestore
-  const deleteProjectFromFirestore = async (projectId: string) => {
-    try {
-      await deleteDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, projectId));
-    } catch (e) {
-      console.warn('Firestore delete error:', e);
-    }
-  };
-
-  // ============ App-level preferences (activeProjectId, savedClusters) ============
-  const APP_SETTINGS_COLLECTION = 'app_settings';
-  const APP_PREFS_DOC = 'user_preferences';
-
-  const saveAppPrefsToFirestore = async (activeId: string | null, clusters: any[]) => {
-    try {
-      await setDoc(doc(db, APP_SETTINGS_COLLECTION, APP_PREFS_DOC), {
-        activeProjectId: activeId,
-        savedClusters: clusters,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (e) {
-      console.warn('Firestore app prefs save error:', e);
-    }
-  };
-
-  const saveAppPrefsToIDB = async (activeId: string | null, clusters: any[]) => {
-    try {
-      const db2 = await openIDB();
-      const tx = db2.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put({
-        projectId: '__app_prefs__',
-        activeProjectId: activeId,
-        savedClusters: clusters,
-        updatedAt: new Date().toISOString(),
-      });
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-      db2.close();
-    } catch (e) {
-      console.warn('IDB app prefs save error:', e);
-    }
-  };
-
-  const loadAppPrefsFromFirestore = async (): Promise<{ activeProjectId: string | null; savedClusters: any[] } | null> => {
-    try {
-      const docSnap = await getDocFromServer(doc(db, APP_SETTINGS_COLLECTION, APP_PREFS_DOC));
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        return {
-          activeProjectId: data.activeProjectId || null,
-          savedClusters: data.savedClusters || [],
-        };
+      const u = new URL(window.location.href);
+      u.searchParams.delete('project');
+      if (projectId) {
+        const project = projectList.find((item) => item.id === projectId);
+        const key = project ? projectUrlKey(project) : projectId;
+        u.pathname = buildMainPath('group', 'data', key);
+      } else {
+        u.pathname = buildMainPath('group', 'data');
       }
-    } catch (e) {
-      console.warn('Firestore app prefs load error:', e);
-    }
-    return null;
-  };
-
-  const loadAppPrefsFromIDB = async (): Promise<{ activeProjectId: string | null; savedClusters: any[] } | null> => {
-    try {
-      const db2 = await openIDB();
-      const tx = db2.transaction(IDB_STORE, 'readonly');
-      const request = tx.objectStore(IDB_STORE).get('__app_prefs__');
-      return new Promise((resolve, reject) => {
-        request.onsuccess = () => {
-          db2.close();
-          if (request.result) {
-            resolve({
-              activeProjectId: request.result.activeProjectId || null,
-              savedClusters: request.result.savedClusters || [],
-            });
-          } else {
-            resolve(null);
-          }
-        };
-        request.onerror = () => { db2.close(); reject(request.error); };
-      });
-    } catch (e) {
-      console.warn('IDB app prefs load error:', e);
-      return null;
-    }
-  };
-
-  // ============ Chunked Firestore data storage ============
-  const CHUNK_SIZE = 400; // rows per chunk doc (keeps each doc well under 1MB)
-  const CHUNKS_SUBCOLLECTION = 'chunks';
-
-  // Save project data to Firestore in chunks
-  const saveProjectDataToFirestore = async (projectId: string, data: any) => {
-    setCloudSyncStatus('syncing');
-    try {
-      const chunksRef = collection(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION);
-
-      // First delete all existing chunks (to handle re-uploads cleanly)
-      const existingChunks = await getDocs(chunksRef);
-      if (!existingChunks.empty) {
-        // Delete in batches of 500 (Firestore writeBatch limit)
-        const deleteBatches: any[] = [];
-        let currentBatch = writeBatch(db);
-        let opCount = 0;
-        existingChunks.forEach((docSnap) => {
-          currentBatch.delete(docSnap.ref);
-          opCount++;
-          if (opCount >= 500) {
-            deleteBatches.push(currentBatch.commit());
-            currentBatch = writeBatch(db);
-            opCount = 0;
-          }
-        });
-        if (opCount > 0) deleteBatches.push(currentBatch.commit());
-        await Promise.all(deleteBatches);
+      const next = u.pathname + u.search;
+      if (window.location.pathname + window.location.search !== next) {
+        window.history.replaceState({}, '', next);
       }
-
-      // Chunk the results array (the biggest piece of data)
-      const results: any[] = data.results || [];
-      const resultChunks: any[][] = [];
-      for (let i = 0; i < results.length; i += CHUNK_SIZE) {
-        resultChunks.push(results.slice(i, i + CHUNK_SIZE));
-      }
-
-      // Chunk clusterSummary too
-      const clusters: any[] = data.clusterSummary || [];
-      const clusterChunks: any[][] = [];
-      for (let i = 0; i < clusters.length; i += CHUNK_SIZE) {
-        clusterChunks.push(clusters.slice(i, i + CHUNK_SIZE));
-      }
-
-      // Chunk blockedKeywords
-      const blocked: any[] = data.blockedKeywords || [];
-      const blockedChunks: any[][] = [];
-      for (let i = 0; i < blocked.length; i += CHUNK_SIZE) {
-        blockedChunks.push(blocked.slice(i, i + CHUNK_SIZE));
-      }
-
-      // Write all chunks in batches
-      const writeBatches: Promise<void>[] = [];
-      let batch = writeBatch(db);
-      let ops = 0;
-
-      const addToBatch = (docId: string, payload: any) => {
-        batch.set(doc(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION, docId), payload);
-        ops++;
-        if (ops >= 500) {
-          writeBatches.push(batch.commit());
-          batch = writeBatch(db);
-          ops = 0;
-        }
-      };
-
-      // Chunk autoGroupSuggestions (can be large with 900+ groups)
-      const suggestions: any[] = data.autoGroupSuggestions || [];
-      const suggestionChunks: any[][] = [];
-      for (let i = 0; i < suggestions.length; i += CHUNK_SIZE) {
-        suggestionChunks.push(suggestions.slice(i, i + CHUNK_SIZE));
-      }
-
-      // Meta chunk (stats, tokens, grouped — smaller data, no large arrays)
-      addToBatch('meta', {
-        type: 'meta',
-        stats: data.stats || null,
-        datasetStats: data.datasetStats || null,
-        tokenSummary: data.tokenSummary || null,
-        groupedClusters: data.groupedClusters || [],
-        approvedGroups: data.approvedGroups || [],
-        blockedTokens: data.blockedTokens || [],
-        labelSections: data.labelSections || [],
-        activityLog: (data.activityLog || []).slice(0, 500),
-        tokenMergeRules: data.tokenMergeRules || [],
-        updatedAt: new Date().toISOString(),
-        resultChunkCount: resultChunks.length,
-        clusterChunkCount: clusterChunks.length,
-        blockedChunkCount: blockedChunks.length,
-        suggestionChunkCount: suggestionChunks.length,
-      });
-
-      // Result chunks
-      resultChunks.forEach((chunk, idx) => {
-        addToBatch(`results_${idx}`, { type: 'results', index: idx, data: chunk });
-      });
-
-      // Cluster chunks
-      clusterChunks.forEach((chunk, idx) => {
-        addToBatch(`clusters_${idx}`, { type: 'clusters', index: idx, data: chunk });
-      });
-
-      // Blocked keyword chunks
-      blockedChunks.forEach((chunk, idx) => {
-        addToBatch(`blocked_${idx}`, { type: 'blocked', index: idx, data: chunk });
-      });
-
-      // Auto-group suggestion chunks
-      suggestionChunks.forEach((chunk, idx) => {
-        addToBatch(`suggestions_${idx}`, { type: 'suggestions', index: idx, data: chunk });
-      });
-
-      if (ops > 0) writeBatches.push(batch.commit());
-      await Promise.all(writeBatches);
-      console.log(`Firestore save SUCCESS: ${resultChunks.length} result, ${clusterChunks.length} cluster, ${blockedChunks.length} blocked, ${suggestionChunks.length} suggestion chunks`);
-    } catch (e) {
-      console.warn('Firestore data save error:', e);
+    } catch {
+      // Ignore URL sync failures and keep project state functional.
     }
-  };
-
-  // Load project data from Firestore chunks
-  const loadProjectDataFromFirestore = async (projectId: string): Promise<any | null> => {
-    try {
-      const chunksRef = collection(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION);
-      const snapshot = await getDocs(chunksRef);
-      if (snapshot.empty) return null;
-
-      let meta: any = null;
-      const resultChunks: { index: number; data: any[] }[] = [];
-      const clusterChunks: { index: number; data: any[] }[] = [];
-      const blockedChunks: { index: number; data: any[] }[] = [];
-      const suggestionChunks: { index: number; data: any[] }[] = [];
-
-      snapshot.forEach((docSnap) => {
-        const d = docSnap.data();
-        if (d.type === 'meta') meta = d;
-        else if (d.type === 'results') resultChunks.push({ index: d.index, data: d.data });
-        else if (d.type === 'clusters') clusterChunks.push({ index: d.index, data: d.data });
-        else if (d.type === 'blocked') blockedChunks.push({ index: d.index, data: d.data });
-        else if (d.type === 'suggestions') suggestionChunks.push({ index: d.index, data: d.data });
-      });
-
-      if (!meta) return null;
-
-      // Reassemble arrays from sorted chunks
-      const results = resultChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
-      const clusterSummary = clusterChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
-      const blockedKeywords = blockedChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
-      const autoGroupSuggestions = suggestionChunks.sort((a, b) => a.index - b.index).flatMap(c => c.data);
-
-      return {
-        results: results.length > 0 ? results : null,
-        clusterSummary: clusterSummary.length > 0 ? clusterSummary : null,
-        tokenSummary: meta.tokenSummary || null,
-        groupedClusters: meta.groupedClusters || [],
-        approvedGroups: meta.approvedGroups || [],
-        stats: meta.stats || null,
-        datasetStats: meta.datasetStats || null,
-        blockedTokens: meta.blockedTokens || [],
-        blockedKeywords,
-        labelSections: meta.labelSections || [],
-        activityLog: meta.activityLog || [],
-        tokenMergeRules: meta.tokenMergeRules || [],
-        autoGroupSuggestions,
-      };
-    } catch (e) {
-      console.warn('Firestore data load error:', e);
-      return null;
-    }
-  };
-
-  // Delete project data chunks from Firestore
-  const deleteProjectDataFromFirestore = async (projectId: string) => {
-    try {
-      const chunksRef = collection(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION);
-      const snapshot = await getDocs(chunksRef);
-      if (snapshot.empty) return;
-      const batches: Promise<void>[] = [];
-      let batch = writeBatch(db);
-      let ops = 0;
-      snapshot.forEach((docSnap) => {
-        batch.delete(docSnap.ref);
-        ops++;
-        if (ops >= 500) {
-          batches.push(batch.commit());
-          batch = writeBatch(db);
-          ops = 0;
-        }
-      });
-      if (ops > 0) batches.push(batch.commit());
-      await Promise.all(batches);
-    } catch (e) {
-      console.warn('Firestore data chunk delete error:', e);
-    }
-  };
-
-  // Load projects from Firestore, fallback to localStorage
-  const loadProjectsFromFirestore = async (): Promise<Project[]> => {
-    try {
-      const snapshot = await new Promise<any>((resolve, reject) => {
-        const unsub = onSnapshot(
-          collection(db, FIRESTORE_PROJECTS_COLLECTION),
-          (snap) => { unsub(); resolve(snap); },
-          (err) => { unsub(); reject(err); }
-        );
-      });
-      const firestoreProjects: Project[] = [];
-      snapshot.forEach((docSnap: any) => {
-        const data = docSnap.data();
-        firestoreProjects.push({
-          id: docSnap.id,
-          name: data.name || '',
-          description: data.description || '',
-          createdAt: data.createdAt || new Date().toISOString(),
-          uid: data.uid || 'local',
-          fileName: data.fileName,
-        });
-      });
-      if (firestoreProjects.length > 0) {
-        // Sync to localStorage as cache
-        saveToLS(LS_PROJECTS_KEY, firestoreProjects);
-        return firestoreProjects;
-      }
-    } catch (e) {
-      console.warn('Firestore load error, falling back to localStorage:', e);
-    }
-    // Fallback to localStorage
-    return loadFromLS<Project[]>(LS_PROJECTS_KEY, []);
-  };
+  }, []);
 
   // Load projects, saved clusters, and restore active project on mount
   useEffect(() => {
     setIsAuthReady(true);
+    let cancelled = false;
 
-    // Load app prefs from IDB → Firestore → localStorage (cascade fallback)
-    const loadAppPrefs = async () => {
-      let prefs = await loadAppPrefsFromIDB();
-      if (!prefs) {
-        prefs = await loadAppPrefsFromFirestore();
-        if (prefs) {
-          // Cache to IDB
-          await saveAppPrefsToIDB(prefs.activeProjectId, prefs.savedClusters);
+    Promise.all([loadProjectsFromFirestore(), loadSavedWorkspacePrefs()])
+      .then(([loadedProjects, prefs]) => {
+        if (cancelled) return;
+        initialProjectsLoadedRef.current = true;
+        initialProjectsLoadedAtRef.current = Date.now();
+        lastAppliedProjectsSnapshotRef.current = loadedProjects;
+        setProjects(loadedProjects);
+        setSavedClusters(prefs.savedClusters || []);
+
+        const requestedProjectKey = getProjectKeyFromUrl();
+        const requestedProjectId = resolveProjectIdFromUrlKey(requestedProjectKey, loadedProjects);
+        const nextProjectId =
+          requestedProjectId && loadedProjects.some(p => p.id === requestedProjectId)
+            ? requestedProjectId
+            : prefs.activeProjectId && loadedProjects.some(p => p.id === prefs.activeProjectId)
+              ? prefs.activeProjectId
+              : null;
+
+        if (nextProjectId) {
+          setActiveProjectId(nextProjectId);
+          setGroupSubTab('data');
+          setIsProjectLoading(true);
+          loadProject(nextProjectId, loadedProjects).finally(() => {
+            if (!cancelled) setIsProjectLoading(false);
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn('[APP INIT] Failed to load initial Firestore workspace state:', error);
+        if (cancelled) return;
+        initialProjectsLoadedRef.current = true;
+        initialProjectsLoadedAtRef.current = Date.now();
+        lastAppliedProjectsSnapshotRef.current = [];
+        setProjects([]);
+        setSavedClusters([]);
+        setIsProjectLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [getProjectKeyFromUrl, loadProject, resolveProjectIdFromUrlKey, syncProjectIdToUrl]);
+
+  // Realtime workspace prefs (shared between collaborators).
+  // These control *which* project we're focusing on plus the saved cluster list.
+  const savedClustersHashRef = useRef<string>('');
+  useEffect(() => {
+    try { savedClustersHashRef.current = JSON.stringify(savedClusters ?? []); } catch { savedClustersHashRef.current = ''; }
+  }, [savedClusters]);
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'app_settings', 'user_preferences'), (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      const remoteSavedClusters = Array.isArray(data?.savedClusters) ? data.savedClusters : [];
+      const remoteActiveProjectId = typeof data?.activeProjectId === 'string' ? data.activeProjectId : null;
+
+      const remoteHash = (() => {
+        try { return JSON.stringify(remoteSavedClusters); } catch { return ''; }
+      })();
+
+      if (remoteHash !== savedClustersHashRef.current) {
+        setSavedClusters(remoteSavedClusters);
+      }
+      if (remoteActiveProjectId !== activeProjectIdRef.current) {
+        // If the remote active project no longer exists in the shared `projects` list,
+        // don't "reselect" a deleted/missing project. Clear instead so UI shows the
+        // correct empty state.
+        if (remoteActiveProjectId && !projects.some((p) => p.id === remoteActiveProjectId)) {
+          setActiveProjectId(null);
+          // Ensure UI switches back to the project picker immediately. In some test/mock
+          // timings the projects list listener may not run before React renders this
+          // empty workspace state.
+          setMainTab('group');
+          setGroupSubTab('projects');
+          clearProject();
+          if (typeof window !== 'undefined') {
+            window.history.replaceState({}, '', buildMainPath('group', 'projects'));
+          }
+        } else {
+          setActiveProjectId(remoteActiveProjectId);
         }
       }
-      if (prefs) {
-        setSavedClusters(prefs.savedClusters || []);
-        return prefs.activeProjectId;
-      }
-      // Final fallback: localStorage
-      setSavedClusters(loadFromLS<any[]>(LS_SAVED_CLUSTERS_KEY, []));
-      return loadFromLS<string | null>(LS_ACTIVE_PROJECT_KEY, null);
-    };
-
-    // Load from Firestore first, fallback to localStorage
-    Promise.all([loadProjectsFromFirestore(), loadAppPrefs()]).then(([loadedProjects, savedActiveId]) => {
-      setProjects(loadedProjects);
-
-      // Restore last active project and its data
-      if (savedActiveId && loadedProjects.some(p => p.id === savedActiveId)) {
-        setActiveProjectId(savedActiveId);
-        setIsProjectLoading(true);
-        loadFromIDB(savedActiveId).then(async (data) => {
-          let finalData = data;
-          // If IDB has no data, try Firestore
-          if (!finalData || !finalData.results) {
-            console.log('IDB miss on mount for', savedActiveId, '— loading from Firestore...');
-            const firestoreData = await loadProjectDataFromFirestore(savedActiveId);
-            if (firestoreData && firestoreData.results) {
-              finalData = firestoreData;
-              // Cache to IDB
-              await saveToIDB(savedActiveId, finalData);
-              console.log('Loaded from Firestore on mount and cached to IDB');
-            }
-          }
-          if (finalData && finalData.results) {
-            setResults(finalData.results || null);
-            setClusterSummary(finalData.clusterSummary || null);
-            setTokenSummary(finalData.tokenSummary || null);
-            setGroupedClusters(finalData.groupedClusters || []);
-            setApprovedGroups(finalData.approvedGroups || []);
-            setStats(finalData.stats || null);
-            setDatasetStats(finalData.datasetStats || null);
-            setBlockedTokens(new Set<string>(finalData.blockedTokens || []));
-            setBlockedKeywords(finalData.blockedKeywords || []);
-            setLabelSections(finalData.labelSections || []);
-            const project = loadedProjects.find(p => p.id === savedActiveId);
-            if (project) setFileName(project.fileName || 'Project Data');
-          }
-        }).finally(() => setIsProjectLoading(false));
-      }
-    });
-  }, []);
+    }, () => {});
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, [setActiveProjectId, projects, clearProject]);
 
   const handleLogin = async () => {};
   const handleLogout = async () => {};
 
-  // Persist active project ID whenever it changes (all 3 layers)
+  // Persist active project ID whenever it changes (both fire-and-forget in parallel)
   useEffect(() => {
-    if (activeProjectId) {
-      saveToLS(LS_ACTIVE_PROJECT_KEY, activeProjectId);
-    } else {
-      localStorage.removeItem(LS_ACTIVE_PROJECT_KEY);
+    try {
+      saveAppPrefsToFirestore(activeProjectId, savedClusters)?.catch(() => undefined);
+    } catch (_error) {
+      // Ignore sync preference-save exceptions; normal writes use project persistence.
     }
-    // Also save to IDB + Firestore (background, non-blocking)
-    saveAppPrefsToIDB(activeProjectId, savedClusters);
-    saveAppPrefsToFirestore(activeProjectId, savedClusters);
-  }, [activeProjectId]);
+    try {
+      saveAppPrefsToIDB(activeProjectId, savedClusters)?.catch(() => undefined);
+    } catch (_error) {
+      // Ignore sync preference-save exceptions; normal writes use project persistence.
+    }
+  }, [activeProjectId, savedClusters]);
 
-  // Auto-save labelSections when they change
-  const labelSectionsRef = React.useRef(labelSections);
   useEffect(() => {
-    // Skip initial mount (don't save on load)
-    if (labelSectionsRef.current === labelSections) return;
-    labelSectionsRef.current = labelSections;
-    if (activeProjectId && results) {
-      saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName);
-    }
-  }, [labelSections]);
+    if (mainTab !== 'group' || groupSubTab !== 'data') return;
+    syncProjectIdToUrl(activeProjectId, projects);
+  }, [mainTab, groupSubTab, activeProjectId, projects, syncProjectIdToUrl]);
+
+  useEffect(() => {
+    const handlePopState = async () => {
+      const parsed = parseAppPath(window.location.pathname);
+      setMainTab(parsed.mainTab);
+      if (parsed.groupSubTab !== null) setGroupSubTab(parsed.groupSubTab);
+      if (parsed.settingsSubTab !== null) setSettingsSubTab(parsed.settingsSubTab);
+
+      const searchKey = new URLSearchParams(window.location.search).get('project');
+      const key = parsed.dataRouteProjectKey || searchKey;
+      const projectIdFromUrl = resolveProjectIdFromUrlKey(key, projects);
+
+      if (parsed.mainTab === 'group' && parsed.groupSubTab === 'data' && key && projectIdFromUrl) {
+        if (projectIdFromUrl === activeProjectId) return;
+        setActiveProjectId(projectIdFromUrl);
+        setIsProjectLoading(true);
+        try {
+          await loadProject(projectIdFromUrl, projects);
+        } finally {
+          setIsProjectLoading(false);
+        }
+        return;
+      }
+
+      // Any route other than /group/data: drop legacy ?project= and clear loaded project
+      if (parsed.mainTab !== 'group' || parsed.groupSubTab !== 'data') {
+        try {
+          const u = new URL(window.location.href);
+          if (u.searchParams.has('project')) {
+            u.searchParams.delete('project');
+            window.history.replaceState({}, '', u.pathname + u.search);
+          }
+        } catch {
+          /* ignore */
+        }
+        if (activeProjectId) {
+          setActiveProjectId(null);
+          clearProject();
+        }
+        return;
+      }
+
+      if (!key || !projectIdFromUrl) {
+        if (activeProjectId) {
+          setActiveProjectId(null);
+          clearProject();
+        }
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [activeProjectId, clearProject, loadProject, projects, resolveProjectIdFromUrlKey]);
+
+  // Ref for projects so the onSnapshot callback always sees the latest local state
+  const localProjectsRef = useRef(projects);
+  localProjectsRef.current = projects;
+
+  // Grace period after project creation — don't clear if the project was just created
+  // and the Firestore write hasn't landed in the snapshot yet.
+  const recentlyCreatedProjectRef = useRef<{ id: string; until: number } | null>(null);
+
+  // Prevent the projects snapshot from overwriting state until initial load completes.
+  // Without this, onSnapshot fires immediately with potentially empty cache data,
+  // setting projects=[] before loadProjectsFromFirestore() resolves.
+  const initialProjectsLoadedRef = useRef(false);
+  // Timestamp when getDocs finished — used to reject stale empty snapshots that
+  // arrive shortly after the authoritative load.
+  const initialProjectsLoadedAtRef = useRef<number>(0);
+  // Last list applied from getDocs or a non-stale snapshot — avoids a post-load empty
+  // fromCache snapshot wiping the list that getDocs already returned.
+  const lastAppliedProjectsSnapshotRef = useRef<Project[] | null>(null);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'projects'), (snap) => {
+      const liveProjects = mapProjectsSnapshot(snap);
+
+      // Don't overwrite projects with empty snapshot data before initial load completes.
+      // The initial load (loadProjectsFromFirestore) does a getDocs which always returns
+      // authoritative data; the snapshot may fire first with empty local cache.
+      if (!initialProjectsLoadedRef.current) {
+        if (liveProjects.length === 0) return; // Skip empty — wait for initial load
+        initialProjectsLoadedRef.current = true; // Snapshot had data, trust it
+        initialProjectsLoadedAtRef.current = Date.now();
+      } else if (
+        liveProjects.length === 0 &&
+        (lastAppliedProjectsSnapshotRef.current?.length ?? 0) > 0
+      ) {
+        // After initial load, NEVER let an empty snapshot wipe a non-empty list
+        // when it's coming from the local cache. Empty server snapshots should
+        // be trusted immediately (e.g. collaborator deleted the project list).
+        if (snap.metadata?.fromCache === true) {
+          return;
+        }
+        if (snap.metadata?.hasPendingWrites === true) {
+          return;
+        }
+      }
+
+      lastAppliedProjectsSnapshotRef.current = liveProjects;
+      setProjects(liveProjects);
+
+      const pid = activeProjectIdRef.current;
+      if (pid && !liveProjects.some(project => project.id === pid)) {
+        // Check if this project was just created (grace period for Firestore write)
+        const grace = recentlyCreatedProjectRef.current;
+        if (grace && grace.id === pid && Date.now() < grace.until) {
+          return; // Skip — Firestore hasn't caught up yet
+        }
+        setActiveProjectId(null);
+        setMainTab('group');
+        setGroupSubTab('projects');
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({}, '', buildMainPath('group', 'projects'));
+        }
+        clearProject();
+        return;
+      }
+
+      // Clear grace once the project appears in Firestore
+      if (recentlyCreatedProjectRef.current && liveProjects.some(p => p.id === recentlyCreatedProjectRef.current?.id)) {
+        recentlyCreatedProjectRef.current = null;
+      }
+
+      const activeProject = pid
+        ? liveProjects.find(project => project.id === pid)
+        : null;
+      if (activeProject && typeof activeProject.fileName === 'string') {
+        // Only update local display state — don't trigger a full Firestore save
+        // of chunk data. bulkSet calls enqueueSave which suppresses the chunks
+        // snapshot listener, blocking legitimate collaborator updates.
+        persistence.setFileName(activeProject.fileName);
+      }
+    }, (error) => {
+      console.warn('[PROJECTS] Firestore snapshot error (likely quota exceeded):', error?.message || error);
+      // Do NOT clear projects on error — keep whatever we have locally
+    });
+
+    return () => { if (typeof unsub === 'function') unsub(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearProject, mapProjectsSnapshot]);
+
 
   const saveCluster = async (cluster: ClusterSummary) => {
     const clusterId = `local_${cluster.pageName.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
@@ -1317,63 +1545,16 @@ export default function App() {
     };
     const updated = [...savedClusters, newCluster];
     setSavedClusters(updated);
-    saveToLS(LS_SAVED_CLUSTERS_KEY, updated);
-    saveAppPrefsToIDB(activeProjectId, updated);
     saveAppPrefsToFirestore(activeProjectId, updated);
   };
 
   const deleteSavedCluster = async (clusterId: string) => {
     const updated = savedClusters.filter((c: any) => c.id !== clusterId);
     setSavedClusters(updated);
-    saveToLS(LS_SAVED_CLUSTERS_KEY, updated);
-    saveAppPrefsToIDB(activeProjectId, updated);
     saveAppPrefsToFirestore(activeProjectId, updated);
   };
 
-  const saveProjectData = (
-    res: ProcessedRow[] | null,
-    clusters: ClusterSummary[] | null,
-    tokens: TokenSummary[] | null,
-    grouped: GroupedCluster[] | null,
-    st: Stats | null,
-    ds: any | null,
-    fname: string | null,
-    bTokens?: Set<string>,
-    bKeywords?: BlockedKeyword[],
-    approved?: GroupedCluster[]
-  ) => {
-    if (!activeProjectId) return;
-    const dataPayload = {
-      results: res,
-      clusterSummary: clusters,
-      tokenSummary: tokens,
-      groupedClusters: grouped,
-      approvedGroups: approved ?? approvedGroups,
-      stats: st,
-      datasetStats: ds,
-      blockedTokens: Array.from(bTokens ?? blockedTokens),
-      blockedKeywords: bKeywords ?? blockedKeywords,
-      labelSections: labelSectionsRef.current,
-      activityLog: activityLogRef.current.slice(0, 500),
-      tokenMergeRules: tokenMergeRulesRef.current,
-      autoGroupSuggestions: autoGroupSuggestionsRef.current,
-      updatedAt: new Date().toISOString()
-    };
-    // Save to IndexedDB (fast, local cache)
-    saveToIDB(activeProjectId, dataPayload);
-    // Save to Firestore (persistent, chunked — runs in background)
-    saveProjectDataToFirestore(activeProjectId, dataPayload);
-    // Also update filename on the project (localStorage + Firestore)
-    if (fname) {
-      const updatedProjects = projects.map(p =>
-        p.id === activeProjectId ? { ...p, fileName: fname } : p
-      );
-      setProjects(updatedProjects);
-      saveToLS(LS_PROJECTS_KEY, updatedProjects);
-      const updatedProject = updatedProjects.find(p => p.id === activeProjectId);
-      if (updatedProject) saveProjectToFirestore(updatedProject);
-    }
-  };
+
 
   const createProject = async () => {
     if (!newProjectName.trim()) {
@@ -1392,41 +1573,20 @@ export default function App() {
       };
       const updatedProjects = [...projects, newProject];
       setProjects(updatedProjects);
-      saveToLS(LS_PROJECTS_KEY, updatedProjects);
-      // Save to Firestore immediately
-      await saveProjectToFirestore(newProject);
-      // Immediately create empty IDB record so project persists
-      await saveToIDB(newProject.id, {
-        results: null,
-        clusterSummary: null,
-        tokenSummary: null,
-        groupedClusters: [],
-        approvedGroups: [],
-        stats: null,
-        datasetStats: null,
-        blockedTokens: [],
-        blockedKeywords: [],
-        labelSections: [],
-        updatedAt: new Date().toISOString()
-      });
+      // Grace period: don't clear this project if the Firestore snapshot fires before the write lands
+      recentlyCreatedProjectRef.current = { id: newProject.id, until: Date.now() + 10000 };
+      // Fire-and-forget — project is already in React state, no need to block UI
+      saveProjectToFirestore(newProject).catch(err => console.error('[createProject] Firestore save failed:', err));
       setNewProjectName('');
       setNewProjectDescription('');
       setIsCreatingProject(false);
       setActiveProjectId(newProject.id);
       setMainTab('group');
-      setResults(null);
-      setClusterSummary(null);
-      setTokenSummary(null);
-      setStats(null);
-      setDatasetStats(null);
-      setBlockedKeywords([]);
-      setBlockedTokens(new Set());
-      setGroupedClusters([]);
-      setApprovedGroups([]);
-      setActivityLog([]);
-      setAutoGroupSuggestions([]);
-      setTokenMergeRules([]);
-      setFileName(null);
+      setGroupSubTab('data');
+      if (typeof window !== 'undefined') {
+        window.history.pushState({}, '', buildMainPath('group', 'data', projectUrlKey(newProject)));
+      }
+      clearProject();
     } catch (error) {
       setProjectError("Failed to create project.");
     } finally {
@@ -1439,22 +1599,11 @@ export default function App() {
     // Clear active project first if it's the one being deleted
     if (activeProjectId === projectId) {
       setActiveProjectId(null);
-      setResults(null);
-      setClusterSummary(null);
-      setTokenSummary(null);
-      setGroupedClusters([]);
-      setStats(null);
-      setDatasetStats(null);
-      setBlockedKeywords([]);
-      setBlockedTokens(new Set());
-      setLabelSections([]);
-      setFileName(null);
-      localStorage.removeItem(LS_ACTIVE_PROJECT_KEY);
+      clearProject();
     }
     const updatedProjects = projects.filter(p => p.id !== projectId);
     setProjects(updatedProjects);
-    saveToLS(LS_PROJECTS_KEY, updatedProjects);
-    // Remove from Firestore (metadata + data chunks) and IndexedDB
+    // Remove from Firestore and clear any stale local cache copies
     await Promise.all([
       deleteProjectFromFirestore(projectId),
       deleteProjectDataFromFirestore(projectId),
@@ -1467,51 +1616,13 @@ export default function App() {
     setIsProjectLoading(true);
     setMainTab('group');
     setGroupSubTab('data');
+    const proj = projects.find((p) => p.id === projectId);
+    const key = proj ? projectUrlKey(proj) : projectId;
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', buildMainPath('group', 'data', key));
+    }
     try {
-      // Try IDB first (fast local cache)
-      let data = await loadFromIDB(projectId);
-
-      // If IDB has no data (or empty results), try Firestore
-      if (!data || !data.results) {
-        console.log('IDB miss for', projectId, '— loading from Firestore...');
-        const firestoreData = await loadProjectDataFromFirestore(projectId);
-        if (firestoreData && firestoreData.results) {
-          data = firestoreData;
-          // Cache to IDB for next time
-          await saveToIDB(projectId, data);
-          console.log('Loaded from Firestore and cached to IDB');
-        }
-      }
-
-      if (data && data.results) {
-        setResults(data.results || null);
-        setClusterSummary(data.clusterSummary || null);
-        setTokenSummary(data.tokenSummary || null);
-        setGroupedClusters(data.groupedClusters || []);
-        setApprovedGroups(data.approvedGroups || []);
-        setActivityLog(data.activityLog || []);
-        setTokenMergeRules(data.tokenMergeRules || []);
-        setAutoGroupSuggestions(data.autoGroupSuggestions || []);
-        setStats(data.stats || null);
-        setDatasetStats(data.datasetStats || null);
-        setBlockedTokens(new Set<string>(data.blockedTokens || []));
-        setBlockedKeywords(data.blockedKeywords || []);
-        setLabelSections(data.labelSections || []);
-        const project = projects.find(p => p.id === projectId);
-        if (project) setFileName(project.fileName || 'Project Data');
-      } else {
-        setResults(null);
-        setClusterSummary(null);
-        setTokenSummary(null);
-        setGroupedClusters([]);
-        setApprovedGroups([]);
-        setStats(null);
-        setDatasetStats(null);
-        setBlockedTokens(new Set());
-        setBlockedKeywords([]);
-        setLabelSections([]);
-        setFileName(null);
-      }
+      await loadProject(projectId, projects);
     } finally {
       setIsProjectLoading(false);
     }
@@ -1627,7 +1738,7 @@ export default function App() {
                 validCount++;
                 totalSearchVolume += volume;
 
-                // Check for foreign countries/cities — block these keywords
+                // Check for foreign countries/cities â€" block these keywords
                 const foreignEntity = detectForeignEntity(keyword.toLowerCase());
                 if (foreignEntity) {
                   blockedRows.push({ keyword, volume, kd, reason: foreignEntity });
@@ -1635,7 +1746,7 @@ export default function App() {
                 }
 
                 // Check for non-English, weird characters, or URL-like strings
-                const isNonEnglishOrUrl = /[^\x00-\x7F]/.test(keyword) || 
+                const isNonEnglishOrUrl = /[^\u0020-\u007E]/.test(keyword) ||
                                           /\b(www\b|http|\.com\b|\.org\b|\.net\b|\.online\b|\.co\b|\.us\b|\.io\b)/i.test(keyword);
 
                 if (isNonEnglishOrUrl) {
@@ -1667,14 +1778,14 @@ export default function App() {
                 const keywordLower = keyword.toLowerCase();
                 const rawTokens = keywordLower.split(/[^a-z0-9]+/);
                 
-                // Check for NYC aliases → city "New York City", state "New York"
+                // Check for NYC aliases â†' city "New York City", state "New York"
                 const isNycAlias = keywordLower.includes('nyc') || keywordLower.includes('new york city');
                 if (isNycAlias) {
                   locationCity = 'New York City';
                   locationState = 'New York';
                 }
 
-                // Check for LA alias → city "Los Angeles", state "California"
+                // Check for LA alias â†' city "Los Angeles", state "California"
                 if (!locationCity && /\bla\b/.test(keywordLower)) {
                   locationCity = 'Los Angeles';
                   locationState = 'California';
@@ -1697,7 +1808,7 @@ export default function App() {
                         }
                       }
                     }
-                    // Try 1-word state (skip "la" — almost always means Los Angeles, not Louisiana)
+                    // Try 1-word state (skip "la" â€" almost always means Los Angeles, not Louisiana)
                     if (stateSet.has(token) && !stopWords.has(token) && token !== 'la') {
                       locationState = normalizeState(token);
                       break;
@@ -1739,60 +1850,7 @@ export default function App() {
                 if (locationCity) allCities.add(locationCity);
                 if (locationState) allStates.add(locationState);
 
-                // Tokenize, singularize, sort
-                let normalizedKeyword = keywordLower;
-
-                // #7: Fix common misspellings first
-                normalizedKeyword = normalizedKeyword.replace(misspellingRegex, match => misspellingMap[match]);
-
-                // Normalize 24/7 and 24 hour variations
-                normalizedKeyword = normalizedKeyword.replace(/\b24\s*[\/|-]?\s*7\b/g, '24hour');
-                normalizedKeyword = normalizedKeyword.replace(/\b24\s*hours?\b/g, '24hour');
-
-                // #3: Hyphen/spacing normalization — join split prefixes
-                normalizedKeyword = normalizedKeyword.replace(prefixPattern, '$1$2');
-                // Also normalize "e-mail"→"email", "e-commerce"→"ecommerce" etc.
-                normalizedKeyword = normalizedKeyword.replace(/\be[\s-](mail|commerce|sign)\b/g, 'e$1');
-
-                // #10: Local intent unification — "near me"/"close to me"/etc → "nearby" (kept as token, not stripped)
-                normalizedKeyword = normalizedKeyword.replace(localIntentRegex, 'nearby');
-
-                // 1. Singularize each word FIRST (so synonym map only needs singular forms)
-                normalizedKeyword = normalizedKeyword
-                  .split(/([^a-z0-9]+)/)
-                  .map(part => {
-                    // Preserve delimiters (spaces, hyphens, etc.)
-                    if (/[^a-z0-9]/.test(part) || part.length === 0) return part;
-                    if (pluralizeCache.has(part)) return pluralizeCache.get(part)!;
-                    try {
-                      const singular = pluralize.singular(part);
-                      pluralizeCache.set(part, singular);
-                      return singular;
-                    } catch (e) {
-                      pluralizeCache.set(part, part);
-                      return part;
-                    }
-                  })
-                  .join('');
-
-                // 2. Normalize synonyms (now matching against singularized words)
-                normalizedKeyword = normalizedKeyword.replace(synonymRegex, match => synonymMap[match]);
-
-                // Remove multi-word countries and cities before tokenizing
-                normalizedKeyword = normalizedKeyword.replace(multiWordLocationsRegex, '');
-
-                // 3. Remove stop words, ignored tokens, and single-word countries BEFORE state normalization
-                normalizedKeyword = normalizedKeyword
-                  .split(/[^a-z0-9]+/)
-                  .filter(t => t.length > 0 && !stopWords.has(t) && !ignoredTokens.has(t) && !countries.has(t))
-                  .join(' ');
-
-                // 4. Normalize states (multi-word and single-word)
-                normalizedKeyword = normalizedKeyword.replace(stateRegex, match => stateMap[match]);
-
-                let tokenArr = normalizedKeyword.split(/[^a-z0-9]+/)
-                  .filter(t => t.length > 0)
-                  .map(t => numberMap[t] || stem(t));
+                let tokenArr = normalizeKeywordToTokenArr(keywordLower);
 
                 // Apply token merge rules (permanent project-level synonyms)
                 if (tokenMergeRules.length > 0) {
@@ -2006,7 +2064,7 @@ export default function App() {
                   })
                   .sort((a, b) => b.frequency - a.frequency);
 
-    // No auto-grouping — all pages start in Pages (Ungrouped). User groups manually.
+    // No auto-grouping â€" all pages start in Pages (Ungrouped). User groups manually.
     setResults(outputData);
     setClusterSummary(summaryData);
     setGroupedClusters([]);
@@ -2033,7 +2091,7 @@ export default function App() {
         informational: datasetInformational,
         navigational: datasetNavigational
       };
-      saveProjectData(outputData, summaryData, tokenSummaryData, [], statsObj, datasetStatsObj, file.name, undefined, blockedRows);
+      persistence.bulkSet({ results: outputData, clusterSummary: summaryData, tokenSummary: tokenSummaryData, groupedClusters: [], stats: statsObj, datasetStats: datasetStatsObj, fileName: file.name, blockedKeywords: blockedRows, blockedTokens: [], approvedGroups: [], activityLog: [], tokenMergeRules: [], autoGroupSuggestions: [], labelSections: [] });
     }
 
     setStats({
@@ -2100,14 +2158,18 @@ export default function App() {
     setIsDragging(false);
   }, []);
 
+  // Ref to always call the latest processCSV (avoids stale closure in useCallback)
+  const processCSVRef = useRef(processCSV);
+  processCSVRef.current = processCSV;
+
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const file = e.dataTransfer.files[0];
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
-        processCSV(file);
+        processCSVRef.current(file);
       } else {
         setError("Please upload a valid CSV file.");
       }
@@ -2116,7 +2178,7 @@ export default function App() {
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      processCSV(e.target.files[0]);
+      processCSVRef.current(e.target.files[0]);
     }
   }, []);
 
@@ -2124,24 +2186,9 @@ export default function App() {
     if (!results || !clusterSummary || !tokenSummary) return;
 
     let csv = '';
-    let filename = `clustered_keywords_${new Date().getTime()}.csv`;
+    let filename = `keyword_clusters_${new Date().getTime()}.csv`;
 
-    if (activeTab === 'keywords') {
-      csv = Papa.unparse({
-        fields: ['Page Name', 'Len', 'Tokens', 'Keyword', 'Vol.', 'KD', 'Label', 'City', 'State'],
-        data: results.map(row => [
-          row.pageName, 
-          row.pageNameLen,
-          row.tokens,
-          row.keyword, 
-          row.searchVolume,
-          row.kd !== null ? row.kd : '',
-          row.label,
-          row.locationCity || '',
-          row.locationState || ''
-        ])
-      });
-    } else if (activeTab === 'pages') {
+    if (activeTab === 'pages') {
       filename = `keyword_clusters_${new Date().getTime()}.csv`;
       csv = Papa.unparse({
         fields: ['Page Name', 'Len', 'Tokens', 'KWs', 'Vol.', 'KD', 'Label', 'City', 'State'],
@@ -2255,12 +2302,15 @@ export default function App() {
         groupedTokens.add(c.tokens);
       }
     }
+    for (const token of pendingFilteredAutoGroupTokens) {
+      groupedTokens.add(token);
+    }
     let filtered = clusterSummary.filter(c => !groupedTokens.has(c.tokens));
     if (blockedTokens.size > 0) {
       filtered = filtered.filter(c => !hasBlockedToken(c.tokenArr));
     }
     return filtered;
-  }, [clusterSummary, groupedClusters, approvedGroups, blockedTokens, hasBlockedToken]);
+  }, [clusterSummary, groupedClusters, approvedGroups, pendingFilteredAutoGroupTokens, blockedTokens, hasBlockedToken]);
 
   // Effective grouped: filter out sub-clusters with blocked tokens, remove empty groups
   const effectiveGrouped = useMemo(() => {
@@ -2327,9 +2377,7 @@ export default function App() {
     const counts: Record<string, number> = {};
     if (!isLabelDropdownOpen) return counts;
     
-    const data = activeTab === 'keywords' ? results : 
-                 activeTab === 'pages' ? clusterSummary : 
-                 tokenSummary;
+    const data = activeTab === 'pages' ? clusterSummary : tokenSummary;
     if (!data) return counts;
 
     const searchLower = debouncedSearchQuery.toLowerCase();
@@ -2341,20 +2389,7 @@ export default function App() {
       const item = data[i];
       
       // Apply other filters
-      if (activeTab === 'keywords') {
-        const r = item as ProcessedRow;
-        if (hasMin && (validClusterCounts.get(r.pageName) || 0) < min) continue;
-        if (hasMax && (validClusterCounts.get(r.pageName) || 0) > max) continue;
-        if (hasTokens) {
-          let hasAll = true;
-          const rTokens = r.tokenArr;
-          for (let j = 0; j < tokensArr.length; j++) {
-            if (!rTokens.includes(tokensArr[j])) { hasAll = false; break; }
-          }
-          if (!hasAll) continue;
-        }
-        if (searchLower && !(r.keywordLower.includes(searchLower) || r.pageNameLower.includes(searchLower))) continue;
-      } else if (activeTab === 'pages') {
+      if (activeTab === 'pages') {
         const c = item as ClusterSummary;
         if (hasMin && c.keywordCount < min) continue;
         if (hasMax && c.keywordCount > max) continue;
@@ -2391,7 +2426,7 @@ export default function App() {
       }
     }
     return counts;
-  }, [activeTab, results, clusterSummary, tokenSummary, debouncedSearchQuery, min, max, hasMin, hasMax, validClusterCounts, minTokenLen, maxTokenLen, selectedTokens, isLabelDropdownOpen]);
+  }, [activeTab, clusterSummary, tokenSummary, debouncedSearchQuery, min, max, hasMin, hasMax, minTokenLen, maxTokenLen, selectedTokens, isLabelDropdownOpen]);
 
   const filteredClusters = useMemo(() => {
     if (!effectiveClusters) return [];
@@ -2672,7 +2707,7 @@ export default function App() {
     setCurrentPage(1);
   }, []);
 
-  // Shared filter bag for TableHeader — single object passed to all tabs
+  // Shared filter bag for TableHeader â€" single object passed to all tabs
   const filterBag = useMemo((): FilterBag => ({
     minLen, setMinLen, maxLen, setMaxLen,
     minKwInCluster, setMinKwInCluster, maxKwInCluster, setMaxKwInCluster,
@@ -2756,7 +2791,7 @@ export default function App() {
   }, [filteredResultsData.totalVolume, results, debouncedSearchQuery, minClusterCount, maxClusterCount, excludedLabels, selectedTokens]);
 
   // Memoize pagination slices to avoid re-slicing on unrelated state changes
-  // Label color map: token → { colorIndex, border, bg, text, sectionName }
+  // Label color map: token â†' { colorIndex, border, bg, text, sectionName }
   const labelColorMap = useMemo(() => {
     const map = new Map<string, { border: string; bg: string; text: string; sectionName: string }>();
     labelSections.forEach(section => {
@@ -2770,7 +2805,7 @@ export default function App() {
     return map;
   }, [labelSections]);
 
-  // Label section stats: sectionId → { totalVol, avgKd }
+  // Label section stats: sectionId â†' { totalVol, avgKd }
   const labelSectionStats = useMemo(() => {
     const statsMap = new Map<string, { totalVol: number; avgKd: number | null }>();
     if (!tokenSummary) return statsMap;
@@ -2815,7 +2850,7 @@ export default function App() {
         g.clusters.some(c => c.pageNameLower.includes(q))
       );
     }
-    // Column-level filters — same as Pages (Ungrouped) but applied at group aggregate level
+    // Column-level filters â€" same as Pages (Ungrouped) but applied at group aggregate level
     const kwMin = minKwInCluster ? parseInt(minKwInCluster, 10) : NaN;
     const kwMax = maxKwInCluster ? parseInt(maxKwInCluster, 10) : NaN;
     const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
@@ -2858,27 +2893,16 @@ export default function App() {
         return true;
       });
     }
-    // Multi-sort
-    if (groupedSortConfig.length === 0) return groups;
     return [...groups].sort((a, b) => {
-      for (const { key, direction } of groupedSortConfig) {
-        const aVal = (a as any)[key] ?? (direction === 'asc' ? Infinity : -Infinity);
-        const bVal = (b as any)[key] ?? (direction === 'asc' ? Infinity : -Infinity);
-        if (typeof aVal === 'string' && typeof bVal === 'string') {
-          const cmp = aVal.localeCompare(bVal);
-          if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
-          continue;
-        }
-        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
-      }
-      return 0;
+      if (b.totalVolume !== a.totalVolume) return b.totalVolume - a.totalVolume;
+      if (b.keywordCount !== a.keywordCount) return b.keywordCount - a.keywordCount;
+      return a.groupName.localeCompare(b.groupName);
     });
-  }, [effectiveGrouped, groupedSortConfig, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, selectedTokens]);
+  }, [effectiveGrouped, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, selectedTokens]);
 
   const paginatedGroupedClusters = useMemo(() => filteredSortedGrouped.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [filteredSortedGrouped, currentPage, itemsPerPage]);
 
-  // Filtered approved groups — same column-level filters as grouped tab
+  // Filtered approved groups â€" same column-level filters as grouped tab
   const filteredApprovedGroups = useMemo(() => {
     let groups = approvedGroups as GroupedCluster[];
     if (debouncedSearchQuery) {
@@ -2933,8 +2957,154 @@ export default function App() {
     return allBlockedKeywords.filter(b => b.keyword.toLowerCase().includes(q));
   }, [allBlockedKeywords, debouncedSearchQuery]);
 
+  type MergeTokenStats = { frequency: number; totalVolume: number; avgKd: number | null };
+  type MergeRuleRow = {
+    ruleId: string;
+    parentToken: string;
+    childTokens: string[];
+    parentStats: MergeTokenStats;
+    childStats: Record<string, MergeTokenStats>;
+  };
+
+  const tokenMgmtMergeSearchTerms = useMemo(() => parseTokenMgmtSearchTerms(tokenMgmtSearch), [tokenMgmtSearch]);
+
+  // Merge subtab rows: 1 row per parent token + collapsible children underneath.
+  // We compute token stats by simulating merges in rule order on a per-row tokenArr basis,
+  // and measuring child token stats from the "stage before" the rule is applied.
+  const mergeMgmtRuleRows = useMemo<MergeRuleRow[]>(() => {
+    if (tokenMgmtSubTab !== 'merge') return [];
+    if (!results || tokenMergeRules.length === 0) return [];
+
+    const tokensByRow: string[][] = results.map(r => [...(r.originalTokenArr ?? r.tokenArr)]);
+    const mergeRows: MergeRuleRow[] = [];
+
+    for (const rule of tokenMergeRules) {
+      const childSet = new Set(rule.childTokens);
+
+      // Group rows into "clusters" based on the token signature at this stage.
+      const signatureToCluster = new Map<string, { tokensArr: string[]; volume: number; kd: number | null }>();
+      for (let i = 0; i < results.length; i++) {
+        const signature = computeSignature(tokensByRow[i]);
+        const existing = signatureToCluster.get(signature);
+        if (!existing) {
+          signatureToCluster.set(signature, {
+            tokensArr: signature ? signature.split(' ') : [],
+            volume: results[i].searchVolume,
+            kd: results[i].kd,
+          });
+        } else {
+          existing.volume += results[i].searchVolume;
+          if (results[i].kd !== null && existing.kd === null) existing.kd = results[i].kd;
+        }
+      }
+
+      // Token stats for each child token are computed from clusters where that child exists.
+      const rawChildStats = new Map<string, { frequency: number; totalVolume: number; totalKd: number; kdCount: number }>();
+      for (const cluster of signatureToCluster.values()) {
+        // Match rebuildTokenSummary: frequency = number of clusters containing the token.
+        for (const token of cluster.tokensArr) {
+          if (!childSet.has(token)) continue;
+          const existing = rawChildStats.get(token);
+          if (!existing) rawChildStats.set(token, { frequency: 1, totalVolume: cluster.volume, totalKd: cluster.kd !== null ? cluster.kd : 0, kdCount: cluster.kd !== null ? 1 : 0 });
+          else {
+            existing.frequency++;
+            existing.totalVolume += cluster.volume;
+            if (cluster.kd !== null) { existing.totalKd += cluster.kd; existing.kdCount++; }
+          }
+        }
+      }
+
+      const childStats: Record<string, MergeTokenStats> = {};
+      let parentFrequency = 0;
+      let parentTotalVolume = 0;
+      let parentTotalKd = 0;
+      let parentKdCount = 0;
+
+      for (const child of rule.childTokens) {
+        const st = rawChildStats.get(child);
+        if (!st) {
+          childStats[child] = { frequency: 0, totalVolume: 0, avgKd: null };
+          continue;
+        }
+        childStats[child] = {
+          frequency: st.frequency,
+          totalVolume: st.totalVolume,
+          avgKd: st.kdCount > 0 ? Math.round(st.totalKd / st.kdCount) : null,
+        };
+        parentFrequency += st.frequency;
+        parentTotalVolume += st.totalVolume;
+        parentTotalKd += st.totalKd;
+        parentKdCount += st.kdCount;
+      }
+
+      const parentStats: MergeTokenStats = {
+        frequency: parentFrequency,
+        totalVolume: parentTotalVolume,
+        avgKd: parentKdCount > 0 ? Math.round(parentTotalKd / parentKdCount) : null,
+      };
+
+      mergeRows.push({
+        ruleId: rule.id,
+        parentToken: rule.parentToken,
+        childTokens: [...rule.childTokens],
+        parentStats,
+        childStats,
+      });
+
+      // Apply this rule so the next iteration measures the stage after.
+      for (let i = 0; i < results.length; i++) {
+        if (tokensByRow[i].some(t => childSet.has(t))) {
+          tokensByRow[i] = mergeTokenArr(tokensByRow[i], rule.parentToken, rule.childTokens);
+        }
+      }
+    }
+
+    return mergeRows;
+  }, [tokenMgmtSubTab, results, tokenMergeRules]);
+
+  const filteredMergeRuleRows = useMemo(() => {
+    if (tokenMgmtSubTab !== 'merge') return [];
+    if (mergeMgmtRuleRows.length === 0) return [];
+    if (tokenMgmtMergeSearchTerms.length === 0) return mergeMgmtRuleRows;
+
+    return mergeMgmtRuleRows.filter(r => {
+      if (tokenIncludesAnyTerm(r.parentToken, tokenMgmtMergeSearchTerms)) return true;
+      return r.childTokens.some(c => tokenIncludesAnyTerm(c, tokenMgmtMergeSearchTerms));
+    });
+  }, [tokenMgmtSubTab, mergeMgmtRuleRows, tokenMgmtMergeSearchTerms]);
+
+  const sortedMergeRuleRows = useMemo(() => {
+    if (tokenMgmtSubTab !== 'merge') return [];
+    const { key, direction } = tokenMgmtSort;
+
+    const dir = direction === 'asc' ? 1 : -1;
+    const cmp = (a: number | null, b: number | null) => {
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return (a - b) * dir;
+    };
+
+    return [...filteredMergeRuleRows].sort((a, b) => {
+      if (key === 'token') return dir * a.parentToken.localeCompare(b.parentToken);
+      if (key === 'frequency') return cmp(a.parentStats.frequency, b.parentStats.frequency);
+      if (key === 'totalVolume') return cmp(a.parentStats.totalVolume, b.parentStats.totalVolume);
+      if (key === 'avgKd') return cmp(a.parentStats.avgKd, b.parentStats.avgKd);
+      return 0;
+    });
+  }, [tokenMgmtSubTab, filteredMergeRuleRows, tokenMgmtSort]);
+
+  const mergeMgmtTotalPages = Math.max(1, Math.ceil(sortedMergeRuleRows.length / tokenMgmtPerPage));
+  const safeMergeMgmtPage = Math.min(tokenMgmtPage, mergeMgmtTotalPages);
+  const paginatedMergeRuleRows = useMemo(
+    () =>
+      sortedMergeRuleRows.slice((safeMergeMgmtPage - 1) * tokenMgmtPerPage, safeMergeMgmtPage * tokenMgmtPerPage),
+    [sortedMergeRuleRows, safeMergeMgmtPage]
+  );
+
   // Token Management panel: filtered, sorted, paginated with subtab support
   const filteredMgmtTokens = useMemo(() => {
+    if (tokenMgmtSubTab === 'merge') return [];
     if (!tokenSummary) return [];
     let base: TokenSummary[];
     if (tokenMgmtSubTab === 'blocked') {
@@ -2952,25 +3122,10 @@ export default function App() {
         for (const g of filteredSortedGrouped) clusters.push(...g.clusters);
       } else if (activeTab === 'approved') {
         for (const g of filteredApprovedGroups) clusters.push(...g.clusters);
-      } else if (activeTab === 'keywords' && filteredResults) {
-        // Build token stats from currently filtered keywords only (not all keywords)
-        for (const r of filteredResults) {
-          for (const t of r.tokenArr) {
-            if (blockedTokens.has(t)) continue;
-            const existing = tokenStatsMap.get(t);
-            if (existing) {
-              existing.totalVolume += r.searchVolume;
-              existing.frequency++;
-              if (r.kd !== null) { existing.kdSum += r.kd; existing.kdCount++; }
-            } else {
-              tokenStatsMap.set(t, { token: t, totalVolume: r.searchVolume, frequency: 1, kdSum: r.kd ?? 0, kdCount: r.kd !== null ? 1 : 0 });
-            }
-          }
-        }
       }
 
       // Build stats from clusters (for pages/grouped/approved tabs)
-      if (activeTab !== 'keywords') {
+      if (activeTab === 'pages' || activeTab === 'grouped' || activeTab === 'approved') {
         for (const c of clusters) {
           for (const t of c.tokenArr) {
             if (blockedTokens.has(t)) continue;
@@ -2989,7 +3144,7 @@ export default function App() {
         }
       }
 
-      // Convert to TokenSummary format — pull extra fields from global tokenSummary if available
+      // Convert to TokenSummary format â€" pull extra fields from global tokenSummary if available
       const globalMap = new Map<string, TokenSummary>((tokenSummary || []).map(t => [t.token, t]));
       base = Array.from(tokenStatsMap.values()).map(s => {
         const global = globalMap.get(s.token);
@@ -3006,11 +3161,11 @@ export default function App() {
         };
       });
     } else {
-      // 'all' — show all non-blocked tokens
+      // 'all' â€" show all non-blocked tokens
       base = tokenSummary.filter(t => !blockedTokens.has(t.token) && !universalBlockedTokens.has(t.token));
     }
-    const q = tokenMgmtSearch.toLowerCase().trim();
-    let tokens = q ? base.filter(t => t.token.includes(q)) : [...base];
+    const terms = parseTokenMgmtSearchTerms(tokenMgmtSearch);
+    let tokens = terms.length ? base.filter(t => tokenIncludesAnyTerm(t.token, terms)) : [...base];
     const { key, direction } = tokenMgmtSort;
     tokens.sort((a, b) => {
       const aVal = a[key];
@@ -3022,13 +3177,13 @@ export default function App() {
       return direction === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
     });
     return tokens;
-  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, effectiveClusters, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults, debouncedSearchQuery, selectedTokens]);
+  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups]);
 
   const tokenMgmtTotalPages = Math.max(1, Math.ceil(filteredMgmtTokens.length / tokenMgmtPerPage));
   const safeMgmtPage = Math.min(tokenMgmtPage, tokenMgmtTotalPages);
   const paginatedMgmtTokens = useMemo(() => filteredMgmtTokens.slice((safeMgmtPage - 1) * tokenMgmtPerPage, safeMgmtPage * tokenMgmtPerPage), [filteredMgmtTokens, safeMgmtPage]);
 
-  // Activity log + toast helper — creates a log entry and fires a toast notification
+  // Activity log + toast helper â€" creates a log entry and fires a toast notification
   const logAndToast = useCallback((action: ActivityAction, details: string, count: number, toastMsg: string, toastType: 'success' | 'info' | 'warning' | 'error' = 'info') => {
     const entry: ActivityLogEntry = {
       id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -3037,14 +3192,48 @@ export default function App() {
       details,
       count,
     };
-    setActivityLog(prev => {
-      const next = [entry, ...prev];
-      return next.length > 500 ? next.slice(0, 500) : next; // Cap at 500
-    });
+    const next = [entry, ...activityLogRef.current];
+    const capped = next.length > 500 ? next.slice(0, 500) : next;
+    activityLogRef.current = capped;
+    setActivityLog(capped);
+    // logAndToast only logs + toasts. Persistence is handled by hook mutations.
     addToast(toastMsg, toastType);
   }, [addToast]);
 
-  // Debounced QA re-review — when pages are removed from groups, wait 5s then re-trigger QA
+  const exportTokensCSV = useCallback(() => {
+    if (!tokenSummary || tokenSummary.length === 0) return;
+
+    const csv = Papa.unparse({
+      fields: ['Token', 'Vol.', 'Frequency', 'Avg KD', 'Length', 'Label', 'Labels', 'City', 'State', 'Blocked', 'Universal Blocked'],
+      data: tokenSummary.map(token => [
+        token.token,
+        token.totalVolume,
+        token.frequency,
+        token.avgKd !== null ? token.avgKd : '',
+        token.length,
+        token.label || '',
+        token.labelArr.join(', '),
+        token.locationCity || '',
+        token.locationState || '',
+        blockedTokens.has(token.token) ? 'Yes' : 'No',
+        universalBlockedTokens.has(token.token) ? 'Yes' : 'No',
+      ]),
+    });
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `token-management_${new Date().getTime()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    logAndToast('export', `Exported ${tokenSummary.length} tokens from token management`, tokenSummary.length, `Exported ${tokenSummary.length} tokens`, 'success');
+  }, [tokenSummary, blockedTokens, universalBlockedTokens, logAndToast]);
+
+  // Debounced QA re-review â€" when pages are removed from groups, wait 5s then re-trigger QA
   const scheduleReReview = useCallback((groupIds: string[]) => {
     groupIds.forEach(id => reReviewGroupIds.current.add(id));
     if (reReviewTimerRef.current) clearTimeout(reReviewTimerRef.current);
@@ -3055,12 +3244,16 @@ export default function App() {
       if (ids.size === 0) return;
       const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
       if (!hasReviewApi) return;
-      setGroupedClusters(prev => prev.map(g =>
-        ids.has(g.id) && g.clusters.length > 0 ? { ...g, reviewStatus: 'pending' as const, reviewMismatchedPages: undefined, reviewReason: undefined } : g
-      ));
+      persistence.updateGroups(groups =>
+        groups.map(g =>
+          ids.has(g.id) && g.clusters.length > 0
+            ? { ...g, reviewStatus: 'pending' as const, reviewMismatchedPages: undefined, reviewReason: undefined }
+            : g
+        )
+      );
       logAndToast('qa-review', `Re-reviewing ${ids.size} group${ids.size > 1 ? 's' : ''} after page removal`, ids.size, `QA re-review queued for ${ids.size} group${ids.size > 1 ? 's' : ''}`, 'info');
     }, 5000);
-  }, [logAndToast]);
+  }, [logAndToast, persistence.updateGroups]);
 
   // Token merge handlers
   const handleOpenMergeModal = useCallback(() => {
@@ -3074,8 +3267,8 @@ export default function App() {
     const childTokens = mergeModalTokens.filter(t => t !== parentToken);
     if (childTokens.length === 0) return;
 
-    // Run the cascade
-    const cascade = executeMergeCascade(results, groupedClusters, approvedGroups, parentToken, childTokens);
+    // Run the cascade — use refs to avoid stale closures
+    const cascade = executeMergeCascade(resultsRef.current, groupedClustersRef.current, approvedGroupsRef.current, parentToken, childTokens);
 
     // Create merge rule
     const newRule: TokenMergeRule = {
@@ -3085,7 +3278,7 @@ export default function App() {
       createdAt: new Date().toISOString(),
     };
 
-    // Update selected token filters — replace children with parent
+    // Update selected token filters â€" replace children with parent
     const newSelectedTokens = new Set(selectedTokens);
     let filterChanged = false;
     for (const child of childTokens) {
@@ -3096,35 +3289,24 @@ export default function App() {
       }
     }
 
-    startTransition(() => {
-      setResults(cascade.results);
-      setClusterSummary(cascade.clusterSummary);
-      setGroupedClusters(cascade.groupedClusters);
-      setApprovedGroups(cascade.approvedGroups);
-      setTokenSummary(cascade.tokenSummary);
-      setTokenMergeRules(prev => [...prev, newRule]);
-      if (filterChanged) setSelectedTokens(newSelectedTokens);
-      setSelectedMgmtTokens(new Set());
-    });
+    // persistence.applyMergeCascade atomically updates latest ref + state + saves.
+    // No separate startTransition/setState calls needed (they would conflict).
+    persistence.applyMergeCascade(cascade, newRule);
+    if (filterChanged) setSelectedTokens(newSelectedTokens);
+    setSelectedMgmtTokens(new Set());
 
-    // Notifications
-    const details = `Merged ${childTokens.join(', ')} → ${parentToken}`;
+    const details = `Merged ${childTokens.join(', ')} \u2192 ${parentToken}`;
     logAndToast('merge', details, childTokens.length,
-      `Merged ${childTokens.length} token${childTokens.length > 1 ? 's' : ''} into '${parentToken}' — ${cascade.pagesAffected} pages affected`, 'info');
+      `Merged ${childTokens.length} token${childTokens.length > 1 ? 's' : ''} into '${parentToken}' \u2014 ${cascade.pagesAffected} pages affected`, 'info');
 
     if (cascade.unapprovedGroups.length > 0) {
       logAndToast('merge', `Auto-unapproved ${cascade.unapprovedGroups.length} group(s) due to merge`, cascade.unapprovedGroups.length,
         `${cascade.unapprovedGroups.length} approved group${cascade.unapprovedGroups.length > 1 ? 's' : ''} moved back for re-review`, 'warning');
     }
 
-    // Save
-    if (activeProjectId) {
-      saveProjectData(cascade.results, cascade.clusterSummary, cascade.tokenSummary, cascade.groupedClusters, stats, datasetStats, fileName, undefined, undefined, cascade.approvedGroups);
-    }
-
     setIsMergeModalOpen(false);
     setMergeModalTokens([]);
-  }, [results, clusterSummary, groupedClusters, approvedGroups, mergeModalTokens, selectedTokens, activeProjectId, stats, datasetStats, fileName, logAndToast, startTransition]);
+  }, [results, clusterSummary, groupedClusters, approvedGroups, mergeModalTokens, selectedTokens, activeProjectId, logAndToast, startTransition]);
 
   const handleUndoMergeChild = useCallback((ruleId: string, childToken: string) => {
     if (!results) return;
@@ -3182,49 +3364,110 @@ export default function App() {
     const updatedApproved = updateGroupList(approvedGroups);
     const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
 
-    startTransition(() => {
-      setResults(restoredResults);
-      setClusterSummary(newClusters);
-      setGroupedClusters(updatedGroups);
-      setApprovedGroups(updatedApproved);
-      setTokenSummary(newTokenSummary);
-      setTokenMergeRules(updatedRules);
-    });
-
     const rule = tokenMergeRules.find(r => r.id === ruleId);
     logAndToast('unmerge', `Unmerged '${childToken}' from '${rule?.parentToken || 'parent'}'`, 1,
       `Unmerged '${childToken}'`, 'success');
 
-    if (activeProjectId) {
-      saveProjectData(restoredResults, newClusters, newTokenSummary, updatedGroups, stats, datasetStats, fileName, undefined, undefined, updatedApproved);
-    }
-  }, [results, tokenMergeRules, groupedClusters, approvedGroups, activeProjectId, stats, datasetStats, fileName, logAndToast, startTransition]);
+    persistence.undoMerge({ results: restoredResults, clusterSummary: newClusters, tokenSummary: newTokenSummary, groupedClusters: updatedGroups, approvedGroups: updatedApproved, tokenMergeRules: updatedRules });
+  }, [results, tokenMergeRules, groupedClusters, approvedGroups, activeProjectId, logAndToast, startTransition]);
+
+  const handleUndoMergeParent = useCallback((ruleId: string) => {
+    if (!results) return;
+
+    const ruleToRemove = tokenMergeRules.find(r => r.id === ruleId);
+    const updatedRules = tokenMergeRules.filter(r => r.id !== ruleId);
+
+    // Restore originalTokenArr on all rows, then re-apply all remaining rules
+    const restoredResults = results.map(row => {
+      if (!row.originalTokenArr) return row;
+
+      let tokenArr = [...row.originalTokenArr];
+      for (const rule of updatedRules) {
+        const childSet = new Set(rule.childTokens);
+        if (tokenArr.some(t => childSet.has(t))) {
+          let hasParent = false;
+          const merged: string[] = [];
+          for (const t of tokenArr) {
+            if (childSet.has(t)) {
+              if (!hasParent) { merged.push(rule.parentToken); hasParent = true; }
+            } else if (t === rule.parentToken) {
+              if (!hasParent) { merged.push(rule.parentToken); hasParent = true; }
+            } else {
+              merged.push(t);
+            }
+          }
+          tokenArr = merged.sort();
+        }
+      }
+
+      const newSig = [...new Set(tokenArr)].sort().join(' ');
+      const stillMerged = updatedRules.length > 0 && newSig !== [...row.originalTokenArr].sort().join(' ');
+      return {
+        ...row,
+        tokenArr,
+        tokens: newSig,
+        originalTokenArr: stillMerged ? row.originalTokenArr : undefined,
+      };
+    });
+
+    // Rebuild clusters
+    const newClusters = rebuildClustersFromRows(restoredResults);
+    const newClusterMap = new Map(newClusters.map(c => [c.tokens, c]));
+
+    // Update groups with new cluster data
+    const updateGroupList = (groups: GroupedCluster[]) => groups.map(group => {
+      const newGroupClusters = group.clusters.map(c => newClusterMap.get(c.tokens) || c).filter((c, i, arr) => arr.findIndex(x => x.tokens === c.tokens) === i);
+      if (newGroupClusters.length === 0) return null;
+      const totalVolume = newGroupClusters.reduce((s, c) => s + c.totalVolume, 0);
+      const keywordCount = newGroupClusters.reduce((s, c) => s + c.keywordCount, 0);
+      return { ...group, clusters: newGroupClusters, totalVolume, keywordCount };
+    }).filter((g): g is GroupedCluster => g !== null);
+
+    const updatedGroups = updateGroupList(groupedClusters);
+    const updatedApproved = updateGroupList(approvedGroups);
+    const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
+
+    logAndToast(
+      'unmerge',
+      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
+      ruleToRemove?.childTokens.length ?? 0,
+      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
+      'success'
+    );
+
+    persistence.undoMerge({
+      results: restoredResults,
+      clusterSummary: newClusters,
+      tokenSummary: newTokenSummary,
+      groupedClusters: updatedGroups,
+      approvedGroups: updatedApproved,
+      tokenMergeRules: updatedRules,
+    });
+  }, [results, tokenMergeRules, groupedClusters, approvedGroups, logAndToast]);
+
+  // Block a single token (used by Ctrl+click on token buttons)
+  const handleBlockSingleToken = useCallback((token: string) => {
+    persistence.blockTokens([token]);
+    logAndToast('block', `Blocked: ${token}`, 1, `Blocked token: ${token}`, 'error');
+  }, [logAndToast]);
 
   // Block/unblock token handlers
   const handleBlockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
-    const newBlocked = new Set<string>(blockedTokens);
-    tokens.forEach(t => newBlocked.add(t));
-    setBlockedTokens(newBlocked);
+    persistence.blockTokens(tokens);
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('blocked');
     setTokenMgmtPage(1);
     logAndToast('block', `Blocked: ${tokens.join(', ')}`, tokens.length, `Blocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`, 'error');
-    // Persist
-    saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, newBlocked);
-  }, [blockedTokens, results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, logAndToast]);
+  }, [logAndToast]);
 
   const handleUnblockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
-    const newBlocked = new Set<string>(blockedTokens);
-    tokens.forEach(t => newBlocked.delete(t));
-    setBlockedTokens(newBlocked);
+    persistence.unblockTokens(tokens);
     setSelectedMgmtTokens(new Set());
     setTokenMgmtPage(1);
     logAndToast('unblock', `Unblocked: ${tokens.join(', ')}`, tokens.length, `Unblocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}`, 'success');
-    // Persist
-    saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, newBlocked);
-  }, [blockedTokens, results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, logAndToast]);
+  }, [logAndToast]);
 
   // Memoize grouped stats to avoid 5 reduce() calls on every render
   const groupedStats = useMemo(() => {
@@ -3236,19 +3479,36 @@ export default function App() {
     return { pagesGrouped, groupedKeywords, groupedVolume, totalPagesAll, pctGrouped };
   }, [effectiveGrouped, effectiveClusters]);
 
-  // Approve a group — move from grouped to approved
+  const approvedPageCount = useMemo(
+    () => approvedGroups.reduce((sum, g) => sum + g.clusters.length, 0),
+    [approvedGroups]
+  );
+
+  const keywordGroupingProgress = useMemo(() => {
+    const groupedPageCount = effectiveGrouped.reduce((sum, g) => sum + g.clusters.length, 0);
+    const completedPages = groupedPageCount + approvedPageCount;
+    const ungroupedPages = effectiveClusters?.length || 0;
+    const totalPages = completedPages + ungroupedPages;
+    const percent = totalPages > 0 ? (completedPages / totalPages) * 100 : 0;
+    return {
+      completedPages,
+      ungroupedPages,
+      totalPages,
+      percent,
+      percentLabel: `${percent.toFixed(1)}%`,
+    };
+  }, [effectiveGrouped, approvedPageCount, effectiveClusters]);
+
+  // Approve a group â€" move from grouped to approved
   const handleApproveGroup = useCallback((groupName: string) => {
-    setGroupedClusters(prev => {
-      const group = prev.find(g => g.groupName === groupName);
-      if (!group) return prev;
-      setApprovedGroups(ap => [...ap, group]);
+    const group = persistence.approveGroup(groupName);
+    if (group) {
       logAndToast('approve', `Approved '${groupName}'`, group.clusters.length, `Approved '${groupName}' (${group.clusters.length} pages)`, 'success');
-      return prev.filter(g => g.groupName !== groupName);
-    });
+    }
   }, [logAndToast]);
 
-  // Unapprove a group — move from approved back to grouped
-  // Recalculate group aggregate stats from its clusters — used after removing individual pages
+  // Unapprove a group â€" move from approved back to grouped
+  // Recalculate group aggregate stats from its clusters â€" used after removing individual pages
   const recalcGroupStats = useCallback((group: GroupedCluster, remainingClusters: ClusterSummary[]): GroupedCluster => {
     const totalVolume = remainingClusters.reduce((sum, c) => sum + c.totalVolume, 0);
     const keywordCount = remainingClusters.reduce((sum, c) => sum + c.keywordCount, 0);
@@ -3258,34 +3518,31 @@ export default function App() {
   }, []);
 
   const handleUnapproveGroup = useCallback((groupName: string) => {
-    setApprovedGroups(prev => {
-      const group = prev.find(g => g.groupName === groupName);
-      if (!group) return prev;
-      setGroupedClusters(gc => [...gc, group]);
+    const group = persistence.unapproveGroup(groupName);
+    if (group) {
       logAndToast('unapprove', `Unapproved '${groupName}'`, group.clusters.length, `Unapproved '${groupName}'`, 'warning');
-      return prev.filter(g => g.groupName !== groupName);
-    });
+    }
   }, [logAndToast]);
 
   // Remove individual sub-clusters from approved groups (unapprove specific pages)
   const handleRemoveFromApproved = useCallback(() => {
     if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
-    if (!clusterSummary) return;
+    const currentClusters = persistence.refs.clusterSummary.current;
+    const currentResults = persistence.refs.results.current;
+    if (!currentClusters) return;
 
     const clustersToReturn: ClusterSummary[] = [];
-    let newApproved = [...approvedGroups];
+    const groupsToReturn: GroupedCluster[] = [];
+    let newApproved = [...persistence.refs.approvedGroups.current];
 
-    // Handle entire groups being unapproved
     for (const groupId of selectedGroups) {
       const group = newApproved.find(g => g.id === groupId);
       if (group) {
-        // Move entire group back to grouped
-        setGroupedClusters(gc => [...gc, group]);
+        groupsToReturn.push(group);
       }
     }
     newApproved = newApproved.filter(g => !selectedGroups.has(g.id));
 
-    // Handle individual sub-clusters being removed from approved groups
     for (const subKey of selectedSubClusters) {
       const [groupId, clusterTokens] = subKey.split('::');
       if (selectedGroups.has(groupId)) continue;
@@ -3304,43 +3561,32 @@ export default function App() {
       }
     }
 
-    // Return individual clusters back to ungrouped
-    if (clustersToReturn.length > 0) {
-      const newClusters = [...clusterSummary, ...clustersToReturn];
-      setClusterSummary(newClusters);
-      if (results) {
-        const returnedTokens = new Set(clustersToReturn.map(c => c.tokens));
-        const newRows: ProcessedRow[] = [];
-        for (const cluster of clustersToReturn) {
-          for (const kw of cluster.keywords) {
-            newRows.push({ keyword: kw.keyword, keywordLower: kw.keyword.toLowerCase(), searchVolume: kw.volume, kd: kw.kd, pageName: cluster.pageName, tokens: cluster.tokens, tokenArr: cluster.tokenArr, labelArr: cluster.labelArr || [], label: cluster.label, locationCity: cluster.locationCity || '', locationState: cluster.locationState || '', pageNameLen: cluster.pageNameLen, pageNameLower: cluster.pageNameLower || cluster.pageName.toLowerCase() });
-          }
+    const currentGrouped = persistence.refs.groupedClusters.current;
+    const updatedGrouped = groupsToReturn.length > 0 ? [...currentGrouped, ...groupsToReturn] : currentGrouped;
+    const nextClusters = clustersToReturn.length > 0
+      ? [...currentClusters, ...clustersToReturn] : currentClusters;
+
+    // Restore result rows for returned clusters
+    let nextResults = currentResults;
+    if (currentResults && clustersToReturn.length > 0) {
+      const newRows: ProcessedRow[] = [];
+      for (const cluster of clustersToReturn) {
+        for (const kw of cluster.keywords) {
+          newRows.push({ keyword: kw.keyword, keywordLower: kw.keyword.toLowerCase(), searchVolume: kw.volume, kd: kw.kd, pageName: cluster.pageName, tokens: cluster.tokens, tokenArr: cluster.tokenArr, labelArr: cluster.labelArr || [], label: cluster.label, locationCity: cluster.locationCity || '', locationState: cluster.locationState || '', pageNameLen: cluster.pageNameLen, pageNameLower: cluster.pageNameLower || cluster.pageName.toLowerCase() });
         }
-        setResults([...results, ...newRows]);
       }
+      nextResults = [...currentResults, ...newRows];
     }
 
-    setApprovedGroups(newApproved);
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
 
     const totalRemoved = selectedGroups.size + clustersToReturn.length;
+    persistence.bulkSet({ groupedClusters: updatedGrouped, approvedGroups: newApproved, clusterSummary: nextClusters, results: nextResults });
     logAndToast('remove-approved', `Removed ${totalRemoved} items from approved`, totalRemoved, `Removed ${totalRemoved} items from approved`, 'warning');
-  }, [selectedGroups, selectedSubClusters, approvedGroups, clusterSummary, results, recalcGroupStats, logAndToast]);
+  }, [selectedGroups, selectedSubClusters, recalcGroupStats, logAndToast]);
 
-  // Auto-save when approvedGroups changes (approve/unapprove triggers this)
-  // Uses a short delay so other state updates in the same batch settle first
-  const approvedGroupsInitRef = useRef(true);
-  useEffect(() => {
-    if (approvedGroupsInitRef.current) { approvedGroupsInitRef.current = false; return; }
-    if (!activeProjectId) return;
-    const timer = setTimeout(() => {
-      saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName, undefined, undefined, approvedGroups);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [approvedGroups, groupedClusters]);
-
-  // AI Group Review — process pending groups automatically
+  // AI Group Review â€" process pending groups automatically
   useEffect(() => {
     if (reviewProcessingRef.current) return;
     const pendingGroups = groupedClusters.filter(g => g.reviewStatus === 'pending');
@@ -3351,10 +3597,13 @@ export default function App() {
 
     reviewProcessingRef.current = true;
 
-    // Mark as reviewing
-    setGroupedClusters(prev => prev.map(g =>
-      g.reviewStatus === 'pending' ? { ...g, reviewStatus: 'reviewing' as const } : g
-    ));
+    // Mark as reviewing — use functional update so we merge against latest persisted state,
+    // not groupedClustersRef (ref can lag one frame behind rapid addGroupsAndRemovePages).
+    persistence.updateGroups(groups =>
+      groups.map(g =>
+        g.reviewStatus === 'pending' ? { ...g, reviewStatus: 'reviewing' as const } : g
+      )
+    );
 
     // Build queue
     const queue: ReviewRequest[] = pendingGroups.map(g => ({
@@ -3363,86 +3612,107 @@ export default function App() {
       pages: g.clusters.map(c => ({ pageName: c.pageName, tokens: c.tokenArr || c.tokens.split(' ') })),
     }));
 
-    const controller = new AbortController();
-    reviewAbortRef.current = controller;
+    const runReviewBatch = (batchQueue: ReviewRequest[], batchGroups: GroupedCluster[]) => {
+      const controller = new AbortController();
+      reviewAbortRef.current = controller;
 
-    processReviewQueue(
-      queue,
-      {
-        apiKey: settingsData.apiKey,
-        model: settingsData.selectedModel,
-        temperature: settingsData.temperature,
-        maxTokens: settingsData.maxTokens,
-        systemPrompt: settingsData.systemPrompt,
-        concurrency: settingsData.concurrency,
-        modelPricing: modelObj?.pricing,
-        reasoningEffort: settingsData.reasoningEffort,
-      },
-      {
-        onReviewing: () => {},
-        onResult: (result: ReviewResult) => {
-          setGroupedClusters(prev => prev.map(g =>
-            g.id === result.groupId ? {
-              ...g,
-              reviewStatus: result.status,
-              reviewMismatchedPages: result.mismatchedPages,
-              reviewReason: result.reason,
-              reviewCost: result.cost,
-              reviewedAt: result.reviewedAt,
-            } : g
-          ));
-          const groupName = pendingGroups.find(g => g.id === result.groupId)?.groupName || result.groupId;
-          if (result.status === 'approve') {
-            logAndToast('qa-review', `QA: '${groupName}' — Approved`, 1, `QA: '${groupName}' — Approved ✓`, 'success');
-          } else {
-            logAndToast('qa-review', `QA: '${groupName}' — Mismatch (${(result.mismatchedPages || []).join(', ')})`, result.mismatchedPages?.length || 1, `QA: '${groupName}' — Mismatch ✗`, 'error');
+      processReviewQueue(
+        batchQueue,
+        {
+          apiKey: settingsData.apiKey,
+          model: settingsData.selectedModel,
+          temperature: settingsData.temperature,
+          maxTokens: settingsData.maxTokens,
+          systemPrompt: settingsData.systemPrompt,
+          concurrency: settingsData.concurrency,
+          modelPricing: modelObj?.pricing,
+          reasoningEffort: settingsData.reasoningEffort,
+        },
+        {
+          onReviewing: () => {},
+          onResult: (result: ReviewResult) => {
+            persistence.updateGroups(groups =>
+              groups.map(g =>
+                g.id === result.groupId ? {
+                  ...g,
+                  reviewStatus: result.status,
+                  reviewMismatchedPages: result.mismatchedPages,
+                  reviewReason: result.reason,
+                  reviewCost: result.cost,
+                  reviewedAt: result.reviewedAt,
+                } : g
+              )
+            );
+            const groupName = batchGroups.find(g => g.id === result.groupId)?.groupName || result.groupId;
+            if (result.status === 'approve') {
+              logAndToast('qa-review', `QA: '${groupName}' \u2014 Approved`, 1, `QA: '${groupName}' \u2014 Approved \u2713`, 'success');
+            } else {
+              logAndToast('qa-review', `QA: '${groupName}' \u2014 Mismatch (${(result.mismatchedPages || []).join(', ')})`, result.mismatchedPages?.length || 1, `QA: '${groupName}' \u2014 Mismatch \u2717`, 'error');
+            }
+          },
+          onError: (error: ReviewError) => {
+            persistence.updateGroups(groups =>
+              groups.map(g =>
+                g.id === error.groupId ? {
+                  ...g,
+                  reviewStatus: 'error' as const,
+                  reviewReason: error.error,
+                  reviewedAt: new Date().toISOString(),
+                } : g
+              )
+            );
+            const groupName = batchGroups.find(g => g.id === error.groupId)?.groupName || error.groupId;
+            logAndToast('qa-review', `QA error: '${groupName}' \u2014 ${error.error}`, 1, `QA error: '${groupName}'`, 'error');
+          },
+        },
+        controller.signal
+      ).finally(() => {
+        reviewAbortRef.current = null;
+        // Workers are done — any row still 'reviewing' is orphaned (stale ref / lost callback).
+        // Snap those back to 'pending', then pick up all pending (including new groups from fast grouping).
+        let remaining: GroupedCluster[] = [];
+        persistence.updateGroups(groups => {
+          const healed = groups.map(g =>
+            g.reviewStatus === 'reviewing'
+              ? { ...g, reviewStatus: 'pending' as const }
+              : g
+          );
+          remaining = healed.filter(g => g.reviewStatus === 'pending');
+          if (remaining.length > 0) {
+            return healed.map(g =>
+              g.reviewStatus === 'pending' ? { ...g, reviewStatus: 'reviewing' as const } : g
+            );
           }
-        },
-        onError: (error: ReviewError) => {
-          setGroupedClusters(prev => prev.map(g =>
-            g.id === error.groupId ? {
-              ...g,
-              reviewStatus: 'error' as const,
-              reviewReason: error.error,
-              reviewedAt: new Date().toISOString(),
-            } : g
-          ));
-          const groupName = pendingGroups.find(g => g.id === error.groupId)?.groupName || error.groupId;
-          logAndToast('qa-review', `QA error: '${groupName}' — ${error.error}`, 1, `QA error: '${groupName}'`, 'error');
-        },
-      },
-      controller.signal
-    ).finally(() => {
-      reviewProcessingRef.current = false;
-      reviewAbortRef.current = null;
-    });
-  }, [groupedClusters]);
+          return healed;
+        });
+        if (remaining.length > 0) {
+          const nextQueue: ReviewRequest[] = remaining.map(g => ({
+            groupId: g.id,
+            groupName: g.groupName,
+            pages: g.clusters.map(c => ({ pageName: c.pageName, tokens: c.tokenArr || c.tokens.split(' ') })),
+          }));
+          runReviewBatch(nextQueue, remaining);
+        } else {
+          reviewProcessingRef.current = false;
+        }
+      });
+    };
 
-  // Auto-save when review results come in (reviewStatus changes to a final state)
-  const prevReviewStatusesRef = useRef<string>('');
-  useEffect(() => {
-    const statusKey = groupedClusters.map(g => `${g.id}:${g.reviewStatus || '-'}`).join(',');
-    if (statusKey === prevReviewStatusesRef.current) return;
-    const hadPrev = prevReviewStatusesRef.current.length > 0;
-    prevReviewStatusesRef.current = statusKey;
-    if (!hadPrev) return; // Skip first render
-    // Only save if any group has a final review status (not pending/reviewing)
-    const hasFinal = groupedClusters.some(g => g.reviewStatus === 'approve' || g.reviewStatus === 'mismatch' || g.reviewStatus === 'error');
-    if (hasFinal && activeProjectId) {
-      saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName);
-    }
-  }, [groupedClusters]);
+    runReviewBatch(queue, pendingGroups);
+  }, [groupedClusters, logAndToast, persistence.updateGroups]);
 
-  // On mount: reset stuck 'reviewing' groups to 'pending'
+  // One-time heal after load: reset stuck 'reviewing' to 'pending' (uses latest state in updater)
   useEffect(() => {
-    setGroupedClusters(prev => {
-      const hasStuck = prev.some(g => g.reviewStatus === 'reviewing');
-      if (!hasStuck) return prev;
-      return prev.map(g => g.reviewStatus === 'reviewing' ? { ...g, reviewStatus: 'pending' as const } : g);
+    persistence.updateGroups(groups => {
+      if (!groups.some(g => g.reviewStatus === 'reviewing')) return groups;
+      return groups.map(g =>
+        g.reviewStatus === 'reviewing' ? { ...g, reviewStatus: 'pending' as const } : g
+      );
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount; persistence is stable
   }, []);
 
-  // Grouping rate tracker — estimates remaining time to group all ungrouped pages
+  // Grouping rate tracker â€" estimates remaining time to group all ungrouped pages
   const groupingTimestamps = useRef<{ time: number; pagesGrouped: number }[]>([]);
   const [groupingEta, setGroupingEta] = useState<string | null>(null);
 
@@ -3471,12 +3741,373 @@ export default function App() {
       const remainingPages = effectiveClusters?.length || 0;
       if (remainingPages === 0 || pagesPerSec <= 0) { setGroupingEta(null); return; }
       const etaSec = Math.round(remainingPages / pagesPerSec);
-      if (etaSec < 60) setGroupingEta(`~${etaSec}s remaining`);
-      else if (etaSec < 3600) setGroupingEta(`~${Math.round(etaSec / 60)}m remaining`);
-      else setGroupingEta(`~${(etaSec / 3600).toFixed(1)}h remaining`);
+      const rateStr = `${pagesPerSec.toFixed(pagesPerSec >= 10 ? 0 : 1)}/s`;
+      if (etaSec < 60) setGroupingEta(`~${etaSec}s left (${rateStr})`);
+      else if (etaSec < 3600) setGroupingEta(`~${Math.round(etaSec / 60)}m left (${rateStr})`);
+      else setGroupingEta(`~${(etaSec / 3600).toFixed(1)}h left (${rateStr})`);
     }, 10000);
     return () => clearInterval(interval);
   }, [effectiveClusters?.length]);
+
+  const filteredAutoGroupFilterSummary = useMemo(() => {
+    const active: string[] = [];
+    if (debouncedSearchQuery.trim()) active.push(`search="${debouncedSearchQuery.trim()}"`);
+    if (selectedTokens.size > 0) active.push(`tokens=${Array.from(selectedTokens).join(', ')}`);
+    if (excludedLabels.size > 0) active.push(`excluded_labels=${Array.from(excludedLabels).join(', ')}`);
+    if (filterCity.trim()) active.push(`city=${filterCity.trim()}`);
+    if (filterState.trim()) active.push(`state=${filterState.trim()}`);
+    if (minKwInCluster.trim()) active.push(`min_kws=${minKwInCluster.trim()}`);
+    if (maxKwInCluster.trim()) active.push(`max_kws=${maxKwInCluster.trim()}`);
+    if (minVolume.trim()) active.push(`min_volume=${minVolume.trim()}`);
+    if (maxVolume.trim()) active.push(`max_volume=${maxVolume.trim()}`);
+    if (minKd.trim()) active.push(`min_kd=${minKd.trim()}`);
+    if (maxKd.trim()) active.push(`max_kd=${maxKd.trim()}`);
+    if (minLen.trim()) active.push(`min_len=${minLen.trim()}`);
+    if (maxLen.trim()) active.push(`max_len=${maxLen.trim()}`);
+    return active.length > 0 ? active.join(' | ') : 'No additional filters active';
+  }, [
+    debouncedSearchQuery,
+    selectedTokens,
+    excludedLabels,
+    filterCity,
+    filterState,
+    minKwInCluster,
+    maxKwInCluster,
+    minVolume,
+    maxVolume,
+    minKd,
+    maxKd,
+    minLen,
+    maxLen,
+  ]);
+
+  const isFilteredAutoGroupFilterActive =
+    filteredAutoGroupFilterSummary !== 'No additional filters active';
+
+  const filteredAutoGroupSettingsStatus = useMemo(() => {
+    if (!groupReviewSettingsHydrated) {
+      return {
+        missing: [],
+        requiresLocalKey: false,
+        summary: 'Loading shared Group Review settings...',
+      };
+    }
+    const settingsData = groupReviewSettingsSnapshot;
+    const missing: string[] = [];
+    if (!settingsData?.apiKey.trim()) missing.push('API key');
+    if (!settingsData?.selectedModel) missing.push('model');
+    return {
+      missing,
+      requiresLocalKey: false,
+      summary: 'Uses shared Group Review settings: API Key, Model, Temperature, Max Tokens, Reasoning, Auto-Group Prompt.',
+    };
+  }, [groupReviewSettingsHydrated, groupReviewSettingsSnapshot]);
+
+  const buildFilteredAutoGroupPrompt = useCallback((
+    pages: ClusterSummary[],
+    filterSummary: string,
+    basePrompt: string
+  ) => {
+    const pageLines = pages.map((page, idx) => (
+      `P${idx + 1} | ${page.pageName} | volume=${page.totalVolume} | kd=${page.avgKd ?? 'n/a'} | kws=${page.keywordCount}`
+    )).join('\n');
+
+    const system = `${basePrompt}
+
+You are reviewing the currently filtered ungrouped pages from the keyword management tab.
+
+STRICT REQUIREMENTS:
+1. Review all provided pages together and group them by COMPLETE core semantic intent only.
+2. Use strict matching. Do not merge pages unless their underlying search intent is effectively identical.
+3. Minor lexical variation is fine only if it does not change meaning at all.
+4. Volume and KD are context signals. They can help determine the strongest representative page, but semantic intent is the deciding factor.
+5. You must partition the full filtered page set into as MANY distinct semantic groups as needed. There is no group limit.
+6. Never force unrelated pages into one catch-all group. Returning one massive group is WRONG unless every single page has the exact same intent.
+7. For each distinct semantic intent, create a separate group. Distinct intents must become separate groups.
+8. Single-page groups are allowed and must still be returned as valid groups when no exact semantic match exists.
+9. The highest-volume page inside each group will become the final group name in the app, so group pages strictly and intelligently.
+10. Every page must appear exactly once in exactly one group.
+11. Return valid JSON only.
+
+JSON SCHEMA:
+{
+  "groups": [
+    { "pageIds": ["P1", "P4"] },
+    { "pageIds": ["P2", "P3", "P8"] },
+    { "pageIds": ["P5"] }
+  ]
+}
+
+LEGACY-COMPATIBLE SCHEMA ALSO ACCEPTED:
+{
+  "groups": [
+    { "pages": ["exact page name 1", "exact page name 2"] },
+    { "pages": ["exact page name 3", "exact page name 4", "exact page name 5"] },
+    { "pages": ["exact page name 6"] }
+  ]
+}
+
+FAILURE CONDITIONS TO AVOID:
+- Do not return one giant group just because the pages share a broad topic.
+- Do not merge informational, comparison, review, pricing, legal, tool, local, and transactional intents together.
+- Do not merge broad head terms with narrower sub-intents unless they are truly the exact same search intent.
+- If two pages would deserve different landing pages, they must be different groups.`;
+
+    const user = `Current filters:\n${filterSummary}\n\nFiltered ungrouped pages (${pages.length}):\n${pageLines}\n\nGroup ALL of these pages in one pass. Create multiple groups whenever the semantic intent differs. Prefer pageIds. If you do not use pageIds, use exact page names. Return every page exactly once inside groups[].`;
+    return { system, user };
+  }, []);
+
+  const runFilteredAutoGroupJob = useCallback(async (job: FilteredAutoGroupJob) => {
+    const pagesToReview = job.pages;
+    const controller = new AbortController();
+    activeFilteredAutoGroupJobRef.current = job;
+    filteredAutoGroupAbortRef.current = controller;
+    setIsRunningFilteredAutoGroup(true);
+    setFilteredAutoGroupStats({
+      status: 'running',
+      totalPages: pagesToReview.length,
+      groupsCreated: 0,
+      pagesGrouped: 0,
+      pagesRemaining: 0,
+      totalVolumeGrouped: 0,
+      cost: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      elapsedMs: 0,
+    });
+    logAndToast('auto-group', `Filtered Auto Group started on ${pagesToReview.length} pages`, pagesToReview.length, `Auto Group started for ${pagesToReview.length} filtered pages`, 'info');
+
+    const startedAt = performance.now();
+
+    try {
+      const { system, user } = buildFilteredAutoGroupPrompt(
+        pagesToReview,
+        job.filterSummary,
+        job.settings.autoGroupPrompt
+      );
+
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${job.settings.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': window.location.origin,
+        },
+        body: JSON.stringify({
+          model: job.settings.selectedModel,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          temperature: job.settings.temperature,
+          ...(job.settings.maxTokens > 0 ? { max_tokens: job.settings.maxTokens } : {}),
+          ...(job.settings.reasoningEffort && job.settings.reasoningEffort !== 'none'
+            ? { reasoning: { effort: job.settings.reasoningEffort } }
+            : {}),
+          response_format: { type: 'json_object' },
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(`API ${res.status}: ${errText.slice(0, 200)}`);
+      }
+
+      const data = await res.json();
+      const content = data.choices?.[0]?.message?.content || '';
+      const parsedGroups = parseFilteredAutoGroupResponse(content, pagesToReview);
+      if (parsedGroups.length === 0) throw new Error('Model returned no usable groups');
+
+      const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
+      const generatedGroups: GroupedCluster[] = parsedGroups
+        .filter(groupPages => groupPages.length >= 1)
+        .map(groupPages => buildGroupedClusterFromPages(
+          groupPages,
+          hasReviewApi,
+          { id: `filtered_auto_group_${Date.now()}_${groupPages[0].tokens}` }
+        ));
+
+      const groupedTokens = new Set(generatedGroups.flatMap(group => group.clusters.map(page => page.tokens)));
+      const groupedVolume = generatedGroups.reduce((sum, group) => sum + group.totalVolume, 0);
+      const promptTokens = data.usage?.prompt_tokens || 0;
+      const completionTokens = data.usage?.completion_tokens || 0;
+      const cost = job.modelPricing
+        ? (promptTokens * parseFloat(job.modelPricing.prompt || '0')) + (completionTokens * parseFloat(job.modelPricing.completion || '0'))
+        : 0;
+
+      if (generatedGroups.length > 0) {
+        persistence.mergeGroupsByName({ incoming: generatedGroups, removedTokens: groupedTokens, hasReviewApi, mergeFn: mergeGroupedClustersByName });
+        startTransition(() => {
+          setSelectedClusters(new Set());
+          setCurrentPage(1);
+        });
+      }
+
+      setPendingFilteredAutoGroupTokens(prev => {
+        const next = new Set(prev);
+        for (const page of pagesToReview) next.delete(page.tokens);
+        return next;
+      });
+
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      setFilteredAutoGroupStats({
+        status: 'complete',
+        totalPages: pagesToReview.length,
+        groupsCreated: generatedGroups.length,
+        pagesGrouped: groupedTokens.size,
+        pagesRemaining: pagesToReview.length - groupedTokens.size,
+        totalVolumeGrouped: groupedVolume,
+        cost,
+        promptTokens,
+        completionTokens,
+        elapsedMs,
+      });
+
+      if (groupedTokens.size > 0) recordGroupingEvent(groupedTokens.size);
+      if (groupedTokens.size > 0) {
+        logAndToast(
+          'auto-group',
+          `Filtered Auto Group created ${generatedGroups.length} groups from ${pagesToReview.length} filtered pages`,
+          groupedTokens.size,
+          `Auto Group grouped ${groupedTokens.size}/${pagesToReview.length} filtered pages into ${generatedGroups.length} groups`,
+          'success'
+        );
+      } else {
+        logAndToast(
+          'auto-group',
+          'Filtered Auto Group returned only singleton/no-op results',
+          0,
+          `Auto Group reviewed ${pagesToReview.length} pages but did not return any usable groups. Adjust the Auto-Group Prompt or filters.`,
+          'info'
+        );
+      }
+    } catch (e: any) {
+      setPendingFilteredAutoGroupTokens(prev => {
+        const next = new Set(prev);
+        for (const page of pagesToReview) next.delete(page.tokens);
+        return next;
+      });
+      if (e.name === 'AbortError') {
+        setFilteredAutoGroupStats(prev => ({
+          ...prev,
+          status: 'idle',
+          elapsedMs: Math.round(performance.now() - startedAt),
+        }));
+      } else {
+        setFilteredAutoGroupStats(prev => ({
+          ...prev,
+          status: 'error',
+          error: e.message || 'Unknown error',
+          elapsedMs: Math.round(performance.now() - startedAt),
+        }));
+        logAndToast('auto-group', `Filtered Auto Group error: ${e.message}`, 0, `Auto Group error: ${e.message}`, 'error');
+      }
+    } finally {
+      setIsRunningFilteredAutoGroup(false);
+      filteredAutoGroupAbortRef.current = null;
+      activeFilteredAutoGroupJobRef.current = null;
+    }
+  }, [
+    groupedClusters,
+    clusterSummary,
+    results,
+    tokenSummary,
+    stats,
+    datasetStats,
+    fileName,
+    activeProjectId,
+    buildFilteredAutoGroupPrompt,
+    logAndToast,
+    recordGroupingEvent,
+    startTransition,
+  ]);
+
+  const handleRunFilteredAutoGroup = useCallback(() => {
+    if (!isFilteredAutoGroupFilterActive) {
+      logAndToast(
+        'auto-group',
+        'Filtered Auto Group blocked: activate filters first',
+        0,
+        'Activate at least one filter (search/tokens/city/state/keyword/volume/KD/len) before using Auto Group.',
+        'info'
+      );
+      return;
+    }
+
+    if (filteredClusters.length < 1) {
+      logAndToast(
+        'auto-group',
+        'Filtered Auto Group blocked: no matching pages',
+        0,
+        'No ungrouped pages match your current filters. Adjust filters and try again.',
+        'info'
+      );
+      return;
+    }
+    if (!groupReviewSettingsHydrated) {
+      logAndToast('auto-group', 'Filtered Auto Group waiting for shared AI settings', 0, 'Shared Group Review settings are still loading. Try again in a moment.', 'info');
+      return;
+    }
+    const settingsData = groupReviewSettingsRef.current?.getSettings();
+    const modelObj = groupReviewSettingsRef.current?.getSelectedModelObj();
+    if (!settingsData || !settingsData.apiKey.trim() || !settingsData.selectedModel) {
+      logAndToast('auto-group', 'Filtered Auto Group blocked: missing shared AI settings', 0, 'Set an API key and model in Group Review settings before using Auto Group.', 'error');
+      return;
+    }
+
+    const pagesToReview = [...filteredClusters];
+    const job: FilteredAutoGroupJob = {
+      id: `filtered-auto-group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      pages: pagesToReview,
+      filterSummary: filteredAutoGroupFilterSummary,
+      settings: { ...settingsData },
+      modelPricing: modelObj?.pricing,
+    };
+
+    setPendingFilteredAutoGroupTokens(prev => {
+      const next = new Set(prev);
+      for (const page of pagesToReview) next.add(page.tokens);
+      return next;
+    });
+
+    if (isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0) {
+      setFilteredAutoGroupQueue(prev => [...prev, job]);
+      logAndToast(
+        'auto-group',
+        `Queued Auto Group job for ${pagesToReview.length} pages`,
+        pagesToReview.length,
+        `Auto Group queue now has ${filteredAutoGroupQueue.length + 1} waiting job(s)`,
+        'info'
+      );
+      return;
+    }
+
+    void runFilteredAutoGroupJob(job);
+  }, [
+    filteredClusters,
+    isFilteredAutoGroupFilterActive,
+    filteredAutoGroupFilterSummary,
+    filteredAutoGroupQueue.length,
+    groupReviewSettingsHydrated,
+    isRunningFilteredAutoGroup,
+    logAndToast,
+    runFilteredAutoGroupJob,
+  ]);
+
+  const handleStopFilteredAutoGroup = useCallback(() => {
+    filteredAutoGroupAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (isRunningFilteredAutoGroup) return;
+    if (activeFilteredAutoGroupJobRef.current) return;
+    if (filteredAutoGroupQueue.length === 0) return;
+
+    const [nextJob, ...rest] = filteredAutoGroupQueue;
+    setFilteredAutoGroupQueue(rest);
+    void runFilteredAutoGroupJob(nextJob);
+  }, [filteredAutoGroupQueue, isRunningFilteredAutoGroup, runFilteredAutoGroupJob]);
 
   const handleGroupClusters = useCallback(() => {
     if (selectedClusters.size === 0 || !groupNameInput.trim() || !clusterSummary) return;
@@ -3496,7 +4127,7 @@ export default function App() {
       }
     });
 
-    // Check if review API is configured — if so, auto-review this group
+    // Check if review API is configured â€" if so, auto-review this group
     const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
 
     const newGroup: GroupedCluster = {
@@ -3509,42 +4140,48 @@ export default function App() {
       reviewStatus: hasReviewApi ? 'pending' : undefined,
     };
 
-    const newGrouped = [...groupedClusters, newGroup];
-    let newResults = results;
-    if (results) {
-      newResults = results.filter(r => !selectedClusters.has(r.tokens));
-    }
+    const removedTokens = new Set(clustersToGroup.map(c => c.tokens));
+    persistence.addGroupsAndRemovePages([newGroup], removedTokens);
     startTransition(() => {
-      setGroupedClusters(newGrouped);
-      setClusterSummary(remainingClusters);
-      if (newResults !== results) setResults(newResults);
       setSelectedClusters(new Set());
       setGroupNameInput('');
     });
-    
+
     // Track grouping rate for ETA estimation
     recordGroupingEvent(clustersToGroup.length);
 
     logAndToast('group', `Grouped into '${groupNameInput.trim()}'`, clustersToGroup.length, `Grouped ${clustersToGroup.length} pages into '${groupNameInput.trim()}'`, 'info');
-
-    // Save to IndexedDB
-    if (activeProjectId) {
-      saveProjectData(newResults, remainingClusters, tokenSummary, newGrouped, stats, datasetStats, fileName);
-    }
-  }, [selectedClusters, groupNameInput, clusterSummary, groupedClusters, results, tokenSummary, stats, datasetStats, fileName, activeProjectId, recordGroupingEvent, logAndToast]);
+  }, [selectedClusters, groupNameInput, clusterSummary, groupedClusters, results, activeProjectId, recordGroupingEvent, logAndToast]);
 
   // Global Tab key shortcut: press Tab anywhere to group selected pages
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTypingTarget = !!target && (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable
+      );
+
+      if (e.shiftKey && e.code === 'Digit1') {
+        if (activeTab === 'pages' && !isTypingTarget && isFilteredAutoGroupFilterActive && filteredClusters.length >= 1) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleRunFilteredAutoGroup();
+          return;
+        }
+      }
+
       if (e.key === 'Tab' || e.key === 'Shift') {
-        // Tab or Shift in Pages (Ungrouped) → Group selected clusters
+        // Tab or Shift in Pages (Ungrouped) â†' Group selected clusters
         if (activeTab === 'pages' && selectedClusters.size > 0 && groupNameInput.trim()) {
           e.preventDefault();
           e.stopPropagation();
           handleGroupClusters();
           return;
         }
-        // Tab in Pages (Grouped) → Approve selected groups
+        // Tab in Pages (Grouped) â†' Approve selected groups
         if (activeTab === 'grouped' && selectedGroups.size > 0) {
           e.preventDefault();
           e.stopPropagation();
@@ -3558,38 +4195,26 @@ export default function App() {
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, groupedClusters, handleApproveGroup]);
+  }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, groupedClusters, handleApproveGroup, handleRunFilteredAutoGroup, filteredClusters.length, isFilteredAutoGroupFilterActive]);
 
-  // Auto-group approve handler — adds LLM-suggested groups to groupedClusters
+  // Auto-group approve handler â€" adds LLM-suggested groups to groupedClusters
   const handleAutoGroupApprove = useCallback((newGroups: GroupedCluster[]) => {
-    const updatedGrouped = [...groupedClusters, ...newGroups];
-    setGroupedClusters(updatedGrouped);
-
-    // Remove grouped pages from clusterSummary
-    const groupedTokens = new Set<string>();
+    const removedTokens = new Set<string>();
     for (const g of newGroups) {
-      for (const c of g.clusters) groupedTokens.add(c.tokens);
+      for (const c of g.clusters) removedTokens.add(c.tokens);
     }
-    const remaining = clusterSummary?.filter(c => !groupedTokens.has(c.tokens)) || null;
-    setClusterSummary(remaining);
-
-    // Also remove from results
-    let newResults = results;
-    if (results) {
-      newResults = results.filter(r => !groupedTokens.has(r.tokens));
-      setResults(newResults);
-    }
-
-    saveProjectData(newResults, remaining, tokenSummary, updatedGrouped, stats, datasetStats, fileName);
-  }, [groupedClusters, clusterSummary, results, tokenSummary, stats, datasetStats, fileName]);
+    persistence.addGroupsAndRemovePages(newGroups, removedTokens);
+  }, []);
 
   // Ungroup: send selected groups or individual sub-clusters back to Pages (Clusters) tab
   const handleUngroupClusters = () => {
     if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
-    if (!clusterSummary) return;
+    const currentClusters = persistence.refs.clusterSummary.current;
+    const currentResults = persistence.refs.results.current;
+    if (!currentClusters) return;
 
     const clustersToReturn: ClusterSummary[] = [];
-    let newGrouped = [...groupedClusters];
+    let newGrouped = [...persistence.refs.groupedClusters.current];
 
     // First, handle entire groups being ungrouped
     for (const groupId of selectedGroups) {
@@ -3598,14 +4223,13 @@ export default function App() {
         clustersToReturn.push(...group.clusters);
       }
     }
-    // Remove fully selected groups
     newGrouped = newGrouped.filter(g => !selectedGroups.has(g.id));
 
     // Then, handle individual sub-clusters being ungrouped (from groups NOT fully selected)
     const groupsWithPagesRemoved: string[] = [];
     for (const subKey of selectedSubClusters) {
       const [groupId, clusterTokens] = subKey.split('::');
-      if (selectedGroups.has(groupId)) continue; // Already handled above
+      if (selectedGroups.has(groupId)) continue;
       const groupIdx = newGrouped.findIndex(g => g.id === groupId);
       if (groupIdx === -1) continue;
       const group = newGrouped[groupIdx];
@@ -3614,27 +4238,19 @@ export default function App() {
         clustersToReturn.push(clusterToReturn);
         const remainingInGroup = group.clusters.filter(c => c.tokens !== clusterTokens);
         if (remainingInGroup.length === 0) {
-          // Group is now empty, remove it
           newGrouped.splice(groupIdx, 1);
         } else {
-          // Recalculate group stats after removing sub-cluster
           newGrouped[groupIdx] = recalcGroupStats(group, remainingInGroup);
-          // Track this group for QA re-review (still has pages, composition changed)
           groupsWithPagesRemoved.push(group.id);
         }
       }
     }
 
-    // Add returned clusters back to clusterSummary and results
-    const newClusters = [...clusterSummary, ...clustersToReturn];
-    setClusterSummary(newClusters);
-    setGroupedClusters(newGrouped);
+    const newClusters = [...currentClusters, ...clustersToReturn];
 
-    // Also add returned rows back to results
-    if (results) {
-      const returnedTokens = new Set(clustersToReturn.map(c => c.tokens));
-      // Reconstruct result rows from the cluster keywords
-      const newRows: ProcessedRow[] = [];
+    // Reconstruct result rows from cluster keywords to restore to results
+    const newRows: ProcessedRow[] = [];
+    if (currentResults) {
       for (const cluster of clustersToReturn) {
         for (const kw of cluster.keywords) {
           newRows.push({
@@ -3654,35 +4270,23 @@ export default function App() {
           });
         }
       }
-      const newResults = [...results, ...newRows];
-      setResults(newResults);
     }
+    const newResults = currentResults ? [...currentResults, ...newRows] : currentResults;
 
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
 
     logAndToast('ungroup', `Ungrouped ${clustersToReturn.length} pages`, clustersToReturn.length, `Ungrouped ${clustersToReturn.length} pages back to ungrouped`, 'warning');
 
-    // Schedule QA re-review for groups that had pages removed but still have remaining pages
     if (groupsWithPagesRemoved.length > 0) {
       scheduleReReview(groupsWithPagesRemoved);
     }
 
-    // Save to IndexedDB
-    if (activeProjectId) {
-      const newResults2 = results ? [...results, ...clustersToReturn.flatMap(c => c.keywords.map(kw => ({
-        pageName: c.pageName, pageNameLower: c.pageNameLower, pageNameLen: c.pageNameLen,
-        tokens: c.tokens, tokenArr: c.tokenArr, keyword: kw.keyword, keywordLower: kw.keyword.toLowerCase(),
-        searchVolume: kw.volume, kd: kw.kd, label: c.label, labelArr: c.labelArr,
-        locationCity: kw.locationCity, locationState: kw.locationState,
-      })))] : null;
-      saveProjectData(newResults2, newClusters, tokenSummary, newGrouped, stats, datasetStats, fileName);
-    }
+    persistence.bulkSet({ groupedClusters: newGrouped, clusterSummary: newClusters, results: newResults });
   };
 
   const totalPages = Math.max(1, Math.ceil(
-    (activeTab === 'keywords' ? filteredResults.length :
-     activeTab === 'pages' ? sortedClusters.length :
+    (activeTab === 'pages' ? sortedClusters.length :
      activeTab === 'grouped' ? filteredSortedGrouped.length :
      activeTab === 'approved' ? approvedGroups.length :
      filteredBlocked.length) / itemsPerPage
@@ -3693,21 +4297,17 @@ export default function App() {
     if (currentPage > totalPages) setCurrentPage(totalPages);
   }, [totalPages]); // eslint-disable-line -- only react to totalPages changes, not currentPage
 
-  const filteredCount = activeTab === 'keywords' ? filteredResults.length :
-                       activeTab === 'pages' ? sortedClusters.length :
+  const filteredCount = activeTab === 'pages' ? sortedClusters.length :
                        activeTab === 'grouped' ? filteredSortedGrouped.length :
                        activeTab === 'approved' ? filteredApprovedGroups.length :
                        filteredBlocked.length;
 
-  const totalCount = activeTab === 'keywords' ? (effectiveResults?.length || 0) :
-                    activeTab === 'pages' ? (effectiveClusters?.length || 0) :
+  const totalCount = activeTab === 'pages' ? (effectiveClusters?.length || 0) :
                     activeTab === 'grouped' ? effectiveGrouped.length :
                     activeTab === 'approved' ? approvedGroups.length :
                     allBlockedKeywords.length;
 
   // Approved stats
-  const approvedPageCount = approvedGroups.reduce((sum, g) => sum + g.clusters.length, 0);
-
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
       <div className="max-w-[1600px] mx-auto px-6 py-6">
@@ -3715,24 +4315,45 @@ export default function App() {
         <header className="mb-3">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold tracking-tight text-zinc-900 flex items-center gap-2"><Globe className="w-5 h-5 text-indigo-600" />SEO Master Tool</h1>
+              <h1 className="text-xl font-semibold tracking-tight text-zinc-900 flex items-center gap-2"><Globe className="w-5 h-5 text-indigo-600" />SEO Magic</h1>
               <p className="text-xs text-zinc-400 mt-0.5">Keyword clustering, page grouping, approval workflows & AI content generation</p>
             </div>
-            <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
-              <button
-                onClick={() => setMainTab('group')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
-              >
-                <Layers className="w-3.5 h-3.5" />
-                Group
-              </button>
-              <button
-                onClick={() => setMainTab('generate')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                Generate
-              </button>
+            <div className="flex items-center gap-2">
+              <FeedbackModalHost authorEmail={user?.email ?? null} />
+              <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab('group')}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  Group
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab('generate')}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Generate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab('feedback')}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'feedback' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                >
+                  <ClipboardList className="w-3.5 h-3.5" />
+                  Feedback
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab('feature-ideas')}
+                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'feature-ideas' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                >
+                  <Lightbulb className="w-3.5 h-3.5" />
+                  Feature ideas
+                </button>
+              </div>
             </div>
           </div>
         </header>
@@ -3740,7 +4361,13 @@ export default function App() {
         {/* Breadcrumb navigation */}
         <div className="flex items-center gap-1 text-xs text-zinc-400 mb-2 min-h-[24px]">
           <span className="text-zinc-600 font-medium">
-            {mainTab === 'group' ? 'Group' : 'Generate'}
+            {mainTab === 'group'
+              ? 'Group'
+              : mainTab === 'generate'
+                ? 'Generate'
+                : mainTab === 'feedback'
+                  ? 'Feedback'
+                  : 'Feature ideas'}
           </span>
           {mainTab === 'group' && (
             <>
@@ -3748,6 +4375,20 @@ export default function App() {
               <span className="text-zinc-600 font-medium capitalize">
                 {groupSubTab === 'data' ? (activeProjectId ? 'Data' : 'Projects') : groupSubTab === 'settings' ? 'Settings' : groupSubTab === 'log' ? 'Log' : groupSubTab}
               </span>
+              {groupSubTab === 'settings' && (
+                <>
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-zinc-600 font-medium">
+                    {settingsSubTab === 'general'
+                      ? 'General'
+                      : settingsSubTab === 'how-it-works'
+                        ? 'How it works'
+                        : settingsSubTab === 'dictionaries'
+                          ? 'Dictionaries'
+                          : 'Blocked'}
+                  </span>
+                </>
+              )}
               {groupSubTab === 'data' && activeProjectId && (
                 <>
                   <ChevronRight className="w-3 h-3" />
@@ -3762,8 +4403,6 @@ export default function App() {
                         if (newName && newName !== projects.find(p => p.id === activeProjectId)?.name) {
                           const updated = projects.map(p => p.id === activeProjectId ? { ...p, name: newName } : p);
                           setProjects(updated);
-                          // Persist to localStorage + Firestore
-                          try { localStorage.setItem('kwg_projects', JSON.stringify(updated)); } catch {}
                           setDoc(doc(db, 'projects', activeProjectId), { name: newName }, { merge: true }).catch(() => {});
                         }
                         setEditingProjectName(false);
@@ -3784,7 +4423,7 @@ export default function App() {
                   )}
                   <ChevronRight className="w-3 h-3" />
                   <span className="text-zinc-600 font-medium capitalize">
-                    {activeTab === 'keywords' ? 'All Keywords' : activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
+                    {activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
                   </span>
                 </>
               )}
@@ -3794,6 +4433,18 @@ export default function App() {
             <>
               <ChevronRight className="w-3 h-3" />
               <span className="text-zinc-600 font-medium">Generate 1</span>
+            </>
+          )}
+          {mainTab === 'feedback' && (
+            <>
+              <ChevronRight className="w-3 h-3" />
+              <span className="text-zinc-600 font-medium">Queue</span>
+            </>
+          )}
+          {mainTab === 'feature-ideas' && (
+            <>
+              <ChevronRight className="w-3 h-3" />
+              <span className="text-zinc-600 font-medium">Backlog</span>
             </>
           )}
         </div>
@@ -3811,10 +4462,10 @@ export default function App() {
                       {projects.find(p => p.id === activeProjectId)?.name || '...'}
                     </span>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
-                    <button onClick={() => setGroupSubTab('projects')} className="text-[10px] text-zinc-400 hover:text-zinc-600 ml-1">Switch</button>
+                    <button type="button" onClick={() => navigateGroupSub('projects')} className="text-[10px] text-zinc-400 hover:text-zinc-600 ml-1">Switch</button>
                   </div>
                 ) : (
-                  <button onClick={() => setGroupSubTab('projects')} className="flex items-center gap-1.5 px-2 py-1 bg-amber-50 border border-amber-200 rounded-md text-xs font-medium text-amber-700 hover:bg-amber-100 transition-colors">
+                  <button type="button" onClick={() => navigateGroupSub('projects')} className="flex items-center gap-1.5 px-2 py-1 bg-amber-50 border border-amber-200 rounded-md text-xs font-medium text-amber-700 hover:bg-amber-100 transition-colors">
                     <AlertCircle className="w-3 h-3" /> Select Project
                   </button>
                 )}
@@ -3824,7 +4475,7 @@ export default function App() {
                     <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={!activeProjectId} />
                   </label>
                 )}
-                {/* File info + actions — inline when data is loaded */}
+                {/* File info + actions â€" inline when data is loaded */}
                 {results && fileName && (
                   <>
                     <span className="text-zinc-300 mx-1">|</span>
@@ -3841,16 +4492,16 @@ export default function App() {
               </div>
               {/* Right: Group sub-tabs */}
               <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
-                <button onClick={() => setGroupSubTab('data')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'data' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('data')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'data' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   <Database className="w-3 h-3" />Data
                 </button>
-                <button onClick={() => setGroupSubTab('projects')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'projects' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('projects')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'projects' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   <Folder className="w-3 h-3" />Projects
                 </button>
-                <button onClick={() => setGroupSubTab('settings')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'settings' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('settings')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'settings' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   <Settings className="w-3 h-3" />Settings
                 </button>
-                <button onClick={() => setGroupSubTab('log')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'log' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('log')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'log' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   <ClipboardList className="w-3 h-3" />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
                 </button>
               </div>
@@ -3875,7 +4526,7 @@ export default function App() {
                   <Lock className="w-8 h-8 text-amber-500" />
                   <p className="text-sm font-medium text-zinc-900">Create or select a project first</p>
                   <button 
-                    onClick={() => { setMainTab('group'); setGroupSubTab('projects'); }}
+                    onClick={() => navigateGroupSub('projects')}
                     className="w-full px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-all"
                   >
                     Go to Projects
@@ -3930,7 +4581,7 @@ export default function App() {
         {results && stats && clusterSummary && !isProcessing && (
           <div className="space-y-1.5 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
-            {/* Stats Grid — collapsible */}
+            {/* Stats Grid â€" collapsible */}
             <div>
               <button
                 onClick={() => setStatsExpanded(!statsExpanded)}
@@ -4010,7 +4661,7 @@ export default function App() {
                           tokens: [],
                           colorIndex: nextIndex % 100,
                         };
-                        setLabelSections([...labelSections, newSection]);
+                        persistence.updateLabelSections([...labelSections, newSection]);
                       }}
                       className="p-1 text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
                       title="Add label section"
@@ -4044,21 +4695,16 @@ export default function App() {
                             onChange={(e) => {
                               const updated = [...labelSections];
                               updated[sIdx] = { ...section, name: e.target.value };
-                              setLabelSections(updated);
+                              persistence.updateLabelSections(updated);
                             }}
-                            onBlur={() => {
-                              // Save on blur
-                              if (activeProjectId) {
-                                saveProjectData(results, clusterSummary, tokenSummary, groupedClusters, stats, datasetStats, fileName);
-                              }
-                            }}
+                            onBlur={() => {}}
                             placeholder="Section name..."
                             className="flex-1 text-xs font-semibold bg-transparent border-none outline-none text-zinc-700 placeholder-zinc-400"
                           />
                           <button
                             onClick={() => {
                               if (window.confirm(`Delete label section "${section.name || 'Untitled'}" and all its tokens?`)) {
-                                setLabelSections(labelSections.filter(s => s.id !== section.id));
+                                persistence.updateLabelSections(labelSections.filter(s => s.id !== section.id));
                               }
                             }}
                             className="p-0.5 text-zinc-400 hover:text-red-500 rounded transition-colors"
@@ -4096,7 +4742,7 @@ export default function App() {
                               return sortCfg.direction === 'asc' ? cmp : -cmp;
                             });
                             const thClass = "py-0.5 font-medium cursor-pointer hover:text-zinc-600 select-none transition-colors";
-                            const indicator = (key: string) => sortCfg.key === key ? (sortCfg.direction === 'asc' ? ' ↑' : ' ↓') : '';
+                            const indicator = (key: string) => sortCfg.key === key ? (sortCfg.direction === 'asc' ? ' \u2191' : ' \u2193') : '';
                             return (
                             <table className="w-full text-[11px]">
                               <thead>
@@ -4134,7 +4780,7 @@ export default function App() {
                                             const sectionIdx = updated.findIndex(s => s.id === section.id);
                                             if (sectionIdx >= 0) {
                                               updated[sectionIdx] = { ...section, tokens: section.tokens.filter(t => t !== token) };
-                                              setLabelSections(updated);
+                                              persistence.updateLabelSections(updated);
                                             }
                                           }}
                                           className="text-zinc-300 hover:text-red-500 transition-colors"
@@ -4182,7 +4828,7 @@ export default function App() {
                                 }
                                 const updated = [...labelSections];
                                 updated[sIdx] = { ...section, tokens: [...section.tokens, val] };
-                                setLabelSections(updated);
+                                persistence.updateLabelSections(updated);
                                 input.value = '';
                               }
                             }}
@@ -4208,10 +4854,10 @@ export default function App() {
 
               {/* Keyword Management */}
               <div className="bg-white border border-zinc-100 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col flex-1 min-w-0">
-              <div className="px-4 py-2.5 border-b border-zinc-100 bg-zinc-50/30 flex flex-col shrink-0 relative z-20 gap-1.5">
-                <div className="flex items-center gap-3">
+              <div className="px-3 py-2 border-b border-zinc-100 bg-zinc-50/30 flex flex-col shrink-0 relative z-20 gap-1">
+                <div className="flex items-center gap-1.5">
                   <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Hash className="w-3.5 h-3.5 text-zinc-500" />Keyword Management</h3>
-                  {/* AI Review stats — always visible */}
+                  {/* AI Review stats â€" always visible */}
                   {(() => {
                     const allGroups = [...groupedClusters, ...approvedGroups];
                     const reviewed = allGroups.filter(g => g.reviewStatus === 'approve' || g.reviewStatus === 'mismatch');
@@ -4222,25 +4868,25 @@ export default function App() {
                     return (
                       <div className="flex items-center gap-1.5 ml-auto">
                         <span className="px-1.5 py-0.5 text-[9px] font-medium bg-zinc-100 text-zinc-500 rounded tabular-nums" title="Total AI reviews">{reviewed.length} reviews</span>
-                        <span className="px-1.5 py-0.5 text-[9px] font-medium bg-emerald-50 text-emerald-600 rounded tabular-nums" title="Approved">{approveCount} ✓</span>
-                        {mismatchCount > 0 && <span className="px-1.5 py-0.5 text-[9px] font-medium bg-red-50 text-red-600 rounded tabular-nums" title="Mismatched">{mismatchCount} ✗</span>}
+                        <span className="px-1.5 py-0.5 text-[9px] font-medium bg-emerald-50 text-emerald-600 rounded tabular-nums" title="Approved">{approveCount} {'\u2713'}</span>
+                        {mismatchCount > 0 && <span className="px-1.5 py-0.5 text-[9px] font-medium bg-red-50 text-red-600 rounded tabular-nums" title="Mismatched">{mismatchCount} {'\u2717'}</span>}
                         {totalCost > 0 && <span className="px-1.5 py-0.5 text-[9px] font-medium bg-indigo-50 text-indigo-600 rounded tabular-nums" title="Total API cost">${totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)}</span>}
                       </div>
                     );
                   })()}
                 </div>
                 {/* Row 1: Tabs with live counts */}
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
                   <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg w-fit">
                     <button
                       onClick={() => switchTab('auto-group')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'auto-group' ? 'bg-gradient-to-r from-violet-500 to-purple-500 shadow-sm text-white' : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'auto-group' ? 'bg-gradient-to-r from-violet-500 to-purple-500 shadow-sm text-white' : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}
                     >
                       <Zap className="w-3 h-3" />Auto-Group
                     </button>
                     <button
                       onClick={() => switchTab('pages')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'pages' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'pages' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
                       <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
                     </button>
@@ -4251,30 +4897,69 @@ export default function App() {
                         }
                         switchTab('grouped');
                       }}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'grouped' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'grouped' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
                       <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
                       {(() => { const mc = groupedClusters.filter(g => g.reviewStatus === 'mismatch').length; return mc > 0 ? <span className="ml-1 px-1 py-0.5 text-[9px] font-bold bg-red-100 text-red-700 rounded-full">{mc}</span> : null; })()}
                     </button>
                     <button
                       onClick={() => switchTab('approved')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
                       <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('blocked')}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                     >
                       <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
                     </button>
                   </div>
+                  <div className="ml-auto">
+                    {(activeTab === 'pages' || activeTab === 'grouped') && (
+                      <button
+                        onClick={() => setShowGroupReviewSettings(!showGroupReviewSettings)}
+                        className={`p-1.5 rounded-lg border transition-colors ${showGroupReviewSettings ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'border-zinc-200 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-50'}`}
+                        title="Group Review / Auto Group Settings"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-[220px] max-w-[480px]">
+                    <div className="flex items-center justify-between mb-0.5 text-[10px] font-medium text-zinc-500">
+                      <span>Grouping Progress</span>
+                      <span className="tabular-nums text-zinc-700">
+                        {keywordGroupingProgress.completedPages.toLocaleString()} / {keywordGroupingProgress.totalPages.toLocaleString()} pages
+                      </span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-zinc-100 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-300"
+                        style={{ width: `${keywordGroupingProgress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="shrink-0 px-2.5 py-1 rounded-lg border border-emerald-200 bg-emerald-50 text-[11px] font-semibold text-emerald-700 tabular-nums">
+                    {keywordGroupingProgress.percentLabel}
+                  </div>
+                  {groupingEta && (
+                    <div className="shrink-0 text-[10px] text-zinc-400 italic whitespace-nowrap" title="Estimated time left based on your measured grouping speed">
+                      {groupingEta}
+                    </div>
+                  )}
+                  <div className="shrink-0 text-[10px] text-zinc-500 tabular-nums">
+                    {keywordGroupingProgress.ungroupedPages.toLocaleString()} ungrouped left
+                  </div>
                 </div>
                 
                 {/* Row 2: Token filter badges (compact height) */}
-                <div className="h-6 flex items-center">
+                <div className="h-5 flex items-center">
                   {selectedTokens.size > 0 ? (
-                    <div className="flex flex-wrap gap-1.5">
+                    <div className="flex flex-wrap gap-1">
                       {Array.from(selectedTokens).map(token => (
                         <button
                           key={token}
@@ -4298,12 +4983,12 @@ export default function App() {
 
                 {/* Row 3: Results count | Selection | Search | Context-aware actions */}
                 <div className="flex items-center gap-2">
-                  {/* Active results count — fixed position, never shifts */}
+                  {/* Active results count â€" fixed position, never shifts */}
                   <span className="text-[11px] text-zinc-400 tabular-nums whitespace-nowrap shrink-0 min-w-[100px]">
-                    {filteredCount.toLocaleString()} / {totalCount.toLocaleString()} {activeTab === 'pages' ? 'pages' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'keywords'}
+                    {filteredCount.toLocaleString()} / {totalCount.toLocaleString()} {activeTab === 'pages' ? 'pages' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'items'}
                   </span>
 
-                  {/* Selection count — fixed min-width so it doesn't shift other elements */}
+                  {/* Selection count â€" fixed min-width so it doesn't shift other elements */}
                   <span className={`px-2 py-0.5 text-[10px] font-semibold rounded tabular-nums whitespace-nowrap shrink-0 min-w-[70px] text-center transition-colors ${
                     (() => {
                       const selCount = activeTab === 'pages' ? selectedClusters.size :
@@ -4321,7 +5006,7 @@ export default function App() {
                   </span>
 
                   {/* Search */}
-                  <div className="relative w-56 shrink-0">
+                  <div className="relative w-52 shrink-0">
                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
                     <input
                       type="text"
@@ -4335,9 +5020,9 @@ export default function App() {
                   {/* Spacer */}
                   <div className="flex-1" />
 
-                  {/* Context-aware action buttons — change based on activeTab */}
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    {/* Group name input — visible on Pages (Ungrouped) AND Pages (Grouped) for future rename feature */}
+                  {/* Context-aware action buttons â€" change based on activeTab */}
+                  <div className="flex items-center gap-1.5 flex-shrink min-w-0 flex-wrap justify-end">
+                    {/* Group name input â€" visible on Pages (Ungrouped) AND Pages (Grouped) for future rename feature */}
                     {(activeTab === 'pages' || activeTab === 'grouped') && (
                       <input
                         type="text"
@@ -4358,8 +5043,21 @@ export default function App() {
                         >
                           Group ({selectedClusters.size})
                         </button>
-                        {groupingEta && (
-                          <span className="text-[10px] text-zinc-400 italic whitespace-nowrap">{groupingEta}</span>
+                        <button
+                          onClick={handleRunFilteredAutoGroup}
+                          disabled={!isFilteredAutoGroupFilterActive || filteredClusters.length < 1}
+                          className="px-4 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[110px]"
+                          title="Review all currently filtered ungrouped pages and create strict semantic groups"
+                        >
+                          {isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0 ? 'Queue Auto Group' : 'Auto Group'} ({filteredClusters.length})
+                        </button>
+                        {isRunningFilteredAutoGroup && (
+                          <button
+                            onClick={handleStopFilteredAutoGroup}
+                            className="px-4 py-1.5 text-xs font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors whitespace-nowrap min-w-[110px]"
+                          >
+                            Stop
+                          </button>
                         )}
                       </>
                     )}
@@ -4388,18 +5086,10 @@ export default function App() {
                         >
                           Ungroup ({selectedGroups.size + selectedSubClusters.size})
                         </button>
-                        {/* Review settings gear + stats */}
-                        <button
-                          onClick={() => setShowGroupReviewSettings(!showGroupReviewSettings)}
-                          className={`p-1.5 rounded-lg border transition-colors ${showGroupReviewSettings ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'border-zinc-200 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-50'}`}
-                          title="AI Review Settings"
-                        >
-                          <Settings className="w-3.5 h-3.5" />
-                        </button>
                       </>
                     )}
 
-                    {/* Pages (Approved): Unapprove — handles both entire groups AND individual pages */}
+                    {/* Pages (Approved): Unapprove â€" handles both entire groups AND individual pages */}
                     {activeTab === 'approved' && (
                       <button
                         onClick={handleRemoveFromApproved}
@@ -4411,35 +5101,70 @@ export default function App() {
                     )}
                   </div>
                 </div>
+                {activeTab !== 'auto-group' && (
+                  <div className="mt-1 flex items-center gap-x-2 gap-y-1 flex-wrap rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-[10px] text-zinc-600">
+                    <span className="font-semibold text-zinc-700">Auto Group</span>
+                    <span className={`font-medium ${
+                      filteredAutoGroupStats.status === 'running'
+                        ? 'text-blue-600'
+                        : filteredAutoGroupStats.status === 'complete'
+                          ? 'text-emerald-600'
+                          : filteredAutoGroupStats.status === 'error'
+                            ? 'text-red-600'
+                            : 'text-zinc-500'
+                    }`}>
+                      {filteredAutoGroupStats.status === 'running'
+                        ? 'Running'
+                        : filteredAutoGroupStats.status === 'complete'
+                          ? 'Complete'
+                          : filteredAutoGroupStats.status === 'error'
+                            ? 'Error'
+                            : 'Idle'}
+                    </span>
+                    <span>{filteredAutoGroupStats.groupsCreated} groups</span>
+                    <span>{filteredAutoGroupStats.pagesGrouped} grouped</span>
+                    <span>{filteredAutoGroupStats.pagesRemaining} left</span>
+                    <span>{filteredAutoGroupQueue.length} queued</span>
+                    <span>{filteredAutoGroupStats.totalVolumeGrouped.toLocaleString()} vol</span>
+                    <span>${filteredAutoGroupStats.cost.toFixed(4)}</span>
+                    {filteredAutoGroupStats.elapsedMs > 0 && (
+                      <span>{(filteredAutoGroupStats.elapsedMs / 1000).toFixed(1)}s</span>
+                    )}
+                    {filteredAutoGroupStats.error && (
+                      <span className="text-red-600">{filteredAutoGroupStats.error}</span>
+                    )}
+                    {filteredAutoGroupSettingsStatus.missing.length > 0 ? (
+                      <span className="text-amber-600">
+                        Missing settings: {filteredAutoGroupSettingsStatus.missing.join(', ')}
+                      </span>
+                    ) : (
+                      <span className="text-zinc-500">{filteredAutoGroupSettingsStatus.summary}</span>
+                    )}
+                    <span className="text-zinc-400">
+                      Shortcut: Shift+1{activeTab === 'pages' ? '' : ' (from Ungrouped)'}
+                    </span>
+                  </div>
+                )}
               </div>
 
-              {/* AI Group Review Settings Panel — always mounted so ref is available for handleGroupClusters, but only VISIBLE on grouped tab */}
-              <div className={activeTab === 'grouped' ? 'px-4' : 'hidden'}>
+              {/* AI Group Review Settings Panel â€" mounted for both Pages and Grouped because Pages Auto Group uses the same settings */}
+              <div className={activeTab === 'grouped' || activeTab === 'pages' ? 'px-4' : 'hidden'}>
                 <GroupReviewSettings
                   ref={groupReviewSettingsRef}
                   isOpen={showGroupReviewSettings}
                   onToggle={() => setShowGroupReviewSettings(false)}
                   starredModels={starredModels}
                   onToggleStar={toggleStarModel}
+                  onSettingsChange={setGroupReviewSettingsSnapshot}
+                  onHydratedChange={setGroupReviewSettingsHydrated}
                 />
               </div>
 
               <div className="overflow-auto flex-1 rounded-b-2xl" style={activeTab === 'auto-group' ? { display: 'none' } : undefined}>
 
                 <table className="text-left text-sm relative w-full table-fixed">
-                  {/* Shared TableHeader — single source of truth for all tab headers */}
-                  {activeTab === 'keywords' ? (
-                    <TableHeader
-                      columns={KEYWORDS_COLUMNS}
-                      showCheckbox={false}
-                      sortKey={sortConfig[0]?.key ?? null}
-                      sortDirection={sortConfig[0]?.direction ?? 'desc'}
-                      sortStack={sortConfig as Array<{key: string, direction: 'asc' | 'desc'}>}
-                      onSort={(key, additive) => handleSort(key as keyof ClusterSummary, additive)}
-                      filters={filterBag}
-                      setCurrentPage={setCurrentPage}
-                    />
-                  ) : activeTab === 'pages' ? (
+                  {/* Shared TableHeader â€" single source of truth for all tab headers */}
+                  {activeTab === 'pages' ? (
                     <TableHeader
                       columns={PAGES_COLUMNS}
                       showCheckbox={true}
@@ -4528,17 +5253,6 @@ export default function App() {
                     />
                   ) : null}
                   <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
-                    {activeTab === 'keywords' && paginatedResults.map((row, idx) => (
-                      <KeywordRow
-                        key={idx}
-                        row={row}
-                        selectedTokens={selectedTokens}
-                        setSelectedTokens={setSelectedTokens}
-                        setCurrentPage={setCurrentPage}
-                        labelColorMap={labelColorMap}
-                      />
-                    ))}
-                    
                     {activeTab === 'pages' && paginatedClusters.map((row, idx) => (
                       <ClusterRow 
                         key={idx} 
@@ -4584,6 +5298,7 @@ export default function App() {
                         briefLoading={briefLoading}
                         brief={briefs[row.pageName]}
                         labelColorMap={labelColorMap}
+                        onBlockToken={handleBlockSingleToken}
                       />
                     ))}
                     
@@ -4648,13 +5363,14 @@ export default function App() {
                           }
                         }}
                         labelColorMap={labelColorMap}
+                        onBlockToken={handleBlockSingleToken}
                         groupActionButton={
                           <button
                             onClick={() => handleApproveGroup(row.groupName)}
                             className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 transition-colors text-[10px] font-bold shrink-0"
                             title="Approve group"
                           >
-                            ✓
+                            {'\u2713'}
                           </button>
                         }
                       />
@@ -4734,6 +5450,7 @@ export default function App() {
                           }
                         }}
                         labelColorMap={labelColorMap}
+                        onBlockToken={handleBlockSingleToken}
                         groupActionButton={
                           <button
                             onClick={() => handleUnapproveGroup(group.groupName)}
@@ -4769,7 +5486,7 @@ export default function App() {
                 </table>
               </div>
 
-              {/* Auto-Group Panel — replaces table when auto-group tab is active */}
+              {/* Auto-Group Panel â€" replaces table when auto-group tab is active */}
               {activeTab === 'auto-group' && (
                 <AutoGroupPanel
                   key={activeProjectId || 'no-project'}
@@ -4778,7 +5495,7 @@ export default function App() {
                   groupReviewSettingsRef={groupReviewSettingsRef}
                   logAndToast={logAndToast}
                   persistedSuggestions={autoGroupSuggestions}
-                  onSuggestionsChange={setAutoGroupSuggestions}
+                  onSuggestionsChange={persistence.updateSuggestions}
                 />
               )}
 
@@ -4828,16 +5545,33 @@ export default function App() {
                 <div className="px-4 py-3 border-b border-zinc-200 shrink-0 space-y-2">
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Filter className="w-3.5 h-3.5 text-zinc-500" />Token Management</h3>
-                    {blockedTokens.size > 0 && (
-                      <span className="text-[10px] font-medium text-red-600">{blockedTokens.size} blocked</span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {tokenSummary && tokenSummary.length > 0 && (
+                        <button
+                          onClick={exportTokensCSV}
+                          className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-md border border-zinc-200 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
+                          title="Export all tokens"
+                        >
+                          <Download className="w-2.5 h-2.5" />
+                          Export
+                        </button>
+                      )}
+                      {blockedTokens.size > 0 && (
+                        <span className="text-[10px] font-medium text-red-600">{blockedTokens.size} blocked</span>
+                      )}
+                    </div>
                   </div>
                   {/* Subtabs */}
                   <div className="flex space-x-0.5 bg-zinc-200/50 p-0.5 rounded-md">
-                    {(['current', 'all', 'blocked'] as const).map(tab => (
+                    {(['current', 'all', 'merge', 'blocked'] as const).map(tab => (
                       <button
                         key={tab}
-                        onClick={() => { setTokenMgmtSubTab(tab); setTokenMgmtPage(1); setSelectedMgmtTokens(new Set()); }}
+                        onClick={() => {
+                          setTokenMgmtSubTab(tab);
+                          setTokenMgmtPage(1);
+                          setSelectedMgmtTokens(new Set());
+                          setExpandedMergeParents(new Set());
+                        }}
                         className={`flex-1 px-2 py-1 text-[10px] font-medium rounded transition-all capitalize ${
                           tokenMgmtSubTab === tab
                             ? tab === 'blocked' ? 'bg-red-50 text-red-700 shadow-sm' : 'bg-white text-zinc-900 shadow-sm'
@@ -4854,13 +5588,13 @@ export default function App() {
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
                       <input
                         type="text"
-                        placeholder="Search tokens..."
+                        placeholder="Search tokens (comma-separated)..."
                         value={tokenMgmtSearch}
                         onChange={(e) => { setTokenMgmtSearch(e.target.value); setTokenMgmtPage(1); }}
                         className="w-full pl-7 pr-2 py-1.5 text-xs border border-zinc-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                       />
                     </div>
-                    {selectedMgmtTokens.size > 0 && tokenMgmtSubTab !== 'blocked' && (
+                    {selectedMgmtTokens.size > 0 && tokenMgmtSubTab !== 'blocked' && tokenMgmtSubTab !== 'merge' && (
                       <button
                         onClick={() => handleBlockTokens(Array.from(selectedMgmtTokens))}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-red-500 text-white hover:bg-red-600 transition-colors whitespace-nowrap"
@@ -4868,7 +5602,7 @@ export default function App() {
                         Block ({selectedMgmtTokens.size})
                       </button>
                     )}
-                    {selectedMgmtTokens.size >= 2 && tokenMgmtSubTab !== 'blocked' && (
+                    {selectedMgmtTokens.size >= 2 && tokenMgmtSubTab !== 'blocked' && tokenMgmtSubTab !== 'merge' && (
                       <button
                         onClick={handleOpenMergeModal}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-indigo-500 text-white hover:bg-indigo-600 transition-colors whitespace-nowrap"
@@ -4887,35 +5621,190 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Merged tokens display */}
-                {tokenMergeRules.length > 0 && tokenMgmtSubTab !== 'blocked' && (
-                  <div className="px-2 py-1.5 border-b border-zinc-200 bg-indigo-50/30">
-                    <div className="text-[10px] font-medium text-indigo-600 mb-1">Merged Tokens ({tokenMergeRules.length})</div>
-                    <div className="space-y-1">
-                      {tokenMergeRules.map(rule => (
-                        <div key={rule.id} className="flex flex-wrap items-center gap-1">
-                          <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">{rule.parentToken}</span>
-                          <span className="text-[9px] text-zinc-400">←</span>
-                          {rule.childTokens.map(child => (
-                            <span key={child} className="inline-flex items-center gap-0.5 text-[10px] text-zinc-600 bg-zinc-100 px-1 py-0.5 rounded border border-zinc-200">
-                              {child}
-                              <button
-                                onClick={() => handleUndoMergeChild(rule.id, child)}
-                                className="text-zinc-400 hover:text-red-500 transition-colors ml-0.5"
-                                title={`Undo merge: restore '${child}'`}
-                              >
-                                <X className="w-2.5 h-2.5" />
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {/* Merge subtab is rendered in the table below */}
 
                 <div className="overflow-auto flex-1">
-                  <table className="w-full text-left text-xs">
+                  {tokenMgmtSubTab === 'merge' ? (
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#f0f0f0]">
+                        <tr>
+                          <th className="px-2 py-1.5 w-8">
+                            <input
+                              type="checkbox"
+                              className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
+                              disabled
+                              checked={false}
+                            />
+                          </th>
+                          <th
+                            className="px-2 py-1.5 cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setTokenMgmtSort(prev => ({ key: 'token', direction: prev.key === 'token' && prev.direction === 'asc' ? 'desc' : 'asc' }))}
+                          >
+                            <div className="flex items-center gap-1">
+                              Token
+                              {tokenMgmtSort.key === 'token' && (tokenMgmtSort.direction === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 text-right cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setTokenMgmtSort(prev => ({ key: 'frequency', direction: prev.key === 'frequency' && prev.direction === 'desc' ? 'asc' : 'desc' }))}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              KWs
+                              {tokenMgmtSort.key === 'frequency' && (tokenMgmtSort.direction === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 text-right cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setTokenMgmtSort(prev => ({ key: 'totalVolume', direction: prev.key === 'totalVolume' && prev.direction === 'desc' ? 'asc' : 'desc' }))}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              Vol.
+                              {tokenMgmtSort.key === 'totalVolume' && (tokenMgmtSort.direction === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 text-right cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setTokenMgmtSort(prev => ({ key: 'avgKd', direction: prev.key === 'avgKd' && prev.direction === 'desc' ? 'asc' : 'desc' }))}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              KD
+                              {tokenMgmtSort.key === 'avgKd' && (tokenMgmtSort.direction === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
+                            </div>
+                          </th>
+                          <th className="px-1 py-1.5 w-6"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
+                        {paginatedMergeRuleRows.map(ruleRow => {
+                          const forcedExpanded = tokenMgmtMergeSearchTerms.length > 0 && ruleRow.childTokens.some(c => tokenIncludesAnyTerm(c, tokenMgmtMergeSearchTerms));
+                          const isExpanded = forcedExpanded || expandedMergeParents.has(ruleRow.ruleId);
+
+                          return (
+                            <React.Fragment key={ruleRow.ruleId}>
+                              <tr className="hover:bg-zinc-50/50 transition-colors">
+                                <td className="px-2 py-1" onClick={(e) => e.stopPropagation()}>
+                                  <input
+                                    type="checkbox"
+                                    className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
+                                    disabled
+                                    checked={false}
+                                  />
+                                </td>
+                                <td className="px-2 py-1 font-mono text-zinc-800">
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (forcedExpanded) return;
+                                        setExpandedMergeParents(prev => {
+                                          const next = new Set(prev);
+                                          if (next.has(ruleRow.ruleId)) next.delete(ruleRow.ruleId);
+                                          else next.add(ruleRow.ruleId);
+                                          return next;
+                                        });
+                                      }}
+                                      disabled={forcedExpanded}
+                                      className={`p-0.5 transition-colors ${forcedExpanded ? 'text-zinc-300 cursor-not-allowed' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                      title={forcedExpanded ? 'Expanded by search match' : (isExpanded ? 'Collapse' : 'Expand')}
+                                    >
+                                      {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const newTokens = new Set(selectedTokens);
+                                        if (newTokens.has(ruleRow.parentToken)) newTokens.delete(ruleRow.parentToken);
+                                        else newTokens.add(ruleRow.parentToken);
+                                        setSelectedTokens(newTokens);
+                                        setCurrentPage(1);
+                                        if (newTokens.size > 0) switchTab('pages');
+                                      }}
+                                      className={`${selectedTokens.has(ruleRow.parentToken) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors cursor-pointer`}
+                                      title="Filter keyword management by this token"
+                                    >
+                                      {ruleRow.parentToken}
+                                    </button>
+                                  </div>
+                                </td>
+                                <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{ruleRow.parentStats.frequency.toLocaleString()}</td>
+                                <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{ruleRow.parentStats.totalVolume.toLocaleString()}</td>
+                                <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{ruleRow.parentStats.avgKd !== null ? ruleRow.parentStats.avgKd : '-'}</td>
+                                <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
+                                  <button
+                                    onClick={() => handleUndoMergeParent(ruleRow.ruleId)}
+                                    className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
+                                    title="Unmerge parent"
+                                  >
+                                    <span className="text-[10px] font-bold">↩</span>
+                                  </button>
+                                </td>
+                              </tr>
+
+                              {isExpanded && ruleRow.childTokens.map(childToken => {
+                                const st = ruleRow.childStats[childToken];
+                                return (
+                                  <tr key={`${ruleRow.ruleId}::${childToken}`} className="hover:bg-zinc-50/30 transition-colors">
+                                    <td className="px-2 py-1" onClick={(e) => e.stopPropagation()}>
+                                      <input
+                                        type="checkbox"
+                                        className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
+                                        disabled
+                                        checked={false}
+                                      />
+                                    </td>
+                                    <td className="px-2 py-1 font-mono text-zinc-800">
+                                      <div className="flex items-center gap-1 pl-4">
+                                        <div className="w-3.5"></div>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const newTokens = new Set(selectedTokens);
+                                            if (newTokens.has(childToken)) newTokens.delete(childToken);
+                                            else newTokens.add(childToken);
+                                            setSelectedTokens(newTokens);
+                                            setCurrentPage(1);
+                                            if (newTokens.size > 0) switchTab('pages');
+                                          }}
+                                          className={`${selectedTokens.has(childToken) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors cursor-pointer`}
+                                          title="Filter keyword management by this token"
+                                        >
+                                          {childToken}
+                                        </button>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{st.frequency.toLocaleString()}</td>
+                                    <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{st.totalVolume.toLocaleString()}</td>
+                                    <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{st.avgKd !== null ? st.avgKd : '-'}</td>
+                                    <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
+                                      <button
+                                        onClick={() => handleUndoMergeChild(ruleRow.ruleId, childToken)}
+                                        className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
+                                        title="Unmerge child"
+                                      >
+                                        <span className="text-[10px] font-bold">↩</span>
+                                      </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </React.Fragment>
+                          );
+                        })}
+
+                        {paginatedMergeRuleRows.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-8 text-center text-xs text-zinc-400">
+                              No merges found
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  ) : null}
+
+                  {tokenMgmtSubTab !== 'merge' && (
+                    <table className="w-full text-left text-xs">
                     <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#f0f0f0]">
                       <tr>
                         <th className="px-2 py-1.5 w-8">
@@ -5000,7 +5889,7 @@ export default function App() {
                               }}
                             />
                           </td>
-                          {/* Star icon — add/remove from Universal Blocked list (only in blocked tab) */}
+                          {/* Star icon â€" add/remove from Universal Blocked list (only in blocked tab) */}
                           {tokenMgmtSubTab === 'blocked' && (
                             <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                               <button
@@ -5039,7 +5928,7 @@ export default function App() {
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.frequency.toLocaleString()}</td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.totalVolume.toLocaleString()}</td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.avgKd !== null ? row.avgKd : '-'}</td>
-                          {/* Block button — small red circle, only on non-blocked tabs */}
+                          {/* Block button â€" small red circle, only on non-blocked tabs */}
                           {tokenMgmtSubTab !== 'blocked' && (
                             <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                               <button
@@ -5060,22 +5949,36 @@ export default function App() {
                       )}
                     </tbody>
                   </table>
+                  )}
                 </div>
 
                 <div className="px-3 py-2 border-t border-zinc-200 bg-zinc-50 flex items-center justify-between shrink-0">
-                  <span className="text-[10px] text-zinc-500">{filteredMgmtTokens.length.toLocaleString()} tokens</span>
+                  <span className="text-[10px] text-zinc-500">
+                    {tokenMgmtSubTab === 'merge'
+                      ? `${filteredMergeRuleRows.length.toLocaleString()} parents`
+                      : `${filteredMgmtTokens.length.toLocaleString()} tokens`}
+                  </span>
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => setTokenMgmtPage(p => Math.max(1, p - 1))}
-                      disabled={safeMgmtPage <= 1}
+                      disabled={tokenMgmtSubTab === 'merge' ? safeMergeMgmtPage <= 1 : safeMgmtPage <= 1}
                       className="px-2 py-0.5 text-[10px] font-medium rounded border border-zinc-300 bg-white text-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-50 transition-colors"
                     >
                       Prev
                     </button>
-                    <span className="text-[10px] text-zinc-600">{safeMgmtPage}/{tokenMgmtTotalPages}</span>
+                    <span className="text-[10px] text-zinc-600">
+                      {tokenMgmtSubTab === 'merge'
+                        ? `${safeMergeMgmtPage}/${mergeMgmtTotalPages}`
+                        : `${safeMgmtPage}/${tokenMgmtTotalPages}`}
+                    </span>
                     <button
-                      onClick={() => setTokenMgmtPage(p => Math.min(tokenMgmtTotalPages, p + 1))}
-                      disabled={safeMgmtPage >= tokenMgmtTotalPages}
+                      onClick={() =>
+                        setTokenMgmtPage(p => {
+                          const max = tokenMgmtSubTab === 'merge' ? mergeMgmtTotalPages : tokenMgmtTotalPages;
+                          return Math.min(max, p + 1);
+                        })
+                      }
+                      disabled={tokenMgmtSubTab === 'merge' ? safeMergeMgmtPage >= mergeMgmtTotalPages : safeMgmtPage >= tokenMgmtTotalPages}
                       className="px-2 py-0.5 text-[10px] font-medium rounded border border-zinc-300 bg-white text-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-50 transition-colors"
                     >
                       Next
@@ -5202,11 +6105,14 @@ export default function App() {
                                     range.selectNodeContents(el);
                                     window.getSelection()?.removeAllRanges();
                                     window.getSelection()?.addRange(range);
-                                    const finish = () => {
+                                      const finish = () => {
                                       el.contentEditable = 'false';
                                       const newName = el.textContent?.trim();
                                       if (newName && newName !== project.name) {
-                                        setProjects(prev => prev.map(p => p.id === project.id ? { ...p, name: newName } : p));
+                                        setProjects(prev => {
+                                          const updated = prev.map(p => p.id === project.id ? { ...p, name: newName } : p);
+                                          return updated;
+                                        });
                                         // Persist to Firestore
                                         setDoc(doc(db, 'projects', project.id), { name: newName }, { merge: true }).catch(() => {});
                                       } else {
@@ -5262,23 +6168,23 @@ export default function App() {
           </div>
         )}
 
-        {/* Settings sub-tab — Universal Blocked Tokens */}
+        {/* Settings sub-tab â€" Universal Blocked Tokens */}
         {mainTab === 'group' && groupSubTab === 'settings' && (
           <div className="bg-white rounded-2xl border border-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-4 duration-500">
             {/* Settings header with sub-tabs */}
             <div className="px-6 py-4 border-b border-zinc-100">
               <h2 className="text-base font-semibold text-zinc-900 mb-3">Settings</h2>
               <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg w-fit">
-                <button onClick={() => setSettingsSubTab('general')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'general' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('general')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'general' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   General
                 </button>
-                <button onClick={() => setSettingsSubTab('how-it-works')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'how-it-works' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('how-it-works')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'how-it-works' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   How it Works
                 </button>
-                <button onClick={() => setSettingsSubTab('dictionaries')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'dictionaries' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('dictionaries')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'dictionaries' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   Dictionaries
                 </button>
-                <button onClick={() => setSettingsSubTab('blocked')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'blocked' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('blocked')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'blocked' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
                   Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
                 </button>
               </div>
@@ -5338,7 +6244,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="py-8 text-center text-xs text-zinc-400 bg-zinc-50/50 rounded-lg border border-zinc-100">
-                    No universally blocked tokens. Add tokens above or star them in Token Management → Blocked tab.
+                    No universally blocked tokens. Add tokens above or star them in Token Management â†' Blocked tab.
                   </div>
                 )}
               </div>
@@ -5352,9 +6258,9 @@ export default function App() {
                   <h3 className="text-sm font-semibold text-zinc-900 mb-2">1. Normalization</h3>
                   <ul className="list-disc pl-5 space-y-1.5 text-xs">
                     <li><strong>Lowercase:</strong> All keywords converted to lowercase.</li>
-                    <li><strong>State Names:</strong> Full names → 2-letter abbreviations (e.g., "california" → "ca").</li>
-                    <li><strong>Synonyms:</strong> Common synonyms mapped to a base word (e.g., "cheap" → "affordable").</li>
-                    <li><strong>Numbers:</strong> Spelled-out numbers → digits (e.g., "one" → "1").</li>
+                    <li><strong>State Names:</strong> Full names â†' 2-letter abbreviations (e.g., "california" â†' "ca").</li>
+                    <li><strong>Synonyms:</strong> Common synonyms mapped to a base word (e.g., "cheap" â†' "affordable").</li>
+                    <li><strong>Numbers:</strong> Spelled-out numbers â†' digits (e.g., "one" â†' "1").</li>
                   </ul>
                 </div>
                 <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
@@ -5368,7 +6274,7 @@ export default function App() {
                 <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
                   <h3 className="text-sm font-semibold text-zinc-900 mb-2">3. Singularization & Sorting</h3>
                   <ul className="list-disc pl-5 space-y-1.5 text-xs">
-                    <li><strong>Singularization:</strong> Plurals → singular ("shoes" → "shoe").</li>
+                    <li><strong>Singularization:</strong> Plurals â†' singular ("shoes" â†' "shoe").</li>
                     <li><strong>Sorting:</strong> Tokens sorted alphabetically so "shoe red" = "red shoe".</li>
                   </ul>
                 </div>
@@ -5474,22 +6380,37 @@ export default function App() {
           <div className="max-w-4xl mx-auto mt-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <ActivityLog
               entries={activityLog}
-              onClear={() => { setActivityLog([]); addToast('Activity log cleared', 'info'); }}
+              onClear={() => {
+                persistence.clearActivityLog();
+                addToast('Activity log cleared', 'info');
+              }}
             />
           </div>
         )}
 
-        {/* GenerateTab stays mounted always — prevents generation from stopping when switching tabs */}
+        {mainTab === 'feedback' && (
+          <div className="max-w-4xl mx-auto mt-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <FeedbackTab />
+          </div>
+        )}
+
+        {mainTab === 'feature-ideas' && (
+          <div className="max-w-4xl mx-auto mt-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <FeatureIdeasTab />
+          </div>
+        )}
+
+        {/* GenerateTab stays mounted always â€" prevents generation from stopping when switching tabs */}
         <div style={mainTab === 'generate' ? undefined : { display: 'none' }}>
           <ErrorBoundary fallbackLabel="The Generate tab encountered an error. Your data has been saved.">
             <GenerateTab />
           </ErrorBoundary>
         </div>
 
-        {/* How it Works — now inside Settings, kept here for backward compat rendering */}
+        {/* How it Works â€" now inside Settings, kept here for backward compat rendering */}
 
         {/* Dictionaries content moved to Settings > Dictionaries sub-tab */}
-        {false && (
+        {mainTab === '__legacy_rules__' ? (
           <div className="space-y-8">
             <div className="bg-white border border-zinc-200 rounded-2xl p-8 shadow-sm">
               <h2 className="text-xl font-semibold text-zinc-900 mb-6">Label Detection Rules (OLD - REMOVED)</h2>
@@ -5674,7 +6595,7 @@ export default function App() {
             </div>
           </div>
         </div>
-        )}
+        ) : null}
 
         {/* Saved Clusters removed */}
 
@@ -5694,3 +6615,5 @@ export default function App() {
     </div>
   );
 }
+
+

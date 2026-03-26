@@ -2,10 +2,39 @@
 // Contains city/state lookups, foreign detection, stemming, regex patterns, and helper functions.
 
 import pluralize from 'pluralize';
-import { numberMap, stateMap, stateAbbrToFull, stateFullNames, synonymMap, stopWords, ignoredTokens, countries, foreignCountries, foreignCities, misspellingMap } from './dictionaries';
+import {
+  acronymMap,
+  compoundMap,
+  countries,
+  foreignCities,
+  foreignCountries,
+  ignoredTokens,
+  misspellingMap,
+  numberMap,
+  numberPhraseMap,
+  stateAbbrToFull,
+  stateFullNames,
+  stateMap,
+  stopWords,
+  symbolNormalizationMap,
+  synonymMap,
+} from './dictionaries';
 import citiesList from '../us-cities.json';
 
 pluralize.addUncountableRule('us');
+
+const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildAlternationPattern = (values: Iterable<string>): string =>
+  Array.from(values)
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegex)
+    .join('|');
+
+const buildWordBoundaryRegex = (values: Iterable<string>): RegExp => {
+  const pattern = buildAlternationPattern(values);
+  return pattern ? new RegExp(`\\b(${pattern})\\b`, 'g') : /$^/g;
+};
 
 // Create a set for fast city lookups
 export const citySet = new Set<string>();
@@ -24,7 +53,7 @@ citiesList.forEach((c: string) => {
   }
 
   if (c.includes("'") || c.includes("-")) {
-    const noPunctuation = c.toLowerCase().replace(/['\-]/g, '').replace(/\./g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+    const noPunctuation = c.toLowerCase().replace(/['-]/g, '').replace(/\./g, '').replace(/[^a-z0-9]+/g, ' ').trim();
     if (noPunctuation && noPunctuation !== normalized) {
       citySet.add(noPunctuation);
       const wordsNP = noPunctuation.split(' ');
@@ -43,10 +72,7 @@ export const stateSet = new Set([
   ...Object.values(stateMap)
 ]);
 
-const statePattern = Object.keys(stateMap)
-  .sort((a, b) => b.length - a.length)
-  .map(state => state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
+const statePattern = buildAlternationPattern(Object.keys(stateMap));
 export const stateRegex = new RegExp(`\\b(${statePattern})\\b`, 'g');
 
 // Helper: capitalize each word (e.g. "san francisco" → "San Francisco")
@@ -124,26 +150,32 @@ export const detectForeignEntity = (keywordLower: string): string | null => {
   return capitalizeWords(match[1]);
 };
 
-export const synonymPattern = Object.keys(synonymMap)
-  .sort((a, b) => b.length - a.length)
-  .map(syn => syn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
+export const synonymPattern = buildAlternationPattern(Object.keys(synonymMap));
 export const synonymRegex = new RegExp(`\\b(${synonymPattern})\\b`, 'g');
 
-const multiWordLocationsPattern = Array.from(countries)
-  .filter(c => c.includes(' '))
-  .sort((a, b) => b.length - a.length)
-  .map(loc => loc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
+const multiWordLocationsPattern = buildAlternationPattern(Array.from(countries).filter(c => c.includes(' ')));
 export const multiWordLocationsRegex = new RegExp(`\\b(${multiWordLocationsPattern})\\b`, 'g');
+
+export const compoundRegex = buildWordBoundaryRegex(Object.keys(compoundMap));
+export const acronymRegex = buildWordBoundaryRegex(Object.keys(acronymMap));
+export const numberPhraseRegex = new RegExp(`(${buildAlternationPattern(Object.keys(numberPhraseMap))})`, 'g');
 
 export const pluralizeCache = new Map<string, string>();
 
+export function singularizeWord(word: string): string {
+  if (pluralizeCache.has(word)) return pluralizeCache.get(word)!;
+  try {
+    const singular = pluralize.singular(word);
+    pluralizeCache.set(word, singular);
+    return singular;
+  } catch {
+    pluralizeCache.set(word, word);
+    return word;
+  }
+}
+
 // Misspelling correction regex
-const misspellingPattern = Object.keys(misspellingMap)
-  .sort((a, b) => b.length - a.length)
-  .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
+const misspellingPattern = buildAlternationPattern(Object.keys(misspellingMap));
 export const misspellingRegex = new RegExp(`\\b(${misspellingPattern})\\b`, 'g');
 
 // #3: Hyphen/spacing normalization — join known prefixes with their root
@@ -159,6 +191,67 @@ const localIntentPattern = localIntentPhrases
   .map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   .join('|');
 export const localIntentRegex = new RegExp(`\\b(${localIntentPattern})\\b`, 'g');
+
+const applyReplacementMap = (input: string, regex: RegExp, replacementMap: Record<string, string>): string =>
+  input.replace(regex, (match) => replacementMap[match]);
+
+const applySymbolNormalization = (input: string): string => {
+  let normalized = input.replace(/[']/g, "'");
+
+  for (const [symbol, replacement] of Object.entries(symbolNormalizationMap)) {
+    const symbolRegex = new RegExp(escapeRegex(symbol), 'g');
+    normalized = normalized.replace(symbolRegex, replacement);
+  }
+
+  // Normalize possessives/curly apostrophes without collapsing contractions globally.
+  normalized = normalized.replace(/\b([a-z0-9]+)'s\b/g, '$1s');
+  normalized = normalized.replace(/\b([a-z0-9]+)s'\b/g, '$1s');
+
+  return normalized;
+};
+
+export function normalizeKeywordToTokenArr(keywordLower: string): string[] {
+  let normalizedKeyword = keywordLower;
+
+  normalizedKeyword = normalizedKeyword.replace(misspellingRegex, match => misspellingMap[match]);
+  normalizedKeyword = applySymbolNormalization(normalizedKeyword);
+  normalizedKeyword = applyReplacementMap(normalizedKeyword, compoundRegex, compoundMap);
+  normalizedKeyword = applyReplacementMap(normalizedKeyword, acronymRegex, acronymMap);
+  normalizedKeyword = applyReplacementMap(normalizedKeyword, numberPhraseRegex, numberPhraseMap);
+
+  // Join known prefixes and common e-* variants after phrase normalization.
+  normalizedKeyword = normalizedKeyword.replace(prefixPattern, '$1$2');
+  normalizedKeyword = normalizedKeyword.replace(/\be[\s-](mail|commerce|sign)\b/g, 'e$1');
+
+  normalizedKeyword = normalizedKeyword.replace(localIntentRegex, 'nearby');
+
+  normalizedKeyword = normalizedKeyword
+    .split(/([^a-z0-9]+)/)
+    .map(part => {
+      if (/[^a-z0-9]/.test(part) || part.length === 0) return part;
+      return singularizeWord(part);
+    })
+    .join('');
+
+  normalizedKeyword = normalizedKeyword.replace(synonymRegex, match => synonymMap[match]);
+  normalizedKeyword = normalizedKeyword.replace(multiWordLocationsRegex, '');
+
+  normalizedKeyword = normalizedKeyword
+    .split(/[^a-z0-9]+/)
+    .filter(t => t.length > 0 && !stopWords.has(t) && !ignoredTokens.has(t) && !countries.has(t))
+    .join(' ');
+
+  normalizedKeyword = normalizedKeyword.replace(stateRegex, match => stateMap[match]);
+
+  return normalizedKeyword
+    .split(/[^a-z0-9]+/)
+    .filter(t => t.length > 0)
+    .map(t => numberMap[t] || stem(t));
+}
+
+export function normalizeKeywordToSignature(keywordLower: string): string {
+  return [...new Set(normalizeKeywordToTokenArr(keywordLower))].sort().join(' ');
+}
 
 // #1: Lightweight stemmer — strip common suffixes to root form
 const stemCache = new Map<string, string>();

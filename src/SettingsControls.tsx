@@ -20,7 +20,7 @@ const SettingsControls: React.FC<SettingsControlsProps> = React.memo(({
   onTemperatureChange,
   concurrency,
   onConcurrencyChange,
-  maxConcurrency = 100,
+  maxConcurrency = 250,
   reasoning,
   onReasoningChange,
   maxTokens,

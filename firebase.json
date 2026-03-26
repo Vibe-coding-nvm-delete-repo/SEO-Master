@@ -1,4 +1,7 @@
 {
+  "storage": {
+    "rules": "storage.rules"
+  },
   "hosting": {
     "public": "dist",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
@@ -8,6 +11,6 @@
   },
   "firestore": {
     "rules": "firestore.rules",
-    "database": "ai-studio-ce311d87-660a-4b45-9478-db6c56d1e645"
+    "database": "first-db"
   }
 }

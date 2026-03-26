@@ -31,6 +31,10 @@ interface CosinePageInput {
   totalVolume: number;
   keywordCount: number;
   avgKd: number | null;
+  embeddingText?: string;
+  semanticSummary?: string;
+  cosineRole?: 'page' | 'anchor';
+  anchorGroupId?: string;
 }
 
 export const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
@@ -41,19 +45,29 @@ export interface SimilarityPair {
   similarity: number;
 }
 
+export interface CosineClusterPage extends CosinePageInput {
+  representativeSimilarity: number;
+}
+
 export interface CosineCluster {
   id: string;
-  pages: CosinePageInput[];
+  pages: CosineClusterPage[];
   pageCount: number;
   totalVolume: number;
   keywordCount: number;
   avgKd: number | null;
   maxSimilarity: number;
   minSimilarity: number;
+  representativePageName: string;
+  representativeTokens: string;
+  highSimilarity: number;
+  lowSimilarity: number;
+  diffSimilarity: number;
+  outlierCount: number;
 }
 
 export interface CosineProgress {
-  phase: 'embedding' | 'computing' | 'clustering' | 'complete' | 'error';
+  phase: 'summarizing' | 'embedding' | 'computing' | 'clustering' | 'complete' | 'error';
   progress: number; // 0-100
   message: string;
   detail: string; // sub-status for the current phase
@@ -86,7 +100,7 @@ function yieldToUI(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-// Get embeddings from OpenRouter (batched)
+// Get embeddings from OpenRouter (batched with small bounded concurrency)
 async function getEmbeddings(
   texts: string[],
   apiKey: string,
@@ -95,15 +109,19 @@ async function getEmbeddings(
   onBatchDone?: (completed: number, total: number) => void
 ): Promise<{ vectors: number[][]; tokensUsed: number; cost: number }> {
   const BATCH_SIZE = 100;
-  const allVectors: number[][] = [];
+  const EMBEDDING_CONCURRENCY = 4;
+  const batchResults: number[][][] = [];
   let totalTokens = 0;
   const totalBatches = Math.ceil(texts.length / BATCH_SIZE);
+  let completedBatches = 0;
 
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+  const batchInputs = Array.from({ length: totalBatches }, (_, batchIndex) => ({
+    batchIndex,
+    batch: texts.slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE),
+  }));
+
+  async function fetchBatch(batchIndex: number, batch: string[]) {
     if (signal?.aborted) throw new Error('Aborted');
-
-    const batch = texts.slice(i, i + BATCH_SIZE);
-    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
 
     const res = await fetch('https://openrouter.ai/api/v1/embeddings', {
       method: 'POST',
@@ -124,11 +142,27 @@ async function getEmbeddings(
     const data = await res.json();
     const embeddings = data.data || [];
     embeddings.sort((a: any, b: any) => a.index - b.index);
-    for (const emb of embeddings) allVectors.push(emb.embedding);
-    totalTokens += data.usage?.total_tokens || data.usage?.prompt_tokens || 0;
 
-    onBatchDone?.(batchNum, totalBatches);
+    batchResults[batchIndex] = embeddings.map((emb: any) => emb.embedding);
+    totalTokens += data.usage?.total_tokens || data.usage?.prompt_tokens || 0;
+    completedBatches++;
+    onBatchDone?.(completedBatches, totalBatches);
   }
+
+  let nextBatch = 0;
+  async function worker() {
+    while (nextBatch < batchInputs.length) {
+      const current = nextBatch++;
+      const { batchIndex, batch } = batchInputs[current];
+      await fetchBatch(batchIndex, batch);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(EMBEDDING_CONCURRENCY, totalBatches) }, () => worker())
+  );
+
+  const allVectors = batchResults.flat();
 
   // Estimate cost based on model pricing (approximate)
   const cost = totalTokens * 0.00000001; // $0.01/M default
@@ -148,6 +182,7 @@ async function findSimilarPairs(
   const n = pages.length;
   const total = (n * (n - 1)) / 2;
   const CHUNK_SIZE = 50000; // Process 50k pairs then yield to UI
+  const tokenSets = pages.map(page => new Set(page.tokenArr));
   let computed = 0;
   let lastReport = 0;
 
@@ -155,6 +190,24 @@ async function findSimilarPairs(
     if (signal?.aborted) throw new Error('Aborted');
 
     for (let j = i + 1; j < n; j++) {
+      let sharesToken = false;
+      for (const token of tokenSets[i]) {
+        if (tokenSets[j].has(token)) {
+          sharesToken = true;
+          break;
+        }
+      }
+
+      if (!sharesToken) {
+        computed++;
+        if (computed - lastReport >= CHUNK_SIZE) {
+          lastReport = computed;
+          onProgress?.(computed, total, pairs.length);
+          await yieldToUI();
+        }
+        continue;
+      }
+
       const sim = cosineSim(vectors[i], vectors[j], magnitudes[i], magnitudes[j]);
       if (sim >= threshold) {
         pairs.push({
@@ -182,16 +235,24 @@ async function findSimilarPairs(
 }
 
 // Build clusters using Union-Find (connected components)
-function buildClusters(pages: CosinePageInput[], pairs: SimilarityPair[]): CosineCluster[] {
+function buildClusters(
+  pages: CosinePageInput[],
+  pairs: SimilarityPair[],
+  vectors: number[][],
+  magnitudes: number[],
+  outlierFloor: number = 0.85
+): CosineCluster[] {
   const parent = new Map<string, string>();
   const rank = new Map<string, number>();
   const pageMap = new Map<string, CosinePageInput>();
+  const pageIndexMap = new Map<string, number>();
 
-  for (const p of pages) {
+  pages.forEach((p, index) => {
     parent.set(p.tokens, p.tokens);
     rank.set(p.tokens, 0);
     pageMap.set(p.tokens, p);
-  }
+    pageIndexMap.set(p.tokens, index);
+  });
 
   function find(x: string): string {
     let root = x;
@@ -240,23 +301,68 @@ function buildClusters(pages: CosinePageInput[], pairs: SimilarityPair[]): Cosin
   for (const [root, clusterPages] of groups) {
     if (clusterPages.length < 2) continue;
 
-    const totalVolume = clusterPages.reduce((sum, p) => sum + p.totalVolume, 0);
-    const keywordCount = clusterPages.reduce((sum, p) => sum + p.keywordCount, 0);
+    const representative = clusterPages.reduce((best, page) =>
+      page.totalVolume > best.totalVolume ? page : best,
+      clusterPages[0]
+    );
+    const representativeIdx = pageIndexMap.get(representative.tokens)!;
+    const representativeVector = vectors[representativeIdx];
+    const representativeMagnitude = magnitudes[representativeIdx];
+
+    const enrichedPages: CosineClusterPage[] = clusterPages
+      .map(page => {
+        const pageIdx = pageIndexMap.get(page.tokens)!;
+        const repSimilarity = page.tokens === representative.tokens
+          ? 1
+          : cosineSim(vectors[pageIdx], representativeVector, magnitudes[pageIdx], representativeMagnitude);
+
+        return {
+          ...page,
+          representativeSimilarity: Math.round(repSimilarity * 10000) / 10000,
+        };
+      })
+      .sort((a, b) => {
+        if (a.tokens === representative.tokens) return -1;
+        if (b.tokens === representative.tokens) return 1;
+        if (b.representativeSimilarity !== a.representativeSimilarity) {
+          return b.representativeSimilarity - a.representativeSimilarity;
+        }
+        return b.totalVolume - a.totalVolume;
+      });
+
+    const totalVolume = enrichedPages.reduce((sum, p) => sum + p.totalVolume, 0);
+    const keywordCount = enrichedPages.reduce((sum, p) => sum + p.keywordCount, 0);
     let totalKd = 0, kdCount = 0;
-    for (const p of clusterPages) {
+    for (const p of enrichedPages) {
       if (p.avgKd !== null) { totalKd += p.avgKd * p.keywordCount; kdCount += p.keywordCount; }
     }
 
     const sims = clusterSims.get(root) || [];
+    const memberSimilarities = enrichedPages
+      .filter(page => page.tokens !== representative.tokens)
+      .map(page => page.representativeSimilarity);
+    const highSimilarity = 1;
+    const lowSimilarity = memberSimilarities.length > 0 ? Math.min(...memberSimilarities) : 1;
+    const diffSimilarity = 1 - lowSimilarity;
+    const outlierCount = enrichedPages.filter(page =>
+      page.tokens !== representative.tokens && page.representativeSimilarity < outlierFloor
+    ).length;
+
     clusters.push({
       id: `cosine_${idx++}`,
-      pages: clusterPages.sort((a, b) => b.totalVolume - a.totalVolume),
-      pageCount: clusterPages.length,
+      pages: enrichedPages,
+      pageCount: enrichedPages.length,
       totalVolume,
       keywordCount,
       avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
       maxSimilarity: sims.length > 0 ? Math.max(...sims) : 0,
       minSimilarity: sims.length > 0 ? Math.min(...sims) : 0,
+      representativePageName: representative.pageName,
+      representativeTokens: representative.tokens,
+      highSimilarity,
+      lowSimilarity,
+      diffSimilarity: Math.round(diffSimilarity * 10000) / 10000,
+      outlierCount,
     });
   }
 
@@ -284,7 +390,7 @@ export async function runCosineSimilarity(
 }> {
   const startTime = performance.now();
   const totalPairs = (pages.length * (pages.length - 1)) / 2;
-  const pageNames = pages.map(p => p.pageName);
+  const pageNames = pages.map(p => p.embeddingText || p.pageName);
 
   const progress = (p: Partial<CosineProgress>) => {
     onProgress?.({
@@ -370,7 +476,7 @@ export async function runCosineSimilarity(
     tokensUsed,
   });
 
-  const clusters = buildClusters(pages, pairs);
+  const clusters = buildClusters(pages, pairs, vectors, magnitudes);
 
   // ── DONE ────────────────────────────────────────
   const elapsed = Math.round(performance.now() - startTime);
@@ -395,4 +501,3 @@ export async function runCosineSimilarity(
     computeTimeMs: Math.round(compTime),
   };
 }
-

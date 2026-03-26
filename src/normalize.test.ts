@@ -1,213 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import pluralize from 'pluralize';
-import { numberMap, stateMap, stateAbbrToFull, stateFullNames, synonymMap, stopWords, ignoredTokens, countries, foreignCountries, foreignCities, misspellingMap } from './dictionaries';
-import citiesList from '../us-cities.json';
+import { detectForeignEntity, normalizeKeywordToSignature, stem } from './processing';
 
-pluralize.addUncountableRule('us');
-
-// ──────────────────────────────────────────────────────────────────────
-// Replicate the normalization pipeline from App.tsx for testing
-// ──────────────────────────────────────────────────────────────────────
-
-const synonymPattern = Object.keys(synonymMap)
-  .sort((a, b) => b.length - a.length)
-  .map(syn => syn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
-const synonymRegex = new RegExp(`\\b(${synonymPattern})\\b`, 'g');
-
-const multiWordLocationsPattern = Array.from(countries)
-  .filter(c => c.includes(' '))
-  .sort((a, b) => b.length - a.length)
-  .map(loc => loc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
-const multiWordLocationsRegex = new RegExp(`\\b(${multiWordLocationsPattern})\\b`, 'g');
-
-const statePattern = Object.keys(stateMap)
-  .sort((a, b) => b.length - a.length)
-  .map(state => state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
-const stateRegex = new RegExp(`\\b(${statePattern})\\b`, 'g');
-
-const pluralizeCache = new Map<string, string>();
-
-function singularizeWord(word: string): string {
-  if (pluralizeCache.has(word)) return pluralizeCache.get(word)!;
-  try {
-    const singular = pluralize.singular(word);
-    pluralizeCache.set(word, singular);
-    return singular;
-  } catch {
-    pluralizeCache.set(word, word);
-    return word;
-  }
-}
-
-/**
- * Replicates the exact normalization pipeline from App.tsx:
- * 1. Singularize each word
- * 2. Synonym replacement
- * 3. Remove multi-word locations
- * 4. Remove stop words, ignored tokens, single-word countries
- * 5. Normalize states to abbreviations
- * 6. Split, normalize numbers, sort → signature
- */
-// #3: Hyphen/spacing normalization
-const prefixPattern = /\b(re|pre|un|non|anti|co|over|under|semi|multi|sub|out|mis|dis)\s*[-\s]\s*([a-z]{3,})\b/g;
-
-// #10: Local intent unification
-const localIntentPhrases = [
-  'near me', 'close to me', 'in my area', 'around me', 'next to me',
-  'close by', 'closest to me', 'nearest to me',
-];
-const localIntentPattern2 = localIntentPhrases
-  .sort((a, b) => b.length - a.length)
-  .map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
-const localIntentRegex2 = new RegExp(`\\b(${localIntentPattern2})\\b`, 'g');
-
-// #1: Lightweight stemmer
-const stemExceptions = new Set([
-  'meeting', 'being', 'thing', 'nothing', 'something', 'everything', 'anything',
-  'during', 'morning', 'evening', 'spring', 'string', 'ring', 'king', 'bring',
-  'sing', 'wing', 'swing', 'cling', 'fling', 'ceiling', 'feeling', 'dealing',
-  'billing', 'filing', 'mining', 'dining', 'lining', 'timing', 'rating',
-  'listing', 'setting', 'letting', 'sitting', 'putting', 'cutting',
-  'planning', 'beginning', 'winning', 'shipping', 'shopping',
-  'mapping', 'tipping', 'topping', 'popping', 'dropping', 'stopping',
-  'nation', 'station', 'ration', 'fashion', 'mention', 'section', 'action',
-  'option', 'portion', 'caution', 'auction', 'function', 'junction',
-  'condition', 'position', 'addition', 'tradition', 'ambition', 'nutrition',
-  'able', 'table', 'cable', 'stable', 'fable', 'noble', 'bible', 'double', 'trouble',
-  'single', 'simple', 'sample', 'example', 'temple', 'people', 'purple', 'little',
-  'middle', 'bottle', 'battle', 'cattle', 'title', 'gentle', 'subtle', 'bundle',
-  'handle', 'candle', 'noodle', 'needle', 'cradle', 'riddle', 'paddle', 'saddle',
-  'agent', 'parent', 'client', 'patient', 'student', 'resident', 'president',
-  'payment', 'moment', 'comment', 'element', 'segment', 'document', 'argument',
-  'statement', 'apartment', 'department', 'equipment', 'requirement', 'management',
-  'investment', 'government', 'environment', 'development', 'entertainment',
-  'assessment', 'treatment', 'settlement', 'agreement', 'employment', 'adjustment',
-  'replacement', 'improvement', 'achievement', 'announcement', 'advertisement',
-  'ment', 'rent', 'sent', 'went', 'lent', 'bent', 'dent', 'tent', 'cent', 'vent',
-  'ness', 'less', 'mess', 'press', 'dress', 'stress', 'access', 'process', 'success',
-  'address', 'express', 'progress', 'congress', 'business',
-  'fully', 'daily', 'early', 'family', 'only', 'apply', 'supply', 'reply', 'rely',
-  'ally', 'tally', 'rally', 'valley', 'alley', 'volley', 'trolley', 'turkey',
-]);
-const stemCache2 = new Map<string, string>();
-
-function stem(word: string): string {
-  if (word.length < 4) return word;
-  if (stemExceptions.has(word)) return word;
-  if (stemCache2.has(word)) return stemCache2.get(word)!;
-  let result = word;
-  if (result.endsWith('ies') && result.length > 5) result = result.slice(0, -3) + 'y';
-  else if (result.endsWith('ying') && result.length > 5) result = result.slice(0, -4) + 'y';
-  else if (result.endsWith('ation') && result.length > 7) { result = result.slice(0, -5); if (result.endsWith('iz')) result = result.slice(0, -2); }
-  else if (result.endsWith('tion') && result.length > 6) result = result.slice(0, -4);
-  else if (result.endsWith('ment') && result.length > 6 && !stemExceptions.has(word)) result = result.slice(0, -4);
-  else if (result.endsWith('ness') && result.length > 6 && !stemExceptions.has(word)) result = result.slice(0, -4);
-  else if ((result.endsWith('able') || result.endsWith('ible')) && result.length > 6 && !stemExceptions.has(word)) result = result.slice(0, -4);
-  else if (result.endsWith('ful') && result.length > 5) result = result.slice(0, -3);
-  else if (result.endsWith('ly') && result.length > 4 && !stemExceptions.has(word)) result = result.slice(0, -2);
-  else if (result.endsWith('ing') && result.length > 5 && !stemExceptions.has(word)) {
-    const base = result.slice(0, -3);
-    if (base.length <= 4 && base.length >= 3 && base[base.length - 1] === base[base.length - 2] && !/[aeiou]/.test(base[base.length - 1])) result = base.slice(0, -1);
-    else if (base.length >= 3) {
-      const lc = base[base.length - 1];
-      if (lc && !/[aeiou]/.test(lc) && !base.endsWith('ss') && !base.endsWith('ll')) result = base + 'e';
-      else result = base;
-    }
-  }
-  else if (result.endsWith('ed') && result.length > 4 && !stemExceptions.has(word)) {
-    const base = result.slice(0, -2);
-    if (base.length <= 4 && base.length >= 3 && base[base.length - 1] === base[base.length - 2] && !/[aeiou]/.test(base[base.length - 1])) result = base.slice(0, -1);
-    else if (base.length >= 2) result = base;
-  }
-  else if (result.endsWith('er') && result.length > 4 && !stemExceptions.has(word)) {
-    const base = result.slice(0, -2);
-    if (base.length <= 4 && base.length >= 3 && base[base.length - 1] === base[base.length - 2] && !/[aeiou]/.test(base[base.length - 1])) result = base.slice(0, -1);
-    else if (base.length >= 3) {
-      const lc = base[base.length - 1];
-      if (lc && !/[aeiou]/.test(lc) && !base.endsWith('ss') && !base.endsWith('ll')) result = base + 'e';
-      else result = base;
-    }
-  }
-  else if (result.endsWith('est') && result.length > 5) {
-    const base = result.slice(0, -3);
-    if (base.length <= 4 && base.length >= 3 && base[base.length - 1] === base[base.length - 2] && !/[aeiou]/.test(base[base.length - 1])) result = base.slice(0, -1);
-    else if (base.length >= 3) {
-      const lc = base[base.length - 1];
-      if (lc && !/[aeiou]/.test(lc) && !base.endsWith('ss') && !base.endsWith('ll')) result = base + 'e';
-      else result = base;
-    }
-  }
-  if (result.length < 3) result = word;
-  stemCache2.set(word, result);
-  return result;
-}
-
-const misspellingPattern2 = Object.keys(misspellingMap)
-  .sort((a, b) => b.length - a.length)
-  .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
-const misspellingRegex2 = new RegExp(`\\b(${misspellingPattern2})\\b`, 'g');
-
-function normalizeKeyword(keyword: string): string {
-  let normalizedKeyword = keyword.toLowerCase();
-
-  // #7: Fix misspellings first
-  normalizedKeyword = normalizedKeyword.replace(misspellingRegex2, match => misspellingMap[match]);
-
-  // Normalize 24/7 and 24 hour variations
-  normalizedKeyword = normalizedKeyword.replace(/\b24\s*[\/|-]?\s*7\b/g, '24hour');
-  normalizedKeyword = normalizedKeyword.replace(/\b24\s*hours?\b/g, '24hour');
-
-  // #3: Hyphen/spacing normalization
-  normalizedKeyword = normalizedKeyword.replace(prefixPattern, '$1$2');
-  normalizedKeyword = normalizedKeyword.replace(/\be[\s-](mail|commerce|sign)\b/g, 'e$1');
-
-  // #10: Local intent unification
-  normalizedKeyword = normalizedKeyword.replace(localIntentRegex2, 'nearby');
-
-  // 1. Singularize each word FIRST
-  normalizedKeyword = normalizedKeyword
-    .split(/([^a-z0-9]+)/)
-    .map(part => {
-      if (/[^a-z0-9]/.test(part) || part.length === 0) return part;
-      return singularizeWord(part);
-    })
-    .join('');
-
-  // 2. Synonym replacement (now matches singular forms)
-  normalizedKeyword = normalizedKeyword.replace(synonymRegex, match => synonymMap[match]);
-
-  // Remove multi-word locations
-  normalizedKeyword = normalizedKeyword.replace(multiWordLocationsRegex, '');
-
-  // 3. Remove stop words, ignored tokens, single-word countries
-  normalizedKeyword = normalizedKeyword
-    .split(/[^a-z0-9]+/)
-    .filter(t => t.length > 0 && !stopWords.has(t) && !ignoredTokens.has(t) && !countries.has(t))
-    .join(' ');
-
-  // 4. Normalize states
-  normalizedKeyword = normalizedKeyword.replace(stateRegex, match => stateMap[match]);
-
-  // 5. Build signature: split, normalize numbers, stem, deduplicate, sort
-  const tokens = normalizedKeyword.split(/[^a-z0-9]+/);
-  const signature = [...new Set(tokens
-    .filter(t => t.length > 0)
-    .map(t => numberMap[t] || stem(t))
-  )]
-    .sort()
-    .join(' ');
-
-  return signature;
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// TESTS
-// ──────────────────────────────────────────────────────────────────────
+const normalizeKeyword = (keyword: string): string => normalizeKeywordToSignature(keyword.toLowerCase());
 
 describe('Singularize-first pipeline', () => {
 
@@ -220,21 +14,21 @@ describe('Singularize-first pipeline', () => {
       expect(sig1).toBe(sig2);
     });
 
-    it('"businesses" and "agency" should produce the same signature', () => {
+    it('"companies" and "firm" should produce the same signature', () => {
+      const sig1 = normalizeKeyword('companies');
+      const sig2 = normalizeKeyword('firm');
+      expect(sig1).toBe(sig2);
+    });
+
+    it('"businesses" and "agency" should produce different signatures', () => {
       const sig1 = normalizeKeyword('businesses');
       const sig2 = normalizeKeyword('agency');
-      expect(sig1).toBe(sig2);
+      expect(sig1).not.toBe(sig2);
     });
 
     it('"photos" and "image" should produce the same signature', () => {
       const sig1 = normalizeKeyword('photos');
       const sig2 = normalizeKeyword('image');
-      expect(sig1).toBe(sig2);
-    });
-
-    it('"companies" and "firm" should produce the same signature', () => {
-      const sig1 = normalizeKeyword('companies');
-      const sig2 = normalizeKeyword('firm');
       expect(sig1).toBe(sig2);
     });
 
@@ -271,10 +65,10 @@ describe('Singularize-first pipeline', () => {
       expect(sig1).toBe(sig2);
     });
 
-    it('"cheap businesses for sale" and "affordable agency sale" should match', () => {
+    it('"cheap businesses for sale" and "affordable company sale" should match', () => {
       const sig1 = normalizeKeyword('cheap businesses for sale');
-      const sig2 = normalizeKeyword('affordable agency sale');
-      // cheap→affordable, businesses→business→agency, for→stop word, sale→discount
+      const sig2 = normalizeKeyword('affordable company sale');
+      // cheap→affordable, company→business, for→stop word, sale→discount
       expect(sig1).toBe(sig2);
     });
 
@@ -294,9 +88,9 @@ describe('Singularize-first pipeline', () => {
       expect(sig).toBe('attorney');
     });
 
-    it('"business" should still map to "agency"', () => {
+    it('"business" should remain "business"', () => {
       const sig = normalizeKeyword('business');
-      expect(sig).toBe('agency');
+      expect(sig).toBe('business');
     });
 
     it('"photo" should still map to "image"', () => {
@@ -338,6 +132,62 @@ describe('Singularize-first pipeline', () => {
       const sig1 = normalizeKeyword('24 hour service');
       const sig2 = normalizeKeyword('24/7 service');
       expect(sig1).toBe(sig2);
+    });
+
+    it('"24 hr service" should match "24/7 service"', () => {
+      const sig1 = normalizeKeyword('24 hr service');
+      const sig2 = normalizeKeyword('24/7 service');
+      expect(sig1).toBe(sig2);
+    });
+  });
+
+  describe('Compound normalization', () => {
+    it('"sign in" and "signin" should match', () => {
+      expect(normalizeKeyword('sign in')).toBe(normalizeKeyword('signin'));
+    });
+
+    it('"log in" and "login" should match', () => {
+      expect(normalizeKeyword('log in')).toBe(normalizeKeyword('login'));
+    });
+
+    it('"check out" and "checkout" should match', () => {
+      expect(normalizeKeyword('check out')).toBe(normalizeKeyword('checkout'));
+    });
+
+    it('"health care" and "healthcare" should match', () => {
+      expect(normalizeKeyword('health care')).toBe(normalizeKeyword('healthcare'));
+    });
+
+    it('"day care" and "daycare" should match', () => {
+      expect(normalizeKeyword('day care')).toBe(normalizeKeyword('daycare'));
+    });
+  });
+
+  describe('Acronym normalization', () => {
+    it('"faq" and "frequently asked questions" should match', () => {
+      expect(normalizeKeyword('faq')).toBe(normalizeKeyword('frequently asked questions'));
+    });
+
+    it('"crm" and "customer relationship management" should match', () => {
+      expect(normalizeKeyword('crm')).toBe(normalizeKeyword('customer relationship management'));
+    });
+
+    it('"seo" and "search engine optimization" should match', () => {
+      expect(normalizeKeyword('seo')).toBe(normalizeKeyword('search engine optimization'));
+    });
+  });
+
+  describe('Symbol and possessive normalization', () => {
+    it('"womens clinic" and "women\'s clinic" should match', () => {
+      expect(normalizeKeyword('womens clinic')).toBe(normalizeKeyword("women's clinic"));
+    });
+
+    it('"mens shoes" and "men\'s shoes" should match', () => {
+      expect(normalizeKeyword('mens shoes')).toBe(normalizeKeyword("men's shoes"));
+    });
+
+    it('"a & b testing" and "a and b testing" should match', () => {
+      expect(normalizeKeyword('a & b testing')).toBe(normalizeKeyword('a and b testing'));
     });
   });
 
@@ -527,8 +377,8 @@ describe('Singularize-first pipeline', () => {
       expect(normalizeKeyword('local plumber')).toBe(normalizeKeyword('nearby plumber'));
     });
 
-    it('"contractor" and "provider" should match (both → agency)', () => {
-      expect(normalizeKeyword('contractor')).toBe(normalizeKeyword('provider'));
+    it('"contractor" and "provider" should not match', () => {
+      expect(normalizeKeyword('contractor')).not.toBe(normalizeKeyword('provider'));
     });
 
     it('"deal" and "discount" should match', () => {
@@ -571,60 +421,10 @@ describe('Singularize-first pipeline', () => {
 // Foreign Entity Detection Tests
 // ──────────────────────────────────────────────────────────────────────
 
-// Replicate the detection logic from App.tsx
-const citySet2 = new Set<string>();
-(citiesList as string[]).forEach((c: string) => {
-  const normalized = c.toLowerCase().replace(/\./g, '').replace(/[^a-z0-9]+/g, ' ').trim();
-  if (normalized) citySet2.add(normalized);
-});
-
-const foreignCountryPatterns = Array.from(foreignCountries)
-  .sort((a, b) => b.length - a.length)
-  .map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-const foreignCityPatterns = Array.from(foreignCities)
-  .sort((a, b) => b.length - a.length)
-  .map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-const foreignRegex2 = new RegExp(`\\b(${[...foreignCountryPatterns, ...foreignCityPatterns].join('|')})\\b`, 'i');
-
-const ambiguousNames = new Set([
-  'panama', 'grenada', 'mexico', 'peru', 'lebanon', 'jamaica', 'cuba', 'jordan',
-  'turkey', 'china', 'malta', 'chad', 'colombia', 'dominica', 'guinea', 'monaco',
-  'trinidad', 'haiti', 'honduras', 'niger',
-  'london', 'paris', 'melbourne', 'rome', 'amsterdam', 'delhi', 'moscow',
-  'vancouver', 'perth', 'naples', 'florence', 'dublin', 'geneva', 'troy',
-  'lima', 'canton', 'athens', 'ontario', 'kingston', 'hamilton', 'manchester',
-  'plymouth', 'bristol', 'windsor', 'montreal', 'toronto',
-]);
-
-function detectForeignEntity2(keywordLower: string): string | null {
-  const match = keywordLower.match(foreignRegex2);
-  if (!match) return null;
-  const matched = match[1].toLowerCase();
-
-  if (ambiguousNames.has(matched)) {
-    const tokens = keywordLower.split(/[^a-z0-9]+/);
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
-      if (!t || t === matched) continue;
-      if (stateAbbrToFull[t] || stateFullNames.has(t)) return null;
-      if (i < tokens.length - 1 && tokens[i+1]) {
-        const twoWord = `${t} ${tokens[i+1]}`;
-        if (stateFullNames.has(twoWord)) return null;
-      }
-    }
-    for (let i = 0; i < tokens.length; i++) {
-      if (tokens[i] === matched && i < tokens.length - 1) {
-        const combined = `${matched} ${tokens[i+1]}`;
-        if (citySet2.has(combined)) return null;
-      }
-    }
-    if (citySet2.has(matched)) return null;
-  }
-
-  if (matched === 'mexico' && keywordLower.includes('new mexico')) return null;
-
-  return matched;
-}
+const detectForeignEntity2 = (keywordLower: string): string | null => {
+  const match = detectForeignEntity(keywordLower);
+  return match ? match.toLowerCase() : null;
+};
 
 describe('Foreign Entity Detection — Edge Cases', () => {
 

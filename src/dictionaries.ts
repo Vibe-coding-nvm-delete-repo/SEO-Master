@@ -169,16 +169,11 @@ export const synonymMap: Record<string, string> = {
   "retrieve": "obtain",
 
   // Business / Corporate
-  "company": "agency",
-  "firm": "agency",
-  "business": "agency",
-  "corporation": "agency",
-  "enterprise": "agency",
-  "organization": "agency",
-  "provider": "agency",
-  "vendor": "agency",
-  "supplier": "agency",
-  "contractor": "agency",
+  "company": "business",
+  "firm": "business",
+  "corporation": "business",
+  "enterprise": "business",
+  "organization": "business",
 
   // Geography
   "usa": "us",
@@ -594,6 +589,49 @@ export const synonymMap: Record<string, string> = {
   "denial": "deny",
   "denied": "deny",
   "denying": "deny",
+};
+
+// Safe orthographic / phrase-form normalization applied before singularization.
+export const symbolNormalizationMap: Record<string, string> = {
+  '&': ' and ',
+};
+
+// Split-word and punctuation variants that should collapse to one canonical form.
+export const compoundMap: Record<string, string> = {
+  'log in': 'login',
+  'sign in': 'signin',
+  'sign up': 'signup',
+  'check out': 'checkout',
+  'set up': 'setup',
+  'back up': 'backup',
+  'follow up': 'followup',
+  'web site': 'website',
+  'web page': 'webpage',
+  'health care': 'healthcare',
+  'day care': 'daycare',
+  'e mail': 'email',
+};
+
+// Curated acronyms only. Ambiguous acronyms stay out until explicitly approved.
+export const acronymMap: Record<string, string> = {
+  'faq': 'frequently asked questions',
+  'crm': 'customer relationship management',
+  'ppc': 'pay per click',
+  'seo': 'search engine optimization',
+  'ui': 'user interface',
+  'ux': 'user experience',
+};
+
+// Number/format variants that are mechanically equivalent.
+export const numberPhraseMap: Record<string, string> = {
+  '24/7': '24hour',
+  '24-7': '24hour',
+  '24 hr': '24hour',
+  '24 hrs': '24hour',
+  '24hr': '24hour',
+  '24hrs': '24hour',
+  '24 hour': '24hour',
+  '24 hours': '24hour',
 };
 
 // Common misspellings → correct spelling

@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { buildTokenClusters, buildCascadingClusters, countCoveredPages, estimateCost, parseAutoGroupResponse, buildAutoGroupPrompt, applyReconciliationMerges } from './AutoGroupEngine';
+import {
+  applyReconciliationMerges,
+  applyShortGroupAssignments,
+  buildAssignmentCandidates,
+  buildAutoGroupBatchPrompt,
+  buildCosineSummaryPrompt,
+  buildAutoGroupPrompt,
+  buildCascadingClusters,
+  buildSingleTokenSuggestions,
+  buildSuggestionsFromCosineClusters,
+  buildTokenClusters,
+  buildTwoTokenBatchClusters,
+  countCoveredPages,
+  estimateCost,
+  parseAutoGroupBatchResponse,
+  parseCosineSummaryResponse,
+  parseAutoGroupResponse,
+} from './AutoGroupEngine';
 import type { ClusterSummary, AutoGroupCluster, AutoGroupSuggestion, ReconciliationCandidate } from './types';
 
 // Helper to create a mock ClusterSummary
@@ -212,6 +229,128 @@ describe('buildAutoGroupPrompt', () => {
     expect(user).toContain('best home loans'); // Higher volume first
     expect(user).toContain('home loans');
     expect(user).toContain('home, loan');
+  });
+});
+
+describe('buildAutoGroupBatchPrompt', () => {
+  it('builds a strict v1 assignment prompt with batch pages and existing groups', () => {
+    const batch = [
+      makePage('small business loans', ['small', 'business', 'loan'], 5000),
+      makePage('startup business loans', ['startup', 'business', 'loan'], 3000),
+    ];
+    const prompt = buildAutoGroupBatchPrompt({
+      batch,
+      existingGroupNames: ['merchant cash advance', 'business line of credit'],
+    });
+
+    expect(prompt.system.toLowerCase()).toContain('strict seo grouping engine');
+    expect(prompt.user).toContain('P1 | small business loans | vol: 5000');
+    expect(prompt.user).toContain('P2 | startup business loans | vol: 3000');
+    expect(prompt.user).toContain('merchant cash advance');
+    expect(prompt.user).toContain('business line of credit');
+  });
+});
+
+describe('parseAutoGroupBatchResponse', () => {
+  const batch = [
+    makePage('small business loans', ['small', 'business', 'loan'], 5000),
+    makePage('startup business loans', ['startup', 'business', 'loan'], 3000),
+    makePage('equipment financing', ['equipment', 'financing'], 2000),
+  ];
+
+  it('parses valid assignments and preserves existing group targets', () => {
+    const response = JSON.stringify({
+      assignments: [
+        { pageId: 'P1', page: 'small business loans', targetGroupName: 'business financing' },
+        { pageId: 'P2', page: 'startup business loans', targetGroupName: 'small business loans' },
+        { pageId: 'P3', page: 'equipment financing', targetGroupName: 'equipment financing' },
+      ],
+    });
+
+    const parsed = parseAutoGroupBatchResponse(response, batch, ['business financing']);
+    expect(parsed).toEqual([
+      { pageId: 'P1', page: 'small business loans', targetGroupName: 'business financing' },
+      { pageId: 'P2', page: 'startup business loans', targetGroupName: 'small business loans' },
+      { pageId: 'P3', page: 'equipment financing', targetGroupName: 'equipment financing' },
+    ]);
+  });
+
+  it('falls back to self-assignment for invalid or missing targets', () => {
+    const response = JSON.stringify({
+      assignments: [
+        { page: 'small business loans', targetGroupName: 'totally invalid group' },
+      ],
+    });
+
+    const parsed = parseAutoGroupBatchResponse(response, batch, ['business financing']);
+    expect(parsed).toEqual([
+      { pageId: 'P1', page: 'small business loans', targetGroupName: 'small business loans' },
+      { pageId: 'P2', page: 'startup business loans', targetGroupName: 'startup business loans' },
+      { pageId: 'P3', page: 'equipment financing', targetGroupName: 'equipment financing' },
+    ]);
+  });
+
+  it('keeps duplicate display names distinct by pageId', () => {
+    const duplicateBatch = [
+      makePage('micro loans', ['micro', 'loan'], 2000),
+      makePage('micro loans', ['micro', 'loan', 'bad-credit'], 1500),
+    ];
+
+    const response = JSON.stringify({
+      assignments: [
+        { pageId: 'P1', page: 'micro loans', targetGroupName: 'micro loans' },
+        { pageId: 'P2', page: 'micro loans', targetGroupName: 'micro loans' },
+      ],
+    });
+
+    const parsed = parseAutoGroupBatchResponse(response, duplicateBatch, []);
+    expect(parsed).toEqual([
+      { pageId: 'P1', page: 'micro loans', targetGroupName: 'micro loans' },
+      { pageId: 'P2', page: 'micro loans', targetGroupName: 'micro loans' },
+    ]);
+  });
+});
+
+describe('buildCosineSummaryPrompt', () => {
+  it('builds a page-id based summary prompt', () => {
+    const batch = [
+      makePage('micro loans', ['micro', 'loan'], 2000),
+      makePage('business micro loans', ['business', 'micro', 'loan'], 1500),
+    ];
+
+    const prompt = buildCosineSummaryPrompt(batch);
+    expect(prompt.system.toLowerCase()).toContain('strict semantic intent summaries');
+    expect(prompt.user).toContain('P1 | micro loans');
+    expect(prompt.user).toContain('P2 | business micro loans');
+  });
+});
+
+describe('parseCosineSummaryResponse', () => {
+  it('maps summaries back to page order by pageId', () => {
+    const batch = [
+      makePage('micro loans', ['micro', 'loan'], 2000),
+      makePage('business micro loans', ['business', 'micro', 'loan'], 1500),
+    ];
+
+    const response = JSON.stringify({
+      summaries: [
+        { pageId: 'P1', summary: 'Queries about micro loans as a financing product.' },
+        { pageId: 'P2', summary: 'Queries about business-focused micro loans.' },
+      ],
+    });
+
+    expect(parseCosineSummaryResponse(response, batch)).toEqual([
+      'Queries about micro loans as a financing product.',
+      'Queries about business-focused micro loans.',
+    ]);
+  });
+
+  it('falls back to page name when the summary response is invalid', () => {
+    const batch = [
+      makePage('micro loans', ['micro', 'loan'], 2000),
+    ];
+
+    expect(parseCosineSummaryResponse('not json', batch)).toEqual(['micro loans']);
   });
 });
 
@@ -444,5 +583,141 @@ describe('applyReconciliationMerges', () => {
     const suggestions = [makeSuggestion('a', 1000), makeSuggestion('b', 2000)];
     const merged = applyReconciliationMerges(suggestions, []);
     expect(merged.length).toBe(2);
+  });
+});
+
+describe('hybrid auto-group helpers', () => {
+  it('builds 2-token batches only from 2-token pages', () => {
+    const pages = [
+      makePage('car loan', ['car', 'loan'], 4000),
+      makePage('auto loan', ['auto', 'loan'], 3500),
+      makePage('cash advance', ['advance', 'cash'], 3000),
+      makePage('payday loans online', ['loan', 'online', 'payday'], 5000),
+    ];
+
+    const batches = buildTwoTokenBatchClusters(pages, 2);
+    expect(batches).toHaveLength(2);
+    expect(batches.every(batch => batch.pages.every(page => page.tokenArr.length === 2))).toBe(true);
+  });
+
+  it('creates cosine suggestions and tracks unmatched long pages', () => {
+    const pages = [
+      makePage('payday loans online', ['loan', 'online', 'payday'], 5000),
+      makePage('online payday loans', ['loan', 'online', 'payday'], 4500),
+      makePage('mortgage rates today', ['mortgage', 'rates', 'today'], 3000),
+    ];
+
+    const built = buildSuggestionsFromCosineClusters(pages, [
+      { id: 'cos_1', pages: [pages[0], pages[1]] },
+    ]);
+
+    expect(built.suggestions).toHaveLength(1);
+    expect(built.suggestions[0].source).toBe('cosine');
+    expect(built.unmatchedPages.map(page => page.pageName)).toEqual(['mortgage rates today']);
+  });
+
+  it('creates standalone single-token suggestions', () => {
+    const singleToken = [makePage('loans', ['loan'], 10000)];
+    const suggestions = buildSingleTokenSuggestions(singleToken);
+
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].source).toBe('single-token');
+    expect(suggestions[0].groupName).toBe('loans');
+  });
+
+  it('includes strongest lexical candidate first for short-group assignment', () => {
+    const shortGroup: AutoGroupSuggestion = {
+      id: 'short_1',
+      sourceClusterId: 'short_1',
+      groupName: 'payday loans',
+      pages: [makePage('payday loans', ['loan', 'payday'], 6000)],
+      totalVolume: 6000,
+      keywordCount: 10,
+      avgKd: 50,
+      status: 'pending',
+      retryCount: 0,
+      source: 'two-token-llm',
+    };
+    const candidates: AutoGroupSuggestion[] = [
+      {
+        id: 'long_1',
+        sourceClusterId: 'long_1',
+        groupName: 'payday loans online',
+        pages: [makePage('payday loans online', ['loan', 'online', 'payday'], 12000)],
+        totalVolume: 12000,
+        keywordCount: 10,
+        avgKd: 50,
+        status: 'pending',
+        retryCount: 0,
+        source: 'cosine',
+      },
+      {
+        id: 'long_2',
+        sourceClusterId: 'long_2',
+        groupName: 'mortgage rates today',
+        pages: [makePage('mortgage rates today', ['mortgage', 'rates', 'today'], 10000)],
+        totalVolume: 10000,
+        keywordCount: 10,
+        avgKd: 50,
+        status: 'pending',
+        retryCount: 0,
+        source: 'cosine',
+      },
+    ];
+
+    const shortlist = buildAssignmentCandidates(shortGroup, candidates, 2);
+    expect(shortlist[0].groupName).toBe('payday loans online');
+  });
+
+  it('merges assigned short groups into long groups and keeps unassigned short groups', () => {
+    const longGroups: AutoGroupSuggestion[] = [{
+      id: 'long_1',
+      sourceClusterId: 'long_1',
+      groupName: 'payday loans online',
+      pages: [makePage('payday loans online', ['loan', 'online', 'payday'], 12000)],
+      totalVolume: 12000,
+      keywordCount: 10,
+      avgKd: 50,
+      status: 'pending',
+      retryCount: 0,
+      source: 'cosine',
+    }];
+    const shortGroups: AutoGroupSuggestion[] = [
+      {
+        id: 'short_1',
+        sourceClusterId: 'short_1',
+        groupName: 'payday loans',
+        pages: [makePage('payday loans', ['loan', 'payday'], 6000)],
+        totalVolume: 6000,
+        keywordCount: 10,
+        avgKd: 50,
+        status: 'pending',
+        retryCount: 0,
+        source: 'two-token-llm',
+      },
+      {
+        id: 'short_2',
+        sourceClusterId: 'short_2',
+        groupName: 'cash advance',
+        pages: [makePage('cash advance', ['advance', 'cash'], 5500)],
+        totalVolume: 5500,
+        keywordCount: 10,
+        avgKd: 50,
+        status: 'pending',
+        retryCount: 0,
+        source: 'two-token-llm',
+      },
+    ];
+
+    const merged = applyShortGroupAssignments(longGroups, shortGroups, [
+      { shortGroupId: 'short_1', targetGroupId: 'long_1', confidence: 94, reason: 'same intent' },
+      { shortGroupId: 'short_2', targetGroupId: null, confidence: 0, reason: 'no exact match' },
+    ]);
+
+    expect(merged).toHaveLength(2);
+    const paydayGroup = merged.find(group => group.id === 'long_1');
+    const cashAdvanceGroup = merged.find(group => group.id === 'short_2');
+    expect(paydayGroup?.pages).toHaveLength(2);
+    expect(cashAdvanceGroup?.groupName).toBe('cash advance');
   });
 });

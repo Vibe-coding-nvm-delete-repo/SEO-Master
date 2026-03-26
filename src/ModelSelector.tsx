@@ -19,10 +19,6 @@ interface ModelSelectorProps {
   modelFilter?: 'all' | 'embedding' | 'chat';
 }
 
-const LS_MODELS_CACHE_KEY = 'kwg_openrouter_models_cache';
-const LS_MODELS_CACHE_TS = 'kwg_openrouter_models_cache_ts';
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
-
 const formatCost = (perToken: string): string => {
   const price = parseFloat(perToken);
   if (isNaN(price) || price === 0) return 'Free';
@@ -61,18 +57,6 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
   useEffect(() => {
     if (!apiKey || apiKey.length < 10) { setModels([]); return; }
 
-    // Check cache first (separate cache per filter type)
-    const cacheKey = `${LS_MODELS_CACHE_KEY}_${modelFilter}`;
-    const cacheTsKey = `${LS_MODELS_CACHE_TS}_${modelFilter}`;
-    try {
-      const cachedTs = localStorage.getItem(cacheTsKey);
-      const cached = localStorage.getItem(cacheKey);
-      if (cachedTs && cached && Date.now() - parseInt(cachedTs) < CACHE_TTL_MS) {
-        setModels(JSON.parse(cached));
-        return;
-      }
-    } catch {}
-
     let cancelled = false;
     setLoading(true);
     setError('');
@@ -94,11 +78,6 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
         ? allModels.filter(m => !m.id.includes('embed') && !m.name.toLowerCase().includes('embed'))
         : allModels;
       setModels(parsed);
-      // Cache (per filter type)
-      try {
-        localStorage.setItem(cacheKey, JSON.stringify(parsed));
-        localStorage.setItem(cacheTsKey, String(Date.now()));
-      } catch {}
     }).catch(e => {
       if (!cancelled) setError(e.message);
     }).finally(() => {

@@ -19,13 +19,18 @@
 
 ### Select Project
 - Click project card to load its data
-- Loads from IDB first (fast), falls back to Firestore if IDB is empty
-- Caches Firestore data to IDB for next load
+- Loads **IDB + Firestore in parallel**; Firestore leg uses **`getDocsFromServer`** (falls back to cache if offline) so refresh does not merge against a **stale local Firestore cache**. Merges with `pickNewerProjectPayload`: monotonic `lastSaveId`, then `updatedAt`; **ties prefer Firestore**; safety rules when IDB has higher `lastSaveId` but **fewer CSV rows or fewer groups** vs server (legacy `saveId`, or large id gap). Fixes grouped/pages drops and “CSV disappeared” after refresh.
+- If Firestore wins, IDB cache is refreshed from it
 - Restores all state: results, clusters, tokens, groups, blocked keywords, stats
 
 ### Persistence
 - Project metadata: localStorage + Firestore projects/{id} doc
-- Project data: IDB (local cache) + Firestore chunked subcollections (400 rows/doc)
+- Project data: IDB (local cache) + Firestore chunked subcollections (results/clusters/suggestions in ~400 rows/doc; grouped/approved groups in smaller chunks to avoid Firestore 1MB doc limits)
+- Firestore database selection is environment-configurable via `VITE_FIRESTORE_DATABASE_ID`; when unset, the app uses the default Firestore database so startup does not hard-crash with Firestore `NOT_FOUND` (code 5) if a named DB is missing
+- **IndexedDB saves are serialized** with the same queue as Firestore writes (same order as local mutations). Previously IDB used concurrent writes — an older save could finish last and overwrite a newer one, so a refresh showed stale “ungrouped” state.
+- **Coalesced persist flushes:** many rapid mutations (e.g. auto-group spam) set a dirty flag; one async worker loops until quiet, always building the payload from **`latest.current`**. That avoids a deep queue of 50+ full Firestore writes and keeps the server much closer to the UI when the user pauses or refreshes.
+- **Crash-safety IDB checkpoints:** every state mutation now writes an immediate best-effort snapshot to IndexedDB before queued Firestore flushes, and auto-group suggestion edits also checkpoint instantly. This reduces data loss if the tab crashes or reloads before coalesced cloud writes finish.
+- Chunk hydration reconciles `meta` chunk counts with visible chunk docs so mid-save Firestore snapshots cannot drop grouped/approved rows; grouped/approved chunk docs are stamped with `saveId` and hydration rejects snapshots where chunk `saveId` doesn’t match `meta.saveId`
 - Active project ID persisted in localStorage for session restore
 
 ---
@@ -109,6 +114,7 @@
 - Select multiple clusters via checkboxes
 - Enter a group name (auto-populated from highest-volume selected cluster)
 - Click "Group" to create a group
+- "Grouping Progress" now shows a real-time ETA (and measured pages/sec) next to the percent while you’re grouping
 - Groups appear in the Grouped tab
 - Ungrouping: select groups/sub-clusters and ungroup them back to Pages
 
@@ -125,15 +131,18 @@
 ### Sub-tabs
 1. Current — Tokens from currently filtered keyword set
 2. All — All tokens regardless of filters
-3. Blocked — Blocked tokens and their associated keywords
+3. Merge — Merged parent tokens with collapsible child tokens + unmerge controls
+4. Blocked — Blocked tokens and their associated keywords
 
 ### Features
-- Search bar for finding tokens
+- Search bar for finding tokens (supports comma-separated terms, matches any)
 - Sortable columns: Token, Volume, Frequency, KD
 - Bulk select with checkboxes
 - Block/Unblock tokens
 - When a token is blocked, all keywords with that token move to Blocked tab
 - Clusters and groups recalculate after blocking
+- Merge/Unmerge tokens via token merge rules (parent + nested children shown under a collapsible row)
+- Merge search matches both parent tokens and child tokens; if a child matches, its parent row auto-expands
 
 ### Token Display
 - Each token wrapped in a light gray rounded pill/badge
@@ -252,10 +261,73 @@
 
 ---
 
+## 10. Product feedback
+
+### Send feedback (header)
+- **Send feedback** uses **`FeedbackModalHost`**: open/close state lives outside the large **`App`** tree (so **`App` does not re-render** when toggling the dialog), and the modal is rendered via a **React portal** to **`document.body`**. The overlay is a solid dim (**no backdrop blur**); modal buttons and chrome avoid **CSS transition** animations for an instant feel.
+- **Send feedback** button opens a modal: choose **Issue / bug** or **Feature**, then:
+  - **Where in the app** — **required** dropdown grouped by area (Group sub-tabs, Settings segments, Generate 1/2, Feedback queue, header/navigation, cross-cutting sync, etc.). Stored as the sole `tags[]` entry (area id slug).
+  - **Severity** (issues) or **impact** (features) — **required** **1–4** scale with **color ramp** (emerald → amber → orange → red) and short hints on each card.
+  - **Details** — structured questions (not one blob): issues require *what you were trying* + *what went wrong*; *what you expected* and *steps to reproduce* are optional. Features require *problem/need* + *idea*; *anything else* is optional. Composed into the Firestore `body` with labeled sections.
+- Optional **screenshots** (up to **3** images per submission, ~2 MB each, JPEG/PNG/GIF/WebP): stored in **Firebase Storage** under `feedback/{docId}/0..2.ext` (paths match Storage rules). The app **uploads first**, then writes the **Firestore** document **once** with `attachmentUrls`. If anything fails after uploads start, uploaded objects are **deleted** before the user sees an error (no orphan Firestore row with missing photos).
+- If screenshot upload/auth fails (for example Anonymous auth disabled in Firebase), the app now **still saves the feedback text** without images and shows a warning toast, so submit never hard-fails just because images could not upload.
+- **Auth for uploads:** Storage rules require a signed-in user. If the user is not on Google sign-in, the app uses **Firebase Anonymous sign-in** silently before uploading. **Authentication → Sign-in method → Anonymous** must be **enabled** in the Firebase Console for screenshots to work.
+- **Optional hardening:** Set `VITE_FIREBASE_APPCHECK_SITE_KEY` and enable **App Check** in the Firebase Console (reCAPTCHA v3); you can then add App Check conditions to Storage rules per Firebase docs.
+- Description field: Enter submits; Shift+Enter adds a line.
+- Optional Google sign-in email is stored on the entry when the user is signed in.
+
+### Feedback tab
+- Main nav tab **Feedback** opens the **Queue** (live Firestore sync).
+- **Table** columns: row #, type, rating, **Area** (human-readable label from area id), **photos** (thumbnails, link to full image), full feedback body, author, date, **Copy** action, queue controls.
+- Feedback body now shows full text (no 3-line truncation) so reviewers can read all submitted details directly in the queue.
+- Per-row **Copy** button copies a single combined text block (type, rating, area, author, created time, and full feedback body) to clipboard.
+- **Filters:** type (all / issues / features), minimum rating (1+ … 4 only), tag substring, free-text search (body + tags).
+- **Sort** (click column headers): type, rating, date, queue priority, with asc/desc toggle.
+- **Queue** up/down swaps **priority** values in Firestore for that row vs. the row above/below in the **current filtered & sorted** list (two items exchange priority).
+- Footer legend summarizes severity vs. impact scales.
+
+### Persistence
+- **Firestore:** collection `feedback` — fields include `kind`, `body`, `tags[]`, `issueSeverity` (issues) or `featureImpact` (features), `priority`, `createdAt`, `authorEmail`, optional `attachmentUrls[]` (screenshot URLs).
+- **IndexedDB:** cache under key `__feedback__` for fast reload; small metadata in localStorage key `kwg_feedback_meta` (count + timestamp).
+
+### URL routing (main tabs + Group sub-tabs)
+- All routes use the **`/seo-magic`** prefix (product slug). Firebase Hosting rewrites `**` → `index.html`, so every path is a valid SPA entry.
+- **Main tabs**
+  - **Generate** → `/seo-magic/generate`
+  - **Feedback** → `/seo-magic/feedback`
+  - **Feature ideas** → `/seo-magic/feature-ideas` (read-only internal backlog; not persisted)
+  - **Group** area → `/seo-magic/group/...` (see below)
+- **Group sub-tabs** (project list, data workspace, settings, log)
+  - **Projects** (all projects) → `/seo-magic/group/projects`
+  - **Data** (keyword workspace) with no project selected → `/seo-magic/group/data`
+  - **Data** with a project open → `/seo-magic/group/data/{projectUrlKey}` (stable slug from project name + id suffix; replaces legacy `?project=` in the address bar when syncing)
+  - **Settings** (with inner tab in the URL) → `/seo-magic/group/settings/general` | `.../how-it-works` | `.../dictionaries` | `.../blocked`
+  - **Log** → `/seo-magic/group/log`
+  - **Shortcuts** (canonicalized on load): `/seo-magic/log` → `/seo-magic/group/log`; `/seo-magic/settings` → `/seo-magic/group/settings/general`
+- Tab and sub-tab changes use `history.pushState`. **popstate** restores main tab, group sub-tab, and loads the project when the data route includes a key.
+- **Legacy URLs** still work: `/`, `/seo-magic`, `/feedback`, `/generate`, `/feature-ideas` are canonicalized to `/seo-magic/group/projects` or the prefixed main-tab paths. `?project=` is still read on load for migration, then removed when possible.
+
+---
+
 ## Changelog
 
 | Date | Change |
 |------|--------|
+| 2026-03-26 | Feedback queue: show full body text (no truncation) + per-row Copy button for full combined feedback content |
+| 2026-03-26 | Feedback submit resiliency: screenshot upload/auth failures now fall back to saving feedback text-only with warning toast |
+| 2026-03-26 | Feedback submit gate: issue reports no longer require the "what you expected" field; section is now optional in UI/body |
+| 2026-03-25 | **Feature ideas** main tab: read-only backlog + template at `/seo-magic/feature-ideas` (no IDB/Firestore) |
+| 2026-03-25 | Feedback modal: `FeedbackModalHost` (local state + portal to `document.body` so `App` does not re-render on open); overlay without blur; no transition animations on modal chrome |
+| 2026-03-26 | Realtime collaboration correctness: project saveId marker, conditional chunk cleanup, and realtime shared `user_preferences` syncing |
+| 2026-03-26 | Auto-Group: `Shift+1` now requires active filters and supports 1 matching page |
+| 2026-03-25 | Feedback modal ARIA (dialog, fieldsets, labels, radiogroup); queue: legacy rating “—” + sort/filter; firebase.ts module note |
+| 2026-03-25 | Feedback modal: mandatory area dropdown, severity/impact with color ramp, structured Q&A body; queue shows Area column |
+| 2026-03-25 | Feedback screenshots: upload-then-single Firestore write + Storage cleanup on failure; Storage rules (auth + path limits); optional App Check env; anonymous sign-in for uploads; modal file validation outside setState |
+| 2026-03-25 | Feedback modal: up to 3 screenshot attachments (Firebase Storage); queue table shows photo thumbnails |
+| 2026-03-25 | Feedback: tags, 1–4 severity/impact ratings, table with filters and sortable columns |
+| 2026-03-25 | Group routes under `/seo-magic/group/...` (projects, data, settings, log); project-specific data URLs use `/group/data/{projectKey}` |
+| 2026-03-25 | Main tabs sync to URL with history support |
+| 2026-03-25 | Added product feedback: header modal, Feedback tab with prioritized queue, Firestore + IDB + localStorage metadata |
 | 2026-03-21 | Initial FEATURES.md created documenting all existing functionality |
 | 2026-03-21 | Added Generate tab with OpenRouter LLM integration, batch processing, model selector |
 | 2026-03-22 | Added Generate 1 / Generate 2 sub-tabs with fully independent state, settings, and persistence |

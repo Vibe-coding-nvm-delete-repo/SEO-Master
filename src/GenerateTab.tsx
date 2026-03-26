@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { Loader2, Play, Square, Settings, ChevronDown, Search, Check, AlertCircle, X, Trash2, RotateCcw, Copy, Clock, Download, Zap, ScrollText, RefreshCw, Globe, HelpCircle, Star } from 'lucide-react';
 import { db } from './firebase';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 
 // ============ Types ============
 interface GenerateRow {
@@ -53,61 +53,6 @@ interface OpenRouterModel {
   pricing: { prompt: string; completion: string };
   context_length: number;
 }
-
-// ============ IDB helpers for Generate tab ============
-const GEN_IDB_NAME = 'kwg_generate';
-const GEN_IDB_VERSION = 1;
-const GEN_IDB_STORE = 'rows';
-
-const openGenIDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(GEN_IDB_NAME, GEN_IDB_VERSION);
-    request.onupgradeneeded = () => {
-      const idb = request.result;
-      if (!idb.objectStoreNames.contains(GEN_IDB_STORE)) {
-        idb.createObjectStore(GEN_IDB_STORE, { keyPath: 'key' });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-};
-
-const saveRowsToIDB = async (rows: GenerateRow[], suffix = ''): Promise<void> => {
-  try {
-    const idb = await openGenIDB();
-    const tx = idb.transaction(GEN_IDB_STORE, 'readwrite');
-    tx.objectStore(GEN_IDB_STORE).put({ key: `generate_rows${suffix}`, rows });
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    idb.close();
-  } catch (e) {
-    console.warn('Generate IDB save error:', e);
-  }
-};
-
-const loadRowsFromIDB = async (suffix = ''): Promise<GenerateRow[] | null> => {
-  try {
-    const idb = await openGenIDB();
-    const tx = idb.transaction(GEN_IDB_STORE, 'readonly');
-    const request = tx.objectStore(GEN_IDB_STORE).get(`generate_rows${suffix}`);
-    return new Promise((resolve, reject) => {
-      request.onsuccess = () => {
-        idb.close();
-        resolve(request.result?.rows || null);
-      };
-      request.onerror = () => {
-        idb.close();
-        reject(request.error);
-      };
-    });
-  } catch (e) {
-    console.warn('Generate IDB load error:', e);
-    return null;
-  }
-};
 
 const makeEmptyRows = (count: number): GenerateRow[] =>
   Array.from({ length: count }, (_, i) => ({
@@ -254,23 +199,33 @@ const GenerationTimer = React.memo(function GenerationTimer({
 }) {
   const [elapsed, setElapsed] = useState(0);
   const [rate, setRate] = useState(0);
+  const [lastElapsed, setLastElapsed] = useState(0);
 
   useEffect(() => {
     if (!isActive || !startTime) return;
-    setElapsed(Date.now() - startTime);
-    const timer = setInterval(() => {
+    const updateTimerState = () => {
       setElapsed(Date.now() - startTime);
       const now = Date.now();
       const w = completionTimestampsRef.current.filter(t => now - t < 5000);
       setRate(w.length > 0 ? Math.round((w.length / ((now - w[0]) / 1000)) * 10) / 10 : 0);
+    };
+    const kickoff = setTimeout(updateTimerState, 0);
+    const timer = setInterval(() => {
+      updateTimerState();
     }, 250);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(kickoff);
+      clearInterval(timer);
+    };
   }, [isActive, startTime, completionTimestampsRef]);
 
   // Keep final elapsed time visible after generation stops
-  const lastElapsedRef = useRef(0);
-  if (isActive && elapsed > 0) lastElapsedRef.current = elapsed;
-  const displayElapsed = isActive ? elapsed : lastElapsedRef.current;
+  useEffect(() => {
+    if (!(isActive && elapsed > 0)) return;
+    const timer = setTimeout(() => setLastElapsed(elapsed), 0);
+    return () => clearTimeout(timer);
+  }, [isActive, elapsed]);
+  const displayElapsed = isActive ? elapsed : lastElapsed;
 
   if (!isActive && displayElapsed === 0) return null;
 
@@ -315,26 +270,16 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const [genSubTab, setGenSubTab] = useState<'table' | 'log'>('table');
   const logsLoadedRef = useRef(false);
 
-  // Load rows from IDB on mount (then Firestore fallback)
+  // Load rows from Firestore and keep them live-synced
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Try IDB first
-      const idbRows = await loadRowsFromIDB(suffix);
-      if (!cancelled && idbRows && idbRows.length > 0) {
-        // Reset any "generating" status back to pending (stale from interrupted session)
-        setRows(idbRows.map(r => ({ ...r, retries: r.retries || 0, status: r.status === 'generating' ? 'pending' as const : r.status })));
-        setIsLoaded(true);
-        return;
-      }
-      // Firestore fallback — supports both single-doc and chunked formats
+    let alive = true;
+    const unsub = onSnapshot(doc(db, 'app_settings', `generate_rows${suffix}`), async (snap) => {
       try {
-        const snap = await getDoc(doc(db, 'app_settings', `generate_rows${suffix}`));
-        if (!cancelled && snap.exists()) {
+        if (!alive) return;
+        if (snap.exists()) {
           const data = snap.data();
           let loadedRows: GenerateRow[] = [];
           if (data.chunked && data.chunkCount > 0) {
-            // Chunked format — load all chunk docs in parallel
             const chunkPromises = Array.from({ length: data.chunkCount }, (_, i) =>
               getDoc(doc(db, 'app_settings', `generate_rows${suffix}_chunk_${i}`))
             );
@@ -348,16 +293,29 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
           } else if (data.rows && Array.isArray(data.rows)) {
             loadedRows = data.rows;
           }
-          if (loadedRows.length > 0) {
-            setRows(loadedRows.map((r: GenerateRow) => ({ ...r, retries: r.retries || 0, status: r.status === 'generating' ? 'pending' as const : r.status })));
-            // Cache to IDB
-            await saveRowsToIDB(loadedRows, suffix);
-          }
+          if (!alive) return;
+          setRows(
+            loadedRows.length > 0
+              ? loadedRows.map((r: GenerateRow) => ({ ...r, retries: r.retries || 0, status: r.status === 'generating' ? 'pending' as const : r.status }))
+              : makeEmptyRows(20)
+          );
+          lastSavedRowsJsonRef.current = JSON.stringify(loadedRows);
+          setIsLoaded(true);
+          return;
         }
-      } catch {}
-      if (!cancelled) setIsLoaded(true);
-    })();
-    return () => { cancelled = true; };
+      } catch (_error) {
+        // Best-effort local fallback; keep default rows on read failure.
+      }
+      if (alive) {
+        setRows(makeEmptyRows(20));
+        lastSavedRowsJsonRef.current = JSON.stringify([]);
+        setIsLoaded(true);
+      }
+    });
+    return () => {
+      alive = false;
+      if (typeof unsub === 'function') unsub();
+    };
   }, [suffix]);
 
   // Debounced save to IDB + Firestore when rows change (skip initial load)
@@ -372,8 +330,6 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const doSave = useCallback(() => {
     try {
       const rowsToSave = rowsRef.current.filter(r => r.input.trim() || r.output.trim());
-      // Save to IDB (always — fast local cache, no size limit concerns)
-      saveRowsToIDB(rowsRef.current, suffix);
       // Background save to Firestore (skip if unchanged)
       const json = JSON.stringify(rowsToSave);
       if (json === lastSavedRowsJsonRef.current) return;
@@ -390,18 +346,19 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
         for (let i = 0; i < rowsToSave.length; i += CHUNK_SIZE) {
           chunks.push(rowsToSave.slice(i, i + CHUNK_SIZE));
         }
+        const updatedAt = new Date().toISOString();
+        chunks.forEach((chunk, i) => {
+          setDoc(doc(db, 'app_settings', `generate_rows${suffix}_chunk_${i}`), {
+            rows: chunk,
+            updatedAt,
+          }).catch(e => console.warn(`Firestore generate rows chunk ${i} save error:`, e));
+        });
         setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
           chunked: true,
           chunkCount: chunks.length,
           totalRows: rowsToSave.length,
-          updatedAt: new Date().toISOString(),
+          updatedAt,
         }).catch(e => console.warn('Firestore generate rows meta save error:', e));
-        chunks.forEach((chunk, i) => {
-          setDoc(doc(db, 'app_settings', `generate_rows${suffix}_chunk_${i}`), {
-            rows: chunk,
-            updatedAt: new Date().toISOString(),
-          }).catch(e => console.warn(`Firestore generate rows chunk ${i} save error:`, e));
-        });
       } else {
         setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
           rows: rowsToSave,
@@ -433,32 +390,23 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
   }, [rows, isLoaded, suffix, doSave]);
 
-  // Load logs from IDB/Firestore on mount
+  // Load logs from Firestore and keep them live-synced
   useEffect(() => {
-    (async () => {
-      try {
-        const idb = await openGenIDB();
-        const tx = idb.transaction(GEN_IDB_STORE, 'readonly');
-        const req = tx.objectStore(GEN_IDB_STORE).get(`generate_logs${suffix}`);
-        req.onsuccess = () => {
-          idb.close();
-          if (req.result?.logs) {
-            setLogs(req.result.logs);
-            logsLoadedRef.current = true;
-          } else {
-            // Firestore fallback
-            getDoc(doc(db, 'app_settings', `generate_logs${suffix}`)).then(snap => {
-              const logData = snap.exists() ? snap.data() : null;
-              if (logData?.logs && Array.isArray(logData.logs)) {
-                setLogs(logData.logs);
-              }
-              logsLoadedRef.current = true;
-            }).catch(() => { logsLoadedRef.current = true; });
-          }
-        };
-        req.onerror = () => { idb.close(); logsLoadedRef.current = true; };
-      } catch { logsLoadedRef.current = true; }
-    })();
+    const unsub = onSnapshot(doc(db, 'app_settings', `generate_logs${suffix}`), (snap) => {
+      if (snap.exists()) {
+        const logData = snap.data();
+        if (logData?.logs && Array.isArray(logData.logs)) {
+          setLogs(logData.logs);
+          logsLoadedRef.current = true;
+          return;
+        }
+      }
+      setLogs([]);
+      logsLoadedRef.current = true;
+    }, () => {
+      logsLoadedRef.current = true;
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, [suffix]);
 
   // Save logs when they change
@@ -469,13 +417,6 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     logSaveTimerRef.current = setTimeout(async () => {
       // Keep only last 500 log entries
       const trimmed = logs.slice(-500);
-      try {
-        const idb = await openGenIDB();
-        const tx = idb.transaction(GEN_IDB_STORE, 'readwrite');
-        tx.objectStore(GEN_IDB_STORE).put({ key: `generate_logs${suffix}`, logs: trimmed });
-        await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(); });
-        idb.close();
-      } catch {}
       setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), { logs: trimmed, updatedAt: new Date().toISOString() }).catch(() => {});
     }, 1000);
     return () => { if (logSaveTimerRef.current) clearTimeout(logSaveTimerRef.current); };
@@ -487,12 +428,16 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   }, []);
 
   // Settings state
-  const [settings, setSettings] = useState<GenerateSettings>(() => {
-    try {
-      const saved = localStorage.getItem(`kwg_generate_settings${suffix}`);
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return { apiKey: '', selectedModel: '', rateLimit: 10, minLen: 0, maxLen: 0, maxRetries: 3, temperature: 1.0, maxTokens: 0, webSearch: false };
+  const [settings, setSettings] = useState<GenerateSettings>({
+    apiKey: '',
+    selectedModel: '',
+    rateLimit: 10,
+    minLen: 0,
+    maxLen: 0,
+    maxRetries: 3,
+    temperature: 1.0,
+    maxTokens: 0,
+    webSearch: false,
   });
   const [showSettings, setShowSettings] = useState(false);
   const [models, setModels] = useState<OpenRouterModel[]>([]);
@@ -502,6 +447,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const [modelSort, setModelSort] = useState<'name' | 'price-asc' | 'price-desc'>('name');
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const settingsLoadedRef = useRef(false);
 
   // Live rateLimit ref — workers read this to dynamically scale concurrency mid-generation
   const rateLimitRef = useRef(settings.rateLimit);
@@ -670,28 +616,40 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     addLog('export', `Exported ${dataRows.length} rows to CSV`);
   }, [addLog]);
 
-  // Persist settings to localStorage + Firestore (debounced, skip if unchanged from last save/load)
-  const lastSavedSettingsRef = useRef<string>(JSON.stringify(settings));
+  const toSharedGenerateSettings = useCallback((value: GenerateSettings) => ({
+    apiKey: value.apiKey,
+    selectedModel: value.selectedModel,
+    rateLimit: value.rateLimit,
+    minLen: value.minLen,
+    maxLen: value.maxLen,
+    maxRetries: value.maxRetries,
+    temperature: value.temperature,
+    maxTokens: value.maxTokens,
+    webSearch: value.webSearch,
+  }), []);
+
+  // Persist settings to Firestore (debounced, skip if unchanged from last save/load)
+  const lastSavedSettingsRef = useRef<string>(JSON.stringify(toSharedGenerateSettings(settings)));
   const settingsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    const json = JSON.stringify(settings);
-    localStorage.setItem(`kwg_generate_settings${suffix}`, json);
+    if (!settingsLoadedRef.current) return;
     // Skip Firestore write if settings haven't actually changed (prevents write-on-load cycle)
+    const json = JSON.stringify(toSharedGenerateSettings(settings));
     if (json === lastSavedSettingsRef.current) return;
     lastSavedSettingsRef.current = json;
     if (settingsSaveTimerRef.current) clearTimeout(settingsSaveTimerRef.current);
     settingsSaveTimerRef.current = setTimeout(() => {
       setDoc(doc(db, 'app_settings', `generate_settings${suffix}`), {
-        ...settings,
+        ...toSharedGenerateSettings(settings),
         updatedAt: new Date().toISOString(),
       }).catch(e => console.warn('Firestore generate settings save error:', e));
     }, 500);
     return () => { if (settingsSaveTimerRef.current) clearTimeout(settingsSaveTimerRef.current); };
-  }, [settings, suffix]);
+  }, [settings, suffix, toSharedGenerateSettings]);
 
-  // Load settings from Firestore on mount
+  // Load settings from Firestore and keep them live-synced
   useEffect(() => {
-    getDoc(doc(db, 'app_settings', `generate_settings${suffix}`)).then(snap => {
+    const unsub = onSnapshot(doc(db, 'app_settings', `generate_settings${suffix}`), (snap) => {
       if (snap.exists()) {
         const data = snap.data();
         const fsSettings: GenerateSettings = {
@@ -705,13 +663,30 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
           maxTokens: data.maxTokens || 0,
           webSearch: data.webSearch ?? false,
         };
-        // Update ref BEFORE setSettings so the save effect sees them as unchanged
-        lastSavedSettingsRef.current = JSON.stringify(fsSettings);
+        lastSavedSettingsRef.current = JSON.stringify(toSharedGenerateSettings(fsSettings));
         setSettings(fsSettings);
-        localStorage.setItem(`kwg_generate_settings${suffix}`, JSON.stringify(fsSettings));
+        settingsLoadedRef.current = true;
+        return;
       }
-    }).catch(() => {});
-  }, [suffix]);
+      const defaultSettings: GenerateSettings = {
+        apiKey: '',
+        selectedModel: '',
+        rateLimit: 10,
+        minLen: 0,
+        maxLen: 0,
+        maxRetries: 3,
+        temperature: 1.0,
+        maxTokens: 0,
+        webSearch: false,
+      };
+      lastSavedSettingsRef.current = JSON.stringify(toSharedGenerateSettings(defaultSettings));
+      setSettings(defaultSettings);
+      settingsLoadedRef.current = true;
+    }, () => {
+      settingsLoadedRef.current = true;
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, [suffix, toSharedGenerateSettings]);
 
   // Close model dropdown on outside click — only listen when dropdown is actually open
   useEffect(() => {
@@ -744,8 +719,6 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      // IDB save for rows (best-effort)
-      saveRowsToIDB(rowsRef.current, suffix);
       // Firestore save for rows (fire-and-forget)
       const rowsToSave = rowsRef.current.filter(r => r.input.trim() || r.output.trim());
       const json = JSON.stringify(rowsToSave);
@@ -764,12 +737,6 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       // Save logs (best-effort)
       if (logsLoadedRef.current && logsRef.current.length > 0) {
         const trimmed = logsRef.current.slice(-500);
-        openGenIDB().then(idb => {
-          const tx = idb.transaction(GEN_IDB_STORE, 'readwrite');
-          tx.objectStore(GEN_IDB_STORE).put({ key: `generate_logs${suffix}`, logs: trimmed });
-          tx.oncomplete = () => idb.close();
-          tx.onerror = () => idb.close();
-        }).catch(() => {});
         setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), {
           logs: trimmed,
           updatedAt: new Date().toISOString(),
@@ -841,7 +808,9 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       // data.data.total_credits and data.data.total_usage in USD
       const remaining = (data.data?.total_credits ?? 0) - (data.data?.total_usage ?? 0);
       setBalance(remaining);
-    } catch {}
+    } catch (_error) {
+      // Ignore balance fetch failures to avoid noisy UI errors.
+    }
     setBalanceLoading(false);
   }, [settings.apiKey]);
 
@@ -1923,39 +1892,37 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
 
 // ============ Wrapper with sub-tabs ============
 export default function GenerateTab() {
-  // Use ref for instant reads + state only when needed for render
-  const getInitialTab = (): '1' | '2' => {
-    try {
-      const saved = localStorage.getItem('kwg_generate_active_subtab');
-      if (saved === '1' || saved === '2') return saved;
-    } catch {}
-    return '1';
-  };
-  const [activeSubTab, setActiveSubTab] = useState<'1' | '2'>(getInitialTab);
+  const [activeSubTab, setActiveSubTab] = useState<'1' | '2'>('1');
   const tabRef = useRef(activeSubTab);
   const [gen2Activated, setGen2Activated] = useState(() => activeSubTab === '2');
 
-  // Starred models — shared across both instances, persisted to localStorage + Firestore
-  const [starredModels, setStarredModels] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem('kwg_starred_models');
-      if (saved) return new Set(JSON.parse(saved));
-    } catch {}
-    return new Set();
-  });
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'app_settings', 'generate_active_subtab'), (snap) => {
+      if (!snap.exists()) return;
+      const tab = snap.data()?.tab;
+      if (tab === '1' || tab === '2') {
+        tabRef.current = tab;
+        setActiveSubTab(tab);
+        if (tab === '2') setGen2Activated(true);
+      }
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, []);
+
+  // Starred models — shared across both instances, persisted to Firestore
+  const [starredModels, setStarredModels] = useState<Set<string>>(() => new Set());
   const starredLoadedRef = useRef(false);
 
-  // Load from Firestore on mount (overrides localStorage if newer)
+  // Load from Firestore and keep it live-synced
   useEffect(() => {
-    getDoc(doc(db, 'app_settings', 'starred_models')).then(snap => {
-      if (snap.exists()) {
-        const ids: string[] = snap.data().ids || [];
-        const fsSet = new Set(ids);
-        setStarredModels(fsSet);
-        localStorage.setItem('kwg_starred_models', JSON.stringify(ids));
-      }
+    const unsub = onSnapshot(doc(db, 'app_settings', 'starred_models'), (snap) => {
+      const ids: string[] = snap.exists() ? (snap.data().ids || []) : [];
+      setStarredModels(new Set(ids));
       starredLoadedRef.current = true;
-    }).catch(() => { starredLoadedRef.current = true; });
+    }, () => {
+      starredLoadedRef.current = true;
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
 
   const toggleStarModel = useCallback((modelId: string) => {
@@ -1964,18 +1931,19 @@ export default function GenerateTab() {
       if (next.has(modelId)) next.delete(modelId);
       else next.add(modelId);
       const arr = [...next];
-      localStorage.setItem('kwg_starred_models', JSON.stringify(arr));
       // Persist to Firestore in background
       setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch(() => {});
       return next;
     });
   }, []);
 
-  // Inline localStorage write — no useEffect overhead
   const switchTab = useCallback((tab: '1' | '2') => {
     if (tabRef.current === tab) return; // Already on this tab — skip entirely
     tabRef.current = tab;
-    localStorage.setItem('kwg_generate_active_subtab', tab);
+    setDoc(doc(db, 'app_settings', 'generate_active_subtab'), {
+      tab,
+      updatedAt: new Date().toISOString(),
+    }).catch(() => {});
     if (tab === '2') setGen2Activated(true);
     setActiveSubTab(tab);
   }, []);

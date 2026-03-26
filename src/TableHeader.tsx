@@ -3,6 +3,8 @@ import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import type { ColumnDef } from './tableConstants';
 import { CELL } from './tableConstants';
 import LabelFilterDropdown from './LabelFilterDropdown';
+import { db } from './firebase';
+import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
 
 export interface FilterBag {
   minLen: string; setMinLen: (v: string) => void;
@@ -33,20 +35,7 @@ interface TableHeaderProps {
   setCurrentPage: (page: number) => void;
 }
 
-const LS_KEY = 'kwg_col_widths';
-
-// Load persisted widths from localStorage
-const loadWidths = (): Record<string, number> => {
-  try {
-    const saved = localStorage.getItem(LS_KEY);
-    return saved ? JSON.parse(saved) : {};
-  } catch { return {}; }
-};
-
-// Save widths to localStorage
-const saveWidths = (widths: Record<string, number>) => {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(widths)); } catch {}
-};
+const WIDTHS_DOC = 'table_column_widths';
 
 // Map filterKey → [getter, setter] pairs in FilterBag
 const getFilterPair = (filters: FilterBag, filterKey: string): { min: string; setMin: (v: string) => void; max: string; setMax: (v: string) => void } | null => {
@@ -93,13 +82,26 @@ const TableHeader = React.memo(({
   columns, showCheckbox, allChecked, onCheckAll, sortKey, sortDirection, sortStack, onSort, filters, setCurrentPage,
 }: TableHeaderProps) => {
   const showFilterRow = hasFilters(columns);
-  const [colWidths, setColWidths] = useState<Record<string, number>>(loadWidths);
+  const [colWidths, setColWidths] = useState<Record<string, number>>({});
   const dragRef = useRef<{ colKey: string; startX: number; startWidth: number } | null>(null);
   const thRefs = useRef<Map<string, HTMLTableCellElement>>(new Map());
 
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'app_settings', WIDTHS_DOC), (snap) => {
+      if (!snap.exists()) return;
+      const widths = snap.data()?.widths;
+      if (widths && typeof widths === 'object') setColWidths(widths as Record<string, number>);
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, []);
+
   // Persist on change
   useEffect(() => {
-    if (Object.keys(colWidths).length > 0) saveWidths(colWidths);
+    if (Object.keys(colWidths).length === 0) return;
+    setDoc(doc(db, 'app_settings', WIDTHS_DOC), {
+      widths: colWidths,
+      updatedAt: new Date().toISOString(),
+    }).catch(() => {});
   }, [colWidths]);
 
   const onMouseDown = useCallback((e: React.MouseEvent, colKey: string) => {

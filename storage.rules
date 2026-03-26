@@ -1,0 +1,25 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Feedback screenshots (see src/feedbackStorage.ts): upload-then-setDoc, paths feedback/{firestoreAutoId}/{0|1|2}.ext
+    match /feedback/{feedbackId}/{fileName} {
+      allow read: if true;
+
+      allow create: if request.auth != null
+        && request.resource != null
+        && request.resource.size < 3 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*')
+        && feedbackId.matches('^[a-zA-Z0-9]{20}$')
+        && fileName.matches('^[0-2]\\.(jpg|jpeg|png|gif|webp)$');
+
+      allow delete: if request.auth != null
+        && feedbackId.matches('^[a-zA-Z0-9]{20}$')
+        && fileName.matches('^[0-2]\\.(jpg|jpeg|png|gif|webp)$');
+    }
+
+    // Deny everything else (same intent as Firebase’s default “lock down” starter).
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -184,10 +184,16 @@ export async function processReviewQueue(
 
       const result = await reviewSingleGroup(request, config, signal);
 
-      if (signal.aborted) return;
-
       if ('error' in result) {
-        if (result.error === '__aborted__') return;
+        if (result.error === '__aborted__') {
+          // Must notify — otherwise UI stays on 'reviewing' forever (no onResult/onError).
+          callbacks.onError({
+            groupId: request.groupId,
+            error: 'Aborted',
+            durationMs: result.durationMs ?? 0,
+          });
+          return;
+        }
         callbacks.onError(result);
       } else {
         callbacks.onResult(result);
@@ -195,7 +201,9 @@ export async function processReviewQueue(
     }
   };
 
-  const workerCount = Math.min(config.concurrency, queue.length);
+  // concurrency 0 would spawn zero workers and leave every group stuck in 'reviewing'
+  const workerCount =
+    queue.length === 0 ? 0 : Math.max(1, Math.min(config.concurrency || 1, queue.length));
   const workers = Array.from({ length: workerCount }, () => processNext());
   await Promise.all(workers);
 }

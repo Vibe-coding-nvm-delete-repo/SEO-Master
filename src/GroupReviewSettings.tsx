@@ -1,10 +1,10 @@
 // GroupReviewSettings.tsx — Settings panel for AI group review
-// Separate settings from Generate tab. Persists to localStorage + Firestore.
+// Shared settings live in Firestore.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, useImperativeHandle, forwardRef } from 'react';
 import { Settings, Star, Check, ChevronDown, Search, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { db } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { DEFAULT_SYSTEM_PROMPT } from './GroupReviewEngine';
 import { DEFAULT_AUTO_GROUP_PROMPT } from './AutoGroupEngine';
 
@@ -36,9 +36,33 @@ export interface GroupReviewSettingsRef {
 }
 
 // ============ Storage keys ============
-const LS_KEY = 'kwg_group_review_settings';
 const FS_DOC = 'group_review_settings';
-const STARRED_LS_KEY = 'kwg_starred_models'; // shared with Generate tab
+const LS_SETTINGS_KEY = 'kwg_group_review_settings';
+
+const toSharedSettings = (settings: GroupReviewSettingsData) => ({
+  apiKey: settings.apiKey,
+  selectedModel: settings.selectedModel,
+  concurrency: settings.concurrency,
+  temperature: settings.temperature,
+  maxTokens: settings.maxTokens,
+  systemPrompt: settings.systemPrompt,
+  autoGroupPrompt: settings.autoGroupPrompt,
+  reasoningEffort: settings.reasoningEffort,
+});
+
+const HelpLabel = ({ label, help, trailing }: { label: string; help: string; trailing?: React.ReactNode }) => (
+  <div className="flex items-center gap-1 mb-1">
+    <label className="block text-[10px] font-medium text-zinc-500">{label}</label>
+    <span
+      className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-zinc-300 px-1 text-[9px] font-semibold text-zinc-500 cursor-help"
+      title={help}
+      aria-label={`${label} help: ${help}`}
+    >
+      ?
+    </span>
+    {trailing}
+  </div>
+);
 
 // ============ Component ============
 
@@ -47,13 +71,28 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   onToggle: () => void;
   starredModels: Set<string>;
   onToggleStar: (modelId: string) => void;
-}>(({ isOpen, onToggle, starredModels, onToggleStar }, ref) => {
+  onSettingsChange?: (settings: GroupReviewSettingsData) => void;
+  onHydratedChange?: (hydrated: boolean) => void;
+}>(({ isOpen, onToggle, starredModels, onToggleStar, onSettingsChange, onHydratedChange }, ref) => {
   // Settings state
   const [settings, setSettings] = useState<GroupReviewSettingsData>(() => {
+    // Hydrate from localStorage immediately (sync) so API key is available before Firestore loads
     try {
-      const saved = localStorage.getItem(LS_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch {}
+      const cached = localStorage.getItem(LS_SETTINGS_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        return {
+          apiKey: parsed.apiKey || '',
+          selectedModel: parsed.selectedModel || '',
+          concurrency: parsed.concurrency ?? 5,
+          temperature: parsed.temperature ?? 0.3,
+          maxTokens: parsed.maxTokens ?? 0,
+          systemPrompt: parsed.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+          autoGroupPrompt: parsed.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+          reasoningEffort: parsed.reasoningEffort || 'none',
+        };
+      }
+    } catch { /* ignore parse errors */ }
     return {
       apiKey: '',
       selectedModel: '',
@@ -73,10 +112,9 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   const [modelSort, setModelSort] = useState<'name' | 'price-asc' | 'price-desc'>('name');
   const [showApiKey, setShowApiKey] = useState(false);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [hasHydratedSharedSettings, setHasHydratedSharedSettings] = useState(false);
 
-  // Save debounce
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSavedRef = useRef(JSON.stringify(settings));
+  const lastSharedSavedRef = useRef(JSON.stringify(toSharedSettings(settings)));
 
   // Expose settings to parent via ref
   const selectedModelObj = useMemo(() => models.find(m => m.id === settings.selectedModel), [models, settings.selectedModel]);
@@ -88,45 +126,86 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
     updateSettings: (newSettings: GroupReviewSettingsData) => setSettings(newSettings),
   }), [settings, selectedModelObj]);
 
-  // Persist settings — localStorage immediate + Firestore debounced
   useEffect(() => {
-    const json = JSON.stringify(settings);
-    if (json === lastSavedRef.current) return;
-    lastSavedRef.current = json;
+    onSettingsChange?.(settings);
+  }, [onSettingsChange, settings]);
 
-    // localStorage immediate
-    try { localStorage.setItem(LS_KEY, json); } catch {}
+  useEffect(() => {
+    onHydratedChange?.(hasHydratedSharedSettings);
+  }, [hasHydratedSharedSettings, onHydratedChange]);
 
-    // Firestore debounced
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      setDoc(doc(db, 'app_settings', FS_DOC), {
-        ...settings,
-        updatedAt: new Date().toISOString(),
-      }).catch(e => console.warn('Firestore group review settings save error:', e));
-    }, 1000);
+  // Persist shared settings to Firestore + localStorage
+  useEffect(() => {
+    const shared = toSharedSettings(settings);
+    const json = JSON.stringify(shared);
+    if (json === lastSharedSavedRef.current) return;
+    lastSharedSavedRef.current = json;
+    // Always save to localStorage (sync, reliable, offline-capable)
+    try { localStorage.setItem(LS_SETTINGS_KEY, json); } catch { /* quota */ }
+    // Also persist to Firestore (cloud sync)
+    setDoc(doc(db, 'app_settings', FS_DOC), {
+      ...shared,
+      updatedAt: new Date().toISOString(),
+    }).catch(e => console.warn('Firestore group review settings save error:', e));
   }, [settings]);
 
-  // Load from Firestore on mount (override localStorage if Firestore has data)
+  // Load shared settings from Firestore on mount
   useEffect(() => {
-    getDoc(doc(db, 'app_settings', FS_DOC)).then(snap => {
-      if (snap.exists()) {
-        const data = snap.data();
-        const fsSettings: GroupReviewSettingsData = {
-          apiKey: data.apiKey || '',
-          selectedModel: data.selectedModel || '',
-          concurrency: data.concurrency || 5,
-          temperature: data.temperature ?? 0.3,
-          maxTokens: data.maxTokens || 0,
-          systemPrompt: data.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-          autoGroupPrompt: data.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
-          reasoningEffort: data.reasoningEffort || 'none',
+    const unsub = onSnapshot(doc(db, 'app_settings', FS_DOC), (snap) => {
+      const remote = snap.exists() ? snap.data() : null;
+      setSettings(prev => {
+        const merged: GroupReviewSettingsData = {
+          apiKey: remote?.apiKey || '',
+          selectedModel: remote?.selectedModel || '',
+          concurrency: remote?.concurrency ?? 5,
+          temperature: remote?.temperature ?? 0.3,
+          maxTokens: remote?.maxTokens ?? 0,
+          systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+          autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+          reasoningEffort: remote?.reasoningEffort || 'none',
         };
-        lastSavedRef.current = JSON.stringify(fsSettings);
-        setSettings(fsSettings);
-        try { localStorage.setItem(LS_KEY, JSON.stringify(fsSettings)); } catch {}
+
+        const mergedSharedJson = JSON.stringify(toSharedSettings(merged));
+        lastSharedSavedRef.current = mergedSharedJson;
+
+        const remoteSharedJson = JSON.stringify({
+          apiKey: remote?.apiKey || '',
+          selectedModel: remote?.selectedModel || '',
+          concurrency: remote?.concurrency ?? 5,
+          temperature: remote?.temperature ?? 0.3,
+          maxTokens: remote?.maxTokens ?? 0,
+          systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+          autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+          reasoningEffort: remote?.reasoningEffort || 'none',
+        });
+
+        if (mergedSharedJson !== remoteSharedJson) {
+          setDoc(doc(db, 'app_settings', FS_DOC), {
+            ...toSharedSettings(merged),
+            updatedAt: new Date().toISOString(),
+          }).catch(e => console.warn('Firestore group review settings backfill error:', e));
+        }
+
+        return merged;
+      });
+      // Cache remote settings to localStorage so next load is instant
+      if (remote) {
+        try { localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(toSharedSettings({
+          apiKey: remote.apiKey || '',
+          selectedModel: remote.selectedModel || '',
+          concurrency: remote.concurrency ?? 5,
+          temperature: remote.temperature ?? 0.3,
+          maxTokens: remote.maxTokens ?? 0,
+          systemPrompt: remote.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+          autoGroupPrompt: remote.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+          reasoningEffort: remote.reasoningEffort || 'none',
+        }))); } catch { /* quota */ }
       }
-    }).catch(() => {});
+      setHasHydratedSharedSettings(true);
+    }, () => {
+      setHasHydratedSharedSettings(true);
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
 
   // Fetch models when API key changes
@@ -154,7 +233,11 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   }, [settings.apiKey]);
 
   useEffect(() => {
-    if (settings.apiKey.trim().length > 10) fetchModels();
+    if (settings.apiKey.trim().length <= 10) return;
+    const timer = setTimeout(() => {
+      void fetchModels();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [settings.apiKey, fetchModels]);
 
   // Filtered + sorted models
@@ -184,11 +267,19 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         <button onClick={onToggle} className="text-zinc-400 hover:text-zinc-600 text-xs">Close</button>
       </div>
 
+      <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-[11px] text-zinc-700">
+        <span className="font-semibold text-zinc-800">Prompt usage in this workflow:</span>{' '}
+        <span><span className="font-medium">Auto-Group Prompt</span> is used first when you click <span className="font-medium">Auto Group</span> in Pages/Ungrouped. <span className="font-medium">Review Prompt</span> is used later for QA/review of groups that already exist.</span>
+      </div>
+
       {/* Row 1: API Key + Model + Concurrency */}
       <div className="grid grid-cols-3 gap-3">
         {/* API Key */}
         <div>
-          <label className="block text-[10px] font-medium text-zinc-500 mb-1">API Key</label>
+          <HelpLabel
+            label="API Key"
+            help="Shared OpenRouter API key used for Auto Group, Review, QA, Cosine summaries, and other AI actions in this project."
+          />
           <div className="relative">
             <input
               type={showApiKey ? 'text' : 'password'}
@@ -208,7 +299,11 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
 
         {/* Model Dropdown */}
         <div>
-          <label className="block text-[10px] font-medium text-zinc-500 mb-1">Model {isFetchingModels && <Loader2 className="w-3 h-3 animate-spin inline ml-1" />}</label>
+          <HelpLabel
+            label="Model"
+            help="The AI model used for this project's grouping and review calls. Faster models reduce latency; stronger models usually improve grouping accuracy."
+            trailing={isFetchingModels ? <Loader2 className="w-3 h-3 animate-spin text-zinc-400" /> : null}
+          />
           <div className="relative">
             <button
               onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
@@ -283,11 +378,14 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
 
         {/* Concurrency */}
         <div>
-          <label className="block text-[10px] font-medium text-zinc-500 mb-1">Concurrency ({settings.concurrency})</label>
+          <HelpLabel
+            label={`Concurrency (${settings.concurrency})`}
+            help="How many supported AI jobs can run in parallel. This mainly affects review/QA and summary queues. It does not speed up strictly sequential workflows."
+          />
           <input
             type="range"
             min={1}
-            max={100}
+            max={250}
             value={settings.concurrency}
             onChange={(e) => setSettings(prev => ({ ...prev, concurrency: parseInt(e.target.value) }))}
             className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
@@ -298,7 +396,10 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
       {/* Row 2: Temperature + Max Tokens + Reasoning */}
       <div className="grid grid-cols-3 gap-3">
         <div>
-          <label className="block text-[10px] font-medium text-zinc-500 mb-1">Temperature ({settings.temperature})</label>
+          <HelpLabel
+            label={`Temperature (${settings.temperature})`}
+            help="Controls output variation. Lower values are more deterministic and usually better for strict grouping and JSON output."
+          />
           <input
             type="range"
             min={0}
@@ -309,7 +410,10 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           />
         </div>
         <div>
-          <label className="block text-[10px] font-medium text-zinc-500 mb-1">Max Tokens (0 = auto)</label>
+          <HelpLabel
+            label="Max Tokens (0 = auto)"
+            help="Maximum completion length for the model response. Leave at 0 to let the provider choose automatically."
+          />
           <input
             type="number"
             value={settings.maxTokens}
@@ -318,7 +422,10 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           />
         </div>
         <div>
-          <label className="block text-[10px] font-medium text-zinc-500 mb-1">Reasoning ({settings.reasoningEffort})</label>
+          <HelpLabel
+            label={`Reasoning (${settings.reasoningEffort})`}
+            help="Extra reasoning effort for models that support it. Higher values can improve quality but usually make runs slower and more expensive."
+          />
           <select
             value={settings.reasoningEffort}
             onChange={(e) => setSettings(prev => ({ ...prev, reasoningEffort: e.target.value as GroupReviewSettingsData['reasoningEffort'] }))}
@@ -334,7 +441,10 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
 
       {/* Row 3: System Prompt */}
       <div>
-        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Review Prompt</label>
+        <HelpLabel
+          label="Review Prompt"
+          help="Used for QA and review after groups already exist. It decides whether pages inside a group still belong there or should be marked mismatches."
+        />
         <textarea
           value={settings.systemPrompt}
           onChange={(e) => setSettings(prev => ({ ...prev, systemPrompt: e.target.value }))}
@@ -354,7 +464,10 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
 
       {/* Row 4: Auto-Group Prompt */}
       <div>
-        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Auto-Group Prompt</label>
+        <HelpLabel
+          label="Auto-Group Prompt"
+          help="Used when you click Auto Group from Pages/Ungrouped. It tells the model how to partition the current filtered pages into one or more semantic groups."
+        />
         <textarea
           value={settings.autoGroupPrompt}
           onChange={(e) => setSettings(prev => ({ ...prev, autoGroupPrompt: e.target.value }))}
