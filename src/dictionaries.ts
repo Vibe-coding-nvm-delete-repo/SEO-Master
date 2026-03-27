@@ -757,20 +757,22 @@ export const misspellingMap: Record<string, string> = {
 
 export const stopWords = new Set([
   "a", "an", "the", "is", "are", "am", "was", "were", "be", "been", "being",
-  "in", "on", "at", "to", "for", "of", "with", "by", "about", "as", "into",
+  "in", "on", "at", "to", "for", "of", "by", "about", "as", "into",
   "like", "through", "after", "over", "between", "out", "against", "during",
-  "without", "before", "under", "around", "among", "and", "or", "but", "if",
+  "before", "under", "around", "among", "and", "or", "but", "if",
   "because", "until", "while", "above", "below", "from", "up", "down", "off",
   "again", "further", "then", "once", "here", "there",
   "all", "any", "both", "each", "few", "more", "most", "other", "some",
-  "such", "no", "nor", "not", "only", "own", "so", "than", "too", "very",
+  "such", "nor", "only", "own", "so", "than", "too", "very",
   "can", "will", "just", "don", "should", "now", "me", "my", "myself", "we", "our",
   "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves", "he",
   "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself",
   "they", "them", "their", "theirs", "themselves",
   "this", "that", "these", "those",
   "does", "did", "doing", "has", "have", "had", "having",
-  "can't", "cannot", "don't", "doesn't", "didn't", "won't", "wouldn't"
+  "can't", "cannot", "don't", "doesn't", "didn't", "won't", "wouldn't",
+  // Geo: always strip from signatures (duplicates foreignCities entry for explicit universal list)
+  "vancouver",
 ]);
 
 // Foreign countries for blocking non-US keywords

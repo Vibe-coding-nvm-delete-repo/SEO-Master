@@ -96,6 +96,14 @@ export interface LabelSection {
   colorIndex: number;
 }
 
+/** User-created folder on the Projects tab (not the same as filesystem folders). */
+export interface ProjectFolder {
+  id: string;
+  name: string;
+  /** Sort order (lower first). */
+  order: number;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -103,6 +111,10 @@ export interface Project {
   createdAt: string;
   uid: string;
   fileName?: string;
+  /** When set, project appears inside this folder on the Projects tab. */
+  folderId?: string | null;
+  /** ISO timestamp — when set, project is in the deleted list (data retained until permanent delete). */
+  deletedAt?: string | null;
 }
 
 // Activity log types

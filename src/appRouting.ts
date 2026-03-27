@@ -6,7 +6,7 @@
 export type MainTab = 'group' | 'generate' | 'feedback' | 'feature-ideas';
 
 /** Group area sub-routes (under /seo-magic/group/...). */
-export type GroupSubTab = 'data' | 'projects' | 'settings' | 'log';
+export type GroupSubTab = 'data' | 'projects' | 'topics' | 'settings' | 'log';
 
 /** Settings screen sub-tabs (path under /seo-magic/group/settings/...). */
 export type SettingsSubTab = 'general' | 'how-it-works' | 'dictionaries' | 'blocked';
@@ -66,6 +66,9 @@ export function parseAppPath(pathname: string): ParsedAppLocation {
   }
   if (p === `${groupPrefix}/projects`) {
     return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${groupPrefix}/topics`) {
+    return { mainTab: 'group', groupSubTab: 'topics', dataRouteProjectKey: null, settingsSubTab: null };
   }
   if (p === `${groupPrefix}/settings` || p === `${groupPrefix}/settings/`) {
     return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: 'general' };

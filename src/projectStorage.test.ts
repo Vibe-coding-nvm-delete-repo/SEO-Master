@@ -3,9 +3,12 @@ import {
   buildProjectDataPayloadFromChunkDocs,
   countGroupedPages,
   pickNewerProjectPayload,
+  projectFromFirestoreData,
+  projectMetaForFirestore,
   sanitizeJsonForFirestore,
   type ProjectDataPayload,
 } from './projectStorage';
+import type { Project } from './types';
 
 describe('buildProjectDataPayloadFromChunkDocs', () => {
   it('preserves explicit empty results and cluster arrays when meta says there are zero chunks', () => {
@@ -541,6 +544,33 @@ describe('sanitizeJsonForFirestore', () => {
       nested: { keep: 'x' },
       arr: [{ ok: true }],
     });
+  });
+});
+
+describe('projectFromFirestoreData / projectMetaForFirestore', () => {
+  it('round-trips folder and deleted metadata', () => {
+    const p = projectFromFirestoreData('abc', {
+      name: 'N',
+      description: 'D',
+      createdAt: '2020-01-01T00:00:00.000Z',
+      uid: 'u',
+      folderId: 'fld1',
+      deletedAt: '2020-02-01T00:00:00.000Z',
+    });
+    expect(p.id).toBe('abc');
+    expect(p.folderId).toBe('fld1');
+    expect(p.deletedAt).toBe('2020-02-01T00:00:00.000Z');
+
+    const meta = projectMetaForFirestore(p as Project);
+    expect(meta.folderId).toBe('fld1');
+    expect(meta.deletedAt).toBe('2020-02-01T00:00:00.000Z');
+  });
+
+  it('treats missing folder as null in Firestore payload', () => {
+    const p = projectFromFirestoreData('x', { name: 'A', description: '', createdAt: '2020-01-01T00:00:00.000Z', uid: 'u' });
+    const meta = projectMetaForFirestore(p as Project);
+    expect(meta.folderId).toBeNull();
+    expect(meta.deletedAt).toBeNull();
   });
 });
 

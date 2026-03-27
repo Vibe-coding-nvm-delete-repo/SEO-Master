@@ -34,6 +34,11 @@ export interface GroupReviewSettingsData {
   keywordRatingPrompt: string;
   keywordCoreIntentSummary: string;
   keywordCoreIntentSummaryUpdatedAt: string;
+  autoMergeModel: string;
+  autoMergeTemperature: number;
+  autoMergeMaxTokens: number;
+  autoMergeConcurrency: number;
+  autoMergeReasoningEffort: 'none' | 'low' | 'medium' | 'high';
   autoMergePrompt: string;
 }
 
@@ -72,6 +77,11 @@ const toSharedSettings = (settings: GroupReviewSettingsData) => ({
   keywordRatingPrompt: settings.keywordRatingPrompt,
   keywordCoreIntentSummary: settings.keywordCoreIntentSummary,
   keywordCoreIntentSummaryUpdatedAt: settings.keywordCoreIntentSummaryUpdatedAt,
+  autoMergeModel: settings.autoMergeModel,
+  autoMergeTemperature: settings.autoMergeTemperature,
+  autoMergeMaxTokens: settings.autoMergeMaxTokens,
+  autoMergeConcurrency: settings.autoMergeConcurrency,
+  autoMergeReasoningEffort: settings.autoMergeReasoningEffort,
   autoMergePrompt: settings.autoMergePrompt,
 });
 
@@ -88,6 +98,119 @@ const HelpLabel = ({ label, help, trailing }: { label: string; help: string; tra
     {trailing}
   </div>
 );
+
+function ModelPicker(props: {
+  label: string;
+  help: string;
+  value: string;
+  onChange: (modelId: string) => void;
+  models: OpenRouterModel[];
+  starredModels: Set<string>;
+  onToggleStar: (modelId: string) => void;
+  loading?: boolean;
+}) {
+  const { label, help, value, onChange, models, starredModels, onToggleStar, loading } = props;
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<'name' | 'price-asc' | 'price-desc'>('name');
+  const selected = useMemo(() => models.find(m => m.id === value), [models, value]);
+
+  const filteredModels = useMemo(() => {
+    let list = models;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(m => m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q));
+    }
+    if (sort === 'price-asc') {
+      list = [...list].sort((a, b) => parseFloat(a.pricing.prompt) - parseFloat(b.pricing.prompt));
+    } else if (sort === 'price-desc') {
+      list = [...list].sort((a, b) => parseFloat(b.pricing.prompt) - parseFloat(a.pricing.prompt));
+    }
+    const starred = list.filter(m => starredModels.has(m.id));
+    const unstarred = list.filter(m => !starredModels.has(m.id));
+    return starred.length > 0
+      ? [...starred, { id: '__divider__', name: '', pricing: { prompt: '0', completion: '0' }, context_length: 0 } as OpenRouterModel, ...unstarred]
+      : unstarred;
+  }, [models, search, sort, starredModels]);
+
+  return (
+    <div>
+      <HelpLabel
+        label={label}
+        help={help}
+        trailing={loading ? <Loader2 className="w-3 h-3 animate-spin text-zinc-400" /> : null}
+      />
+      <div className="relative">
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg text-left flex items-center justify-between hover:border-zinc-400 transition-colors bg-white"
+        >
+          <span className="truncate text-zinc-700">{selected?.name || value || 'Select model...'}</span>
+          <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+        </button>
+        {isOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
+            <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-zinc-200 rounded-lg shadow-lg max-h-[300px] overflow-hidden flex flex-col">
+              <div className="p-2 border-b border-zinc-100 flex gap-1.5">
+                <div className="relative flex-1">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-400" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search models..."
+                    className="w-full pl-7 pr-2 py-1 text-[11px] border border-zinc-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    autoFocus
+                  />
+                </div>
+                <button onClick={() => setSort('name')} className={`px-1.5 py-0.5 text-[10px] rounded ${sort === 'name' ? 'bg-indigo-100 text-indigo-700' : 'text-zinc-500 hover:bg-zinc-100'}`}>Name</button>
+                <button onClick={() => setSort(sort === 'price-asc' ? 'price-desc' : 'price-asc')} className={`px-1.5 py-0.5 text-[10px] rounded ${sort.startsWith('price') ? 'bg-indigo-100 text-indigo-700' : 'text-zinc-500 hover:bg-zinc-100'}`}>
+                  Price {sort === 'price-asc' ? '↑' : sort === 'price-desc' ? '↓' : ''}
+                </button>
+              </div>
+              <div className="overflow-y-auto max-h-[250px]">
+                {filteredModels.map((m, i) => {
+                  if (m.id === '__divider__') return <div key={`div-${i}`} className="border-t border-zinc-200 my-0.5" />;
+                  const isSelected = m.id === value;
+                  const isStarred = starredModels.has(m.id);
+                  const inPrice = parseFloat(m.pricing.prompt) * 1_000_000;
+                  const outPrice = parseFloat(m.pricing.completion) * 1_000_000;
+                  return (
+                    <div
+                      key={m.id}
+                      className={`flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-zinc-50 ${isSelected ? 'bg-indigo-50' : ''}`}
+                      onClick={() => { onChange(m.id); setIsOpen(false); }}
+                    >
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onToggleStar(m.id); }}
+                        className={`shrink-0 ${isStarred ? 'text-amber-500' : 'text-zinc-300 hover:text-amber-400'}`}
+                      >
+                        <Star className="w-3 h-3" fill={isStarred ? 'currentColor' : 'none'} />
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] text-zinc-800 truncate">{m.name}</div>
+                        <div className="text-[9px] text-zinc-400">
+                          ${inPrice < 0.01 ? inPrice.toFixed(4) : inPrice.toFixed(2)}/M in · ${outPrice < 0.01 ? outPrice.toFixed(4) : outPrice.toFixed(2)}/M out · {(m.context_length / 1000).toFixed(0)}k ctx
+                        </div>
+                      </div>
+                      {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
+                    </div>
+                  );
+                })}
+                {filteredModels.length === 0 && (
+                  <div className="px-3 py-4 text-center text-xs text-zinc-400">
+                    {models.length === 0 ? 'Enter API key to load models' : 'No models match search'}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ============ Component ============
 
@@ -125,6 +248,11 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           keywordRatingPrompt: parsed.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
           keywordCoreIntentSummary: parsed.keywordCoreIntentSummary || '',
           keywordCoreIntentSummaryUpdatedAt: parsed.keywordCoreIntentSummaryUpdatedAt || '',
+          autoMergeModel: parsed.autoMergeModel || '',
+          autoMergeTemperature: parsed.autoMergeTemperature ?? 0.2,
+          autoMergeMaxTokens: parsed.autoMergeMaxTokens ?? 0,
+          autoMergeConcurrency: parsed.autoMergeConcurrency ?? 5,
+          autoMergeReasoningEffort: parsed.autoMergeReasoningEffort || 'none',
           autoMergePrompt: parsed.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
         };
       }
@@ -146,15 +274,17 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
       keywordRatingPrompt: DEFAULT_KEYWORD_RATING_PROMPT,
       keywordCoreIntentSummary: '',
       keywordCoreIntentSummaryUpdatedAt: '',
+      autoMergeModel: '',
+      autoMergeTemperature: 0.2,
+      autoMergeMaxTokens: 0,
+      autoMergeConcurrency: 5,
+      autoMergeReasoningEffort: 'none' as const,
       autoMergePrompt: DEFAULT_AUTO_MERGE_PROMPT,
     };
   });
 
   // Models
   const [models, setModels] = useState<OpenRouterModel[]>([]);
-  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
-  const [modelSearch, setModelSearch] = useState('');
-  const [modelSort, setModelSort] = useState<'name' | 'price-asc' | 'price-desc'>('name');
   const [showApiKey, setShowApiKey] = useState(false);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [hasHydratedSharedSettings, setHasHydratedSharedSettings] = useState(false);
@@ -217,6 +347,11 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
           keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
           keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
+          autoMergeModel: remote?.autoMergeModel || '',
+          autoMergeTemperature: remote?.autoMergeTemperature ?? 0.2,
+          autoMergeMaxTokens: remote?.autoMergeMaxTokens ?? 0,
+          autoMergeConcurrency: remote?.autoMergeConcurrency ?? 5,
+          autoMergeReasoningEffort: remote?.autoMergeReasoningEffort || 'none',
           autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
         };
 
@@ -240,6 +375,11 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
           keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
           keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
+          autoMergeModel: remote?.autoMergeModel || '',
+          autoMergeTemperature: remote?.autoMergeTemperature ?? 0.2,
+          autoMergeMaxTokens: remote?.autoMergeMaxTokens ?? 0,
+          autoMergeConcurrency: remote?.autoMergeConcurrency ?? 5,
+          autoMergeReasoningEffort: remote?.autoMergeReasoningEffort || 'none',
           autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
         }));
 
@@ -272,6 +412,11 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
             keywordRatingPrompt: remote.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
             keywordCoreIntentSummary: remote.keywordCoreIntentSummary || '',
             keywordCoreIntentSummaryUpdatedAt: remote.keywordCoreIntentSummaryUpdatedAt || '',
+            autoMergeModel: remote.autoMergeModel || '',
+            autoMergeTemperature: remote.autoMergeTemperature ?? 0.2,
+            autoMergeMaxTokens: remote.autoMergeMaxTokens ?? 0,
+            autoMergeConcurrency: remote.autoMergeConcurrency ?? 5,
+            autoMergeReasoningEffort: remote.autoMergeReasoningEffort || 'none',
             autoMergePrompt: remote.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
           })));
         } catch { /* quota */ }
@@ -320,24 +465,6 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
     return () => clearTimeout(timer);
   }, [settings.apiKey, fetchModels]);
 
-  // Filtered + sorted models
-  const filteredModels = useMemo(() => {
-    let list = models;
-    if (modelSearch.trim()) {
-      const q = modelSearch.toLowerCase();
-      list = list.filter(m => m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q));
-    }
-    if (modelSort === 'price-asc') {
-      list = [...list].sort((a, b) => parseFloat(a.pricing.prompt) - parseFloat(b.pricing.prompt));
-    } else if (modelSort === 'price-desc') {
-      list = [...list].sort((a, b) => parseFloat(b.pricing.prompt) - parseFloat(a.pricing.prompt));
-    }
-    // Pin starred models to top
-    const starred = list.filter(m => starredModels.has(m.id));
-    const unstarred = list.filter(m => !starredModels.has(m.id));
-    return starred.length > 0 ? [...starred, { id: '__divider__', name: '', pricing: { prompt: '0', completion: '0' }, context_length: 0 } as OpenRouterModel, ...unstarred] : unstarred;
-  }, [models, modelSearch, modelSort, starredModels]);
-
   if (!isOpen) return null;
 
   return (
@@ -377,84 +504,16 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           </div>
         </div>
 
-        {/* Model Dropdown */}
-        <div>
-          <HelpLabel
-            label="Model"
-            help="The AI model used for this project's grouping and review calls. Faster models reduce latency; stronger models usually improve grouping accuracy."
-            trailing={isFetchingModels ? <Loader2 className="w-3 h-3 animate-spin text-zinc-400" /> : null}
-          />
-          <div className="relative">
-            <button
-              onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg text-left flex items-center justify-between hover:border-zinc-400 transition-colors bg-white"
-            >
-              <span className="truncate text-zinc-700">{selectedModelObj?.name || settings.selectedModel || 'Select model...'}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-            </button>
-            {isModelDropdownOpen && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setIsModelDropdownOpen(false)} />
-                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-zinc-200 rounded-lg shadow-lg max-h-[300px] overflow-hidden flex flex-col">
-                  {/* Search + Sort */}
-                  <div className="p-2 border-b border-zinc-100 flex gap-1.5">
-                    <div className="relative flex-1">
-                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-400" />
-                      <input
-                        type="text"
-                        value={modelSearch}
-                        onChange={(e) => setModelSearch(e.target.value)}
-                        placeholder="Search models..."
-                        className="w-full pl-7 pr-2 py-1 text-[11px] border border-zinc-200 rounded focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                        autoFocus
-                      />
-                    </div>
-                    <button onClick={() => setModelSort('name')} className={`px-1.5 py-0.5 text-[10px] rounded ${modelSort === 'name' ? 'bg-indigo-100 text-indigo-700' : 'text-zinc-500 hover:bg-zinc-100'}`}>Name</button>
-                    <button onClick={() => setModelSort(modelSort === 'price-asc' ? 'price-desc' : 'price-asc')} className={`px-1.5 py-0.5 text-[10px] rounded ${modelSort.startsWith('price') ? 'bg-indigo-100 text-indigo-700' : 'text-zinc-500 hover:bg-zinc-100'}`}>
-                      Price {modelSort === 'price-asc' ? '↑' : modelSort === 'price-desc' ? '↓' : ''}
-                    </button>
-                  </div>
-                  {/* Model list */}
-                  <div className="overflow-y-auto max-h-[250px]">
-                    {filteredModels.map((m, i) => {
-                      if (m.id === '__divider__') return <div key={`div-${i}`} className="border-t border-zinc-200 my-0.5" />;
-                      const isSelected = m.id === settings.selectedModel;
-                      const isStarred = starredModels.has(m.id);
-                      const inPrice = parseFloat(m.pricing.prompt) * 1_000_000;
-                      const outPrice = parseFloat(m.pricing.completion) * 1_000_000;
-                      return (
-                        <div
-                          key={m.id}
-                          className={`flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-zinc-50 ${isSelected ? 'bg-indigo-50' : ''}`}
-                          onClick={() => { setSettings(prev => ({ ...prev, selectedModel: m.id })); setIsModelDropdownOpen(false); }}
-                        >
-                          <button
-                            onClick={(e) => { e.stopPropagation(); onToggleStar(m.id); }}
-                            className={`shrink-0 ${isStarred ? 'text-amber-500' : 'text-zinc-300 hover:text-amber-400'}`}
-                          >
-                            <Star className="w-3 h-3" fill={isStarred ? 'currentColor' : 'none'} />
-                          </button>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-[11px] text-zinc-800 truncate">{m.name}</div>
-                            <div className="text-[9px] text-zinc-400">
-                              ${inPrice < 0.01 ? inPrice.toFixed(4) : inPrice.toFixed(2)}/M in · ${outPrice < 0.01 ? outPrice.toFixed(4) : outPrice.toFixed(2)}/M out · {(m.context_length / 1000).toFixed(0)}k ctx
-                            </div>
-                          </div>
-                          {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
-                        </div>
-                      );
-                    })}
-                    {filteredModels.length === 0 && (
-                      <div className="px-3 py-4 text-center text-xs text-zinc-400">
-                        {models.length === 0 ? 'Enter API key to load models' : 'No models match search'}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+        <ModelPicker
+          label="Model"
+          help="The AI model used for this project's grouping and review calls. Faster models reduce latency; stronger models usually improve grouping accuracy."
+          value={settings.selectedModel}
+          onChange={(modelId) => setSettings(prev => ({ ...prev, selectedModel: modelId }))}
+          models={models}
+          starredModels={starredModels}
+          onToggleStar={onToggleStar}
+          loading={isFetchingModels}
+        />
 
         {/* Concurrency */}
         <div>
@@ -465,7 +524,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           <input
             type="range"
             min={1}
-            max={250}
+            max={500}
             value={settings.concurrency}
             onChange={(e) => setSettings(prev => ({ ...prev, concurrency: parseInt(e.target.value) }))}
             className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
@@ -572,22 +631,15 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           Used by <span className="font-medium">Rate KWs</span> on the All Keywords tab. Phase 1 generates a core-intent summary of all keywords; phase 2 scores each keyword 1–3. Same OpenRouter key as above; pick a dedicated model if you want.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <div>
-            <HelpLabel
-              label="Keyword rating model"
-              help="If empty, the main Model above is used. Otherwise this model runs summary + per-keyword JSON ratings."
-            />
-            <select
-              value={settings.keywordRatingModel}
-              onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingModel: e.target.value }))}
-              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-            >
-              <option value="">Same as main model</option>
-              {models.map(m => (
-                <option key={m.id} value={m.id}>{m.name}</option>
-              ))}
-            </select>
-          </div>
+          <ModelPicker
+            label="Keyword rating model"
+            help="If empty, the main Model above is used. Otherwise this model runs summary + per-keyword JSON ratings."
+            value={settings.keywordRatingModel}
+            onChange={(modelId) => setSettings(prev => ({ ...prev, keywordRatingModel: modelId }))}
+            models={models}
+            starredModels={starredModels}
+            onToggleStar={onToggleStar}
+          />
           <div>
             <HelpLabel
               label={`KW rating concurrency (${settings.keywordRatingConcurrency})`}
@@ -596,7 +648,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
             <input
               type="range"
               min={1}
-              max={50}
+              max={500}
               value={settings.keywordRatingConcurrency}
               onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingConcurrency: parseInt(e.target.value, 10) }))}
               className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
@@ -688,6 +740,69 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         <p className="text-[10px] text-zinc-600 leading-relaxed">
           Used by <span className="font-medium">Auto Merge KWs</span> in token management. The model receives one source token and all non-blocked tokens, then returns only exact lexical/semantic equivalents.
         </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <ModelPicker
+            label="Auto merge model"
+            help="If empty, the main Model above is used. Otherwise this dedicated model runs Auto Merge."
+            value={settings.autoMergeModel}
+            onChange={(modelId) => setSettings(prev => ({ ...prev, autoMergeModel: modelId }))}
+            models={models}
+            starredModels={starredModels}
+            onToggleStar={onToggleStar}
+          />
+          <div>
+            <HelpLabel
+              label={`Auto merge concurrency (${settings.autoMergeConcurrency})`}
+              help="Parallel token comparisons for Auto Merge. Lower this if you hit rate limits."
+            />
+            <input
+              type="range"
+              min={1}
+              max={500}
+              value={settings.autoMergeConcurrency}
+              onChange={(e) => setSettings(prev => ({ ...prev, autoMergeConcurrency: parseInt(e.target.value, 10) }))}
+              className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div>
+            <HelpLabel
+              label={`Auto merge temperature (${settings.autoMergeTemperature})`}
+              help="Lower values are recommended for strict exact-match JSON output."
+            />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(settings.autoMergeTemperature * 100)}
+              onChange={(e) => setSettings(prev => ({ ...prev, autoMergeTemperature: parseInt(e.target.value, 10) / 100 }))}
+              className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+            />
+          </div>
+          <div>
+            <HelpLabel label="Auto merge max tokens (0 = auto)" help="Max completion tokens for Auto Merge calls." />
+            <input
+              type="number"
+              value={settings.autoMergeMaxTokens}
+              onChange={(e) => setSettings(prev => ({ ...prev, autoMergeMaxTokens: parseInt(e.target.value, 10) || 0 }))}
+              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <HelpLabel label="Auto merge reasoning" help="Reasoning effort for models that support it (Auto Merge only)." />
+            <select
+              value={settings.autoMergeReasoningEffort}
+              onChange={(e) => setSettings(prev => ({ ...prev, autoMergeReasoningEffort: e.target.value as GroupReviewSettingsData['autoMergeReasoningEffort'] }))}
+              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+            >
+              <option value="none">None</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+        </div>
         <div>
           <HelpLabel
             label="Auto Merge Prompt"

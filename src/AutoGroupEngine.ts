@@ -2,6 +2,23 @@
 // No React dependencies. Handles clustering, cost estimation, prompt building, response parsing, queue processing.
 
 import type { ClusterSummary, AutoGroupCluster, AutoGroupSuggestion, ReconciliationCandidate } from './types';
+
+/** Max ungrouped pages (keywords) per v1 assignment API call — UI slider and prompts stay aligned to this. */
+export const AUTO_GROUP_MAX_BATCH_PAGES = 500;
+
+/** `max_tokens` for OpenRouter so large assignment JSON is not truncated (provider cap 65536). */
+export function computeAutoGroupAssignmentMaxTokens(batchPageCount: number): number {
+  const n = Math.max(1, Math.min(batchPageCount, AUTO_GROUP_MAX_BATCH_PAGES));
+  const estimated = 8192 + n * 140;
+  return Math.min(65536, Math.max(4096, estimated));
+}
+
+/** `max_tokens` for cosine summary JSON with one entry per page. */
+export function computeCosineSummaryMaxTokens(batchPageCount: number): number {
+  const n = Math.max(1, Math.min(batchPageCount, AUTO_GROUP_MAX_BATCH_PAGES));
+  const estimated = 4096 + n * 110;
+  return Math.min(65536, Math.max(4096, estimated));
+}
 import type { ReviewEngineConfig } from './GroupReviewEngine';
 
 // ─── Token Cluster Computation (no API, pure logic) ───
@@ -94,7 +111,7 @@ export function buildAutoGroupSuggestionFromPages(
   return buildSuggestionFromPages(id, sourceClusterId, pages, source, stage);
 }
 
-export function buildTwoTokenBatchClusters(pages: ClusterSummary[], batchSize = 40): AutoGroupCluster[] {
+export function buildTwoTokenBatchClusters(pages: ClusterSummary[], batchSize = AUTO_GROUP_MAX_BATCH_PAGES): AutoGroupCluster[] {
   const twoTokenPages = pages
     .filter(page => page.tokenArr.length === 2)
     .sort((a, b) => {
@@ -418,6 +435,8 @@ export const DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT = `You are a strict SEO groupi
 
 Assign each page to exactly one target group name.
 
+A single request may list up to ${AUTO_GROUP_MAX_BATCH_PAGES} batch pages (ids P1, P2, … P${AUTO_GROUP_MAX_BATCH_PAGES}). You must return one assignment object per batch page — every pageId from P1 through the highest id in the batch exactly once. Do not omit, merge, or duplicate rows.
+
 STRICT RULES:
 1. A page may join an existing group only if the page and group name represent the same exact search intent.
 2. Minor lexical variation is allowed only when it does not change meaning in any way.
@@ -428,8 +447,8 @@ STRICT RULES:
 7. targetGroupName must be either an existing group name or one of the current batch page names.
 8. Never invent a new name.
 
-Return JSON only:
-{"assignments":[{"pageId":"P1","page":"page name","targetGroupName":"existing group or batch page"}]}`;
+Return JSON only (structure scales to the batch size):
+{"assignments":[{"pageId":"P1","page":"page name","targetGroupName":"existing group or batch page"},{"pageId":"P2","page":"…","targetGroupName":"…"}]}`;
 
 export const DEFAULT_AUTO_GROUP_QA_PROMPT = `You are a strict SEO QA reviewer.
 
@@ -451,7 +470,7 @@ Return valid JSON only:
 
 export const DEFAULT_COSINE_SUMMARY_PROMPT = `You write strict semantic intent summaries for SEO page names.
 
-You will receive a batch of page ids and page names.
+You will receive a batch of page ids and page names (up to ${AUTO_GROUP_MAX_BATCH_PAGES} pages per batch: P1 … P${AUTO_GROUP_MAX_BATCH_PAGES}).
 
 Write exactly one sentence per page that describes the exact complete semantic core intent of that page.
 
@@ -462,9 +481,10 @@ STRICT RULES:
 4. Do not merge nearby intents into one description.
 5. Keep each summary concise and factual.
 6. Preserve important modifiers like location, intent, audience, comparison, pricing, reviews, tools, requirements, and timing if they are present.
+7. Include every pageId from the user message exactly once in "summaries".
 
 Return JSON only:
-{"summaries":[{"pageId":"P1","summary":"one sentence"}]}`;
+{"summaries":[{"pageId":"P1","summary":"one sentence"},{"pageId":"P2","summary":"…"}]}`;
 
 export function buildAutoGroupBatchPrompt(input: AutoGroupBatchPromptInput): { system: string; user: string } {
   const batchPages = input.batch
@@ -481,7 +501,7 @@ export function buildAutoGroupBatchPrompt(input: AutoGroupBatchPromptInput): { s
     user:
       `Batch pages (${input.batch.length}):\n${batchPages}\n\n` +
       `Existing group names:\n${existingGroups}\n\n` +
-      `Every batch page must appear exactly once in assignments.\n` +
+      `Page ids are P1 through P${input.batch.length}. Every batch page must appear exactly once in assignments.\n` +
       `Return the pageId for each assignment. targetGroupName must be an existing group name or the exact page name of the batch anchor page.`,
   };
 }

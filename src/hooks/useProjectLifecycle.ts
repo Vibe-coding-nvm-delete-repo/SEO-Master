@@ -14,11 +14,15 @@ import {
   deleteProjectDataFromFirestore,
   deleteProjectFromFirestore,
   loadProjectsFromFirestore,
+  projectFromFirestoreData,
+  reviveProjectInFirestore,
   saveProjectToFirestore,
+  softDeleteProjectInFirestore,
 } from '../projectStorage';
 import { loadSavedWorkspacePrefs } from '../projectWorkspace';
 import { parseAppPath, buildMainPath, type MainTab, type GroupSubTab, type SettingsSubTab } from '../appRouting';
 import { projectUrlKey, projectUrlKeySuffixFromId } from '../projectUrlKey';
+import { isUsableActiveProjectId } from '../projectLifecyclePolicy';
 
 export interface UseProjectLifecycleInput {
   projects: Project[];
@@ -105,15 +109,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
   const mapProjectsSnapshot = useCallback((snapshot: { forEach: (fn: (docSnap: any) => void) => void }): Project[] => {
     const liveProjects: Project[] = [];
     snapshot.forEach((docSnap: any) => {
-      const data = docSnap.data();
-      liveProjects.push({
-        id: docSnap.id,
-        name: data.name || '',
-        description: data.description || '',
-        createdAt: data.createdAt || new Date().toISOString(),
-        uid: data.uid || 'local',
-        fileName: data.fileName,
-      });
+      liveProjects.push(projectFromFirestoreData(docSnap.id, docSnap.data()));
     });
     return liveProjects;
   }, []);
@@ -160,10 +156,10 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         const requestedProjectKey = getProjectKeyFromUrl();
         const requestedProjectId = resolveProjectIdFromUrlKey(requestedProjectKey, loadedProjects);
         const nextProjectId =
-          requestedProjectId && loadedProjects.some(p => p.id === requestedProjectId)
-            ? requestedProjectId
-            : prefs.activeProjectId && loadedProjects.some(p => p.id === prefs.activeProjectId)
-              ? prefs.activeProjectId
+          isUsableActiveProjectId(requestedProjectId, loadedProjects)
+            ? requestedProjectId!
+            : isUsableActiveProjectId(prefs.activeProjectId, loadedProjects)
+              ? prefs.activeProjectId!
               : null;
 
         if (nextProjectId) {
@@ -206,6 +202,15 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
       const projectIdFromUrl = resolveProjectIdFromUrlKey(key, projectsRef.current);
 
       if (parsed.mainTab === 'group' && parsed.groupSubTab === 'data' && key && projectIdFromUrl) {
+        const urlTarget = projectsRef.current.find(p => p.id === projectIdFromUrl);
+        if (urlTarget?.deletedAt) {
+          setActiveProjectId(null);
+          clearProject();
+          if (typeof window !== 'undefined') {
+            window.history.replaceState({}, '', buildMainPath('group', 'projects'));
+          }
+          return;
+        }
         if (projectIdFromUrl === activeProjectId) return;
         setActiveProjectId(projectIdFromUrl);
         setIsProjectLoading(true);
@@ -285,13 +290,22 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         return;
       }
 
+      const activeProject = pid ? liveProjects.find(project => project.id === pid) : null;
+      if (activeProject?.deletedAt) {
+        setActiveProjectId(null);
+        setMainTab('group');
+        setGroupSubTab('projects');
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({}, '', buildMainPath('group', 'projects'));
+        }
+        clearProject();
+        return;
+      }
+
       if (recentlyCreatedProjectRef.current && liveProjects.some(p => p.id === recentlyCreatedProjectRef.current?.id)) {
         recentlyCreatedProjectRef.current = null;
       }
 
-      const activeProject = pid
-        ? liveProjects.find(project => project.id === pid)
-        : null;
       if (activeProject && typeof activeProject.fileName === 'string') {
         syncFileNameLocal(activeProject.fileName);
       }
@@ -320,6 +334,8 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         name: newProjectName,
         description: newProjectDescription,
         createdAt: new Date().toISOString(),
+        folderId: null,
+        deletedAt: null,
       };
       const updatedProjects = [...projects, newProject];
       setProjects(updatedProjects);
@@ -343,13 +359,45 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
   };
 
   const deleteProject = async (projectId: string) => {
-    if (!window.confirm('Are you sure you want to delete this project and all its data?')) return;
+    if (!window.confirm('Move this project to Deleted? You can restore it later; data is kept until you delete permanently.')) return;
+    const proj = projectsRef.current.find(p => p.id === projectId);
+    if (!proj) return;
     if (activeProjectId === projectId) {
       setActiveProjectId(null);
       clearProject();
     }
-    const updatedProjects = projects.filter(p => p.id !== projectId);
-    setProjects(updatedProjects);
+    const ts = new Date().toISOString();
+    setProjects(prev => {
+      const next = prev.map(p => (p.id === projectId ? { ...p, deletedAt: ts } : p));
+      projectsRef.current = next;
+      return next;
+    });
+    await softDeleteProjectInFirestore(projectId);
+  };
+
+  const reviveProject = async (projectId: string) => {
+    const proj = projectsRef.current.find(p => p.id === projectId);
+    if (!proj) return;
+    const revived: Project = { ...proj, deletedAt: null };
+    setProjects(prev => {
+      const next = prev.map(p => (p.id === projectId ? revived : p));
+      projectsRef.current = next;
+      return next;
+    });
+    await reviveProjectInFirestore(revived);
+  };
+
+  const permanentlyDeleteProject = async (projectId: string) => {
+    if (!window.confirm('Permanently delete this project and all its data? This cannot be undone.')) return;
+    if (activeProjectId === projectId) {
+      setActiveProjectId(null);
+      clearProject();
+    }
+    setProjects(prev => {
+      const next = prev.filter(p => p.id !== projectId);
+      projectsRef.current = next;
+      return next;
+    });
     await Promise.all([
       deleteProjectFromFirestore(projectId),
       deleteProjectDataFromFirestore(projectId),
@@ -358,17 +406,19 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
   };
 
   const selectProject = async (projectId: string) => {
+    const target = projectsRef.current.find(p => p.id === projectId);
+    if (target?.deletedAt) return;
     setActiveProjectId(projectId);
     setIsProjectLoading(true);
     setMainTab('group');
     setGroupSubTab('data');
-    const proj = projects.find((p) => p.id === projectId);
+    const proj = projectsRef.current.find((p) => p.id === projectId);
     const key = proj ? projectUrlKey(proj) : projectId;
     if (typeof window !== 'undefined') {
       window.history.pushState({}, '', buildMainPath('group', 'data', key));
     }
     try {
-      await loadProject(projectId, projects);
+      await loadProject(projectId, projectsRef.current);
     } finally {
       setIsProjectLoading(false);
     }
@@ -377,6 +427,8 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
   return {
     createProject,
     deleteProject,
+    reviveProject,
+    permanentlyDeleteProject,
     selectProject,
   };
 }

@@ -1,13 +1,28 @@
 import type { OpenRouterUsage } from './KeywordRatingEngine';
 import { addOpenRouterUsage, parseOpenRouterUsage } from './KeywordRatingEngine';
+import type { TokenSummary } from './types';
 
 export const DEFAULT_AUTO_MERGE_PROMPT = `You identify tokens that are lexically or semantically IDENTICAL to a source token.
 
-STRICT RULES:
-- Only return exact-equivalent tokens (same real-world meaning), including very minor spelling variants/typos.
-- Do NOT return broad synonyms or related words.
-- Do NOT return parent/child concepts.
-- If unsure, exclude it.
+NON-NEGOTIABLE MERGE POLICY:
+- Merge ONLY when semantic intent is literally identical in all realistic contexts.
+- If there is ANY meaning drift, nuance shift, broader/narrower scope, or ambiguity, EXCLUDE it.
+- Assume "do not merge" unless exact identity is clearly proven.
+
+LEXICAL VARIATION RULE:
+- Allowed lexical variation is only super-minor surface form differences with zero meaning impact:
+  - obvious typo or misspelling
+  - punctuation/hyphen spacing differences
+  - trivial casing/plural formatting variants that do not change meaning
+- If lexical variation could imply even slightly different meaning, EXCLUDE it.
+
+DO NOT MERGE:
+- broad synonyms
+- related terms
+- parent/child concepts
+- adjacent intents (same category but different user goal)
+- brand vs generic variants (unless literally identical referent)
+- anything uncertain
 
 Return JSON only:
 {
@@ -17,6 +32,26 @@ Return JSON only:
 }
 
 confidence must be between 0 and 1.`;
+
+const HARD_AUTO_MERGE_POLICY = `NON-NEGOTIABLE MERGE POLICY:
+- Merge ONLY when semantic intent is literally identical in all realistic contexts.
+- If there is ANY meaning drift, nuance shift, broader/narrower scope, or ambiguity, EXCLUDE it.
+- Assume "do not merge" unless exact identity is clearly proven.
+
+LEXICAL VARIATION RULE:
+- Allowed lexical variation is only super-minor surface form differences with zero meaning impact:
+  - obvious typo or misspelling
+  - punctuation/hyphen spacing differences
+  - trivial casing/plural formatting variants that do not change meaning
+- If lexical variation could imply even slightly different meaning, EXCLUDE it.
+
+DO NOT MERGE:
+- broad synonyms
+- related terms
+- parent/child concepts
+- adjacent intents (same category but different user goal)
+- brand vs generic variants (unless literally identical referent)
+- anything uncertain`;
 
 export type AutoMergeSettingsSlice = {
   apiKey: string;
@@ -33,6 +68,76 @@ export type AutoMergeModelResult = {
   confidence: number;
   reason: string;
 };
+
+export type AutoMergeTokenPageContext = {
+  pageName: string;
+  keywordCount: number;
+  totalVolume: number;
+  avgKd: number | null;
+};
+
+export function selectAutoMergeTokenRows(tokenRows: TokenSummary[], samplePercent: number): TokenSummary[] {
+  if (tokenRows.length <= 2) return tokenRows;
+  const pct = Math.max(1, Math.min(100, Math.floor(samplePercent)));
+  if (pct >= 100) return tokenRows;
+  const limit = Math.min(tokenRows.length, Math.max(2, Math.ceil((tokenRows.length * pct) / 100)));
+  if (limit >= tokenRows.length) return tokenRows;
+  return [...tokenRows]
+    .sort((a, b) => {
+      if (a.frequency !== b.frequency) return b.frequency - a.frequency;
+      if (a.totalVolume !== b.totalVolume) return b.totalVolume - a.totalVolume;
+      return a.token.localeCompare(b.token);
+    })
+    .slice(0, limit);
+}
+
+function parseJsonObjectCandidate(input: string): unknown | null {
+  try {
+    return JSON.parse(input);
+  } catch {
+    return null;
+  }
+}
+
+function extractBalancedJsonObjects(input: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (ch === '}') {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          out.push(input.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+  }
+  return out;
+}
 
 function openRouterBody(
   model: string,
@@ -57,22 +162,36 @@ function openRouterBody(
 export function parseAutoMergeJson(content: string): AutoMergeModelResult | null {
   const trimmed = content.trim();
   if (!trimmed) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    const start = trimmed.indexOf('{');
-    const end = trimmed.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    try {
-      parsed = JSON.parse(trimmed.slice(start, end + 1));
-    } catch {
-      return null;
-    }
+  const candidates: string[] = [trimmed];
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let fenceMatch: RegExpExecArray | null = fenced.exec(trimmed);
+  while (fenceMatch) {
+    const body = (fenceMatch[1] || '').trim();
+    if (body) candidates.push(body);
+    fenceMatch = fenced.exec(trimmed);
   }
-  if (!parsed || typeof parsed !== 'object') return null;
-  const rec = parsed as Record<string, unknown>;
-  const matchesRaw = Array.isArray(rec.matches) ? rec.matches : [];
+  for (const obj of extractBalancedJsonObjects(trimmed)) candidates.push(obj);
+
+  let parsedObj: Record<string, unknown> | null = null;
+  for (const candidate of candidates) {
+    const parsed = parseJsonObjectCandidate(candidate);
+    if (!parsed || typeof parsed !== 'object') continue;
+    const rec = parsed as Record<string, unknown>;
+    const hasMatches = rec.matches != null;
+    const hasConfidence = rec.confidence != null;
+    const hasReason = rec.reason != null;
+    if (hasMatches || hasConfidence || hasReason) {
+      parsedObj = rec;
+      break;
+    }
+    if (!parsedObj) parsedObj = rec;
+  }
+  if (!parsedObj) return null;
+
+  const rec = parsedObj;
+  const matchesRaw = Array.isArray(rec.matches)
+    ? rec.matches
+    : (typeof rec.matches === 'string' ? rec.matches.split(',') : []);
   const matches = matchesRaw
     .filter((m): m is string => typeof m === 'string')
     .map(m => m.trim())
@@ -94,21 +213,36 @@ export async function fetchAutoMergeMatches(
   sourceToken: string,
   candidateTokens: string[],
   signal: AbortSignal,
+  context?: {
+    sourceTopPages: AutoMergeTokenPageContext[];
+    candidateTopPagesByToken: Record<string, AutoMergeTokenPageContext[]>;
+  },
 ): Promise<{ result: AutoMergeModelResult; usage: OpenRouterUsage }> {
   const model = settings.model.trim() || settings.fallbackModel;
   if (!model) throw new Error('Select an OpenRouter model.');
   const user = [
     settings.prompt.trim() || DEFAULT_AUTO_MERGE_PROMPT,
     '',
+    HARD_AUTO_MERGE_POLICY,
+    '',
     `SOURCE_TOKEN: ${sourceToken}`,
+    'SOURCE_TOP_5_PAGES_JSON:',
+    JSON.stringify(context?.sourceTopPages || []),
     '',
     'CANDIDATE_TOKENS_JSON:',
     JSON.stringify(candidateTokens),
     '',
-    'Return JSON only with matches that are IDENTICAL to SOURCE_TOKEN.',
+    'CANDIDATE_TOP_5_PAGES_BY_TOKEN_JSON:',
+    JSON.stringify(context?.candidateTopPagesByToken || {}),
+    '',
+    'Use top-5 page context to verify literal semantic identity before matching.',
+    'Think carefully before deciding.',
+    'Return JSON only with matches that are literally IDENTICAL in semantic intent to SOURCE_TOKEN.',
+    'If there is any doubt at all, return no match for that candidate.',
   ].join('\n');
 
   const maxRetries = 5;
+  let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -144,10 +278,17 @@ export async function fetchAutoMergeMatches(
     const data = await res.json();
     const content = data.choices?.[0]?.message?.content || '';
     const parsed = parseAutoMergeJson(content);
-    if (!parsed) throw new Error('Model did not return valid Auto Merge JSON.');
+    if (!parsed) {
+      lastErr = new Error(`Model did not return valid Auto Merge JSON (attempt ${attempt + 1}/${maxRetries + 1}).`);
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 250));
+        continue;
+      }
+      break;
+    }
     return { result: parsed, usage: parseOpenRouterUsage(data) };
   }
-  throw new Error('Auto Merge request failed after retries.');
+  throw lastErr || new Error('Auto Merge request failed after retries.');
 }
 
 export function addAutoMergeUsage(a: OpenRouterUsage, b: OpenRouterUsage): OpenRouterUsage {

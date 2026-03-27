@@ -10,12 +10,14 @@ import type {
   LabelSection,
   ProcessedRow,
   Project,
+  ProjectFolder,
   Stats,
   TokenMergeRule,
   TokenSummary,
 } from './types';
 
 export const LS_PROJECTS_KEY = 'kwg_projects';
+export const LS_PROJECT_FOLDERS_KEY = 'kwg_project_folders';
 export const LS_SAVED_CLUSTERS_KEY = 'kwg_saved_clusters';
 export const LS_ACTIVE_PROJECT_KEY = 'kwg_active_project';
 
@@ -25,6 +27,8 @@ const IDB_VERSION = 2;
 const FIRESTORE_PROJECTS_COLLECTION = 'projects';
 const APP_SETTINGS_COLLECTION = 'app_settings';
 const APP_PREFS_DOC = 'user_preferences';
+/** Firestore doc for project folder definitions (Projects tab). */
+export const PROJECT_FOLDERS_FS_DOC = 'project_folders';
 /** Rows per chunk — keep under Firestore’s ~1 MiB/doc limit for heavy rows + nested cluster data */
 const CHUNK_SIZE = 200;
 const CHUNKS_SUBCOLLECTION = 'chunks';
@@ -399,12 +403,96 @@ export const deleteFromIDB = async (projectId: string) => {
   }
 };
 
+/** Firestore rejects `undefined`; keep optional fields only when defined or explicitly null. */
+export function projectMetaForFirestore(project: Project): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    createdAt: project.createdAt,
+    uid: project.uid,
+    updatedAt: new Date().toISOString(),
+    folderId: project.folderId ?? null,
+    deletedAt: project.deletedAt ?? null,
+  };
+  if (project.fileName !== undefined) base.fileName = project.fileName;
+  return sanitizeJsonForFirestore(base);
+}
+
+/** Normalize Firestore project document fields into a `Project` (shared by load + snapshot listeners). */
+export function projectFromFirestoreData(id: string, data: Record<string, unknown> | undefined): Project {
+  const d = data || {};
+  return {
+    id,
+    name: typeof d.name === 'string' ? d.name : '',
+    description: typeof d.description === 'string' ? d.description : '',
+    createdAt: typeof d.createdAt === 'string' ? d.createdAt : new Date().toISOString(),
+    uid: typeof d.uid === 'string' ? d.uid : 'local',
+    fileName: typeof d.fileName === 'string' ? d.fileName : undefined,
+    folderId: typeof d.folderId === 'string' ? d.folderId : d.folderId === null ? null : undefined,
+    deletedAt: typeof d.deletedAt === 'string' ? d.deletedAt : d.deletedAt === null ? null : undefined,
+  };
+}
+
+export async function saveProjectFoldersToFirestore(folders: ProjectFolder[]): Promise<void> {
+  const clean = sanitizeJsonForFirestore(folders);
+  const updatedAt = new Date().toISOString();
+  await setDoc(doc(db, APP_SETTINGS_COLLECTION, PROJECT_FOLDERS_FS_DOC), {
+    folders: clean,
+    updatedAt,
+  });
+  try {
+    localStorage.setItem(LS_PROJECT_FOLDERS_KEY, JSON.stringify(clean));
+  } catch {
+    /* ignore */
+  }
+  try {
+    await saveToIDB('__project_folders__', { folders: clean, updatedAt });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Sets `folderId` on many projects (e.g. when removing a folder, move all to unassigned). */
+export async function batchSetProjectsFolderId(projectIds: string[], folderId: string | null): Promise<void> {
+  if (projectIds.length === 0) return;
+  const MAX = 500;
+  for (let i = 0; i < projectIds.length; i += MAX) {
+    const slice = projectIds.slice(i, i + MAX);
+    const batch = writeBatch(db);
+    for (const id of slice) {
+      batch.set(
+        doc(db, FIRESTORE_PROJECTS_COLLECTION, id),
+        {
+          folderId,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true },
+      );
+    }
+    await batch.commit();
+  }
+}
+
+export async function softDeleteProjectInFirestore(projectId: string): Promise<void> {
+  await setDoc(
+    doc(db, FIRESTORE_PROJECTS_COLLECTION, projectId),
+    {
+      deletedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    { merge: true },
+  );
+}
+
+export async function reviveProjectInFirestore(project: Project): Promise<void> {
+  const revived: Project = { ...project, deletedAt: null };
+  await setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), projectMetaForFirestore(revived));
+}
+
 export const saveProjectToFirestore = async (project: Project) => {
   try {
-    await setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), {
-      ...project,
-      updatedAt: new Date().toISOString(),
-    });
+    await setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), projectMetaForFirestore(project));
   } catch (error) {
     console.warn('Firestore save error (project metadata):', error);
   }
@@ -731,15 +819,7 @@ export const loadProjectsFromFirestore = async (): Promise<Project[]> => {
 
     const firestoreProjects: Project[] = [];
     snapshot.forEach((docSnap: any) => {
-      const data = docSnap.data();
-      firestoreProjects.push({
-        id: docSnap.id,
-        name: data.name || '',
-        description: data.description || '',
-        createdAt: data.createdAt || new Date().toISOString(),
-        uid: data.uid || 'local',
-        fileName: data.fileName,
-      });
+      firestoreProjects.push(projectFromFirestoreData(docSnap.id, docSnap.data()));
     });
 
     if (firestoreProjects.length > 0) {

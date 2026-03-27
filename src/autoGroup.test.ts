@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  AUTO_GROUP_MAX_BATCH_PAGES,
   applyReconciliationMerges,
   applyShortGroupAssignments,
   buildAssignmentCandidates,
@@ -11,6 +12,8 @@ import {
   buildSuggestionsFromCosineClusters,
   buildTokenClusters,
   buildTwoTokenBatchClusters,
+  computeAutoGroupAssignmentMaxTokens,
+  computeCosineSummaryMaxTokens,
   countCoveredPages,
   estimateCost,
   parseAutoGroupBatchResponse,
@@ -246,8 +249,25 @@ describe('buildAutoGroupBatchPrompt', () => {
     expect(prompt.system.toLowerCase()).toContain('strict seo grouping engine');
     expect(prompt.user).toContain('P1 | small business loans | vol: 5000');
     expect(prompt.user).toContain('P2 | startup business loans | vol: 3000');
+    expect(prompt.user).toContain('P1 through P2');
     expect(prompt.user).toContain('merchant cash advance');
     expect(prompt.user).toContain('business line of credit');
+  });
+});
+
+describe('AUTO_GROUP_MAX_BATCH_PAGES and max_tokens helpers', () => {
+  it('caps batch size constant at 500', () => {
+    expect(AUTO_GROUP_MAX_BATCH_PAGES).toBe(500);
+  });
+
+  it('computes assignment max_tokens within provider cap', () => {
+    expect(computeAutoGroupAssignmentMaxTokens(10)).toBe(8192 + 10 * 140);
+    expect(computeAutoGroupAssignmentMaxTokens(AUTO_GROUP_MAX_BATCH_PAGES)).toBe(65536);
+  });
+
+  it('computes cosine summary max_tokens within provider cap', () => {
+    expect(computeCosineSummaryMaxTokens(20)).toBe(4096 + 20 * 110);
+    expect(computeCosineSummaryMaxTokens(AUTO_GROUP_MAX_BATCH_PAGES)).toBe(4096 + 500 * 110);
   });
 });
 

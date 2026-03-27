@@ -153,6 +153,8 @@ export interface ProjectPersistence extends PersistedState {
   clearProject: () => void;
   /** Sync `latest` + fileName state without persisting (metadata / CSV processing UI). */
   syncFileNameLocal: (name: string | null) => void;
+  /** Force immediate Firestore flush and wait until queued writes complete. */
+  flushNow: () => Promise<void>;
 
   // Atomic mutations
   addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => void;
@@ -449,6 +451,16 @@ export function useProjectPersistence(options: {
       .then(flushPersistQueue)
       .catch((err) => logPersistError('persist queue flush', err));
   }, [flushPersistQueue]);
+
+  /**
+   * Immediate durability barrier used by long-running jobs that need a
+   * user-visible "done and synced" moment before returning control.
+   */
+  const flushNow = useCallback(async () => {
+    if (!activeProjectIdRef.current) return;
+    enqueueSaveImmediate();
+    await pendingSaveRef.current;
+  }, [enqueueSaveImmediate]);
 
   /**
    * Crash-safety checkpoint: persist latest state to IDB immediately.
@@ -1031,6 +1043,7 @@ export function useProjectPersistence(options: {
     loadProject,
     clearProject,
     syncFileNameLocal,
+    flushNow,
 
     // Atomic mutations
     addGroupsAndRemovePages,

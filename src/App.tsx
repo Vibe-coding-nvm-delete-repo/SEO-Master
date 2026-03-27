@@ -4,20 +4,20 @@
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check } from 'lucide-react';
+import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check, DollarSign, Inbox } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr, getLabelColor } from './processing';
 import { auth, db, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
-import { GoogleGenAI } from '@google/genai';
 import GenerateTab from './GenerateTab';
 import FeedbackTab from './FeedbackTab';
 import FeatureIdeasTab from './FeatureIdeasTab';
 import FeedbackModalHost from './FeedbackModalHost';
 import AppStatusBar from './AppStatusBar';
-import { clearListenerError, clearProjectPersistErrorFlag, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import { clearListenerError, clearProjectPersistErrorFlag, getCloudSyncSnapshot, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
+import { getFilteredAutoGroupSettingsStatus } from './filteredAutoGroupSettingsStatus';
 import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
 import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion, AutoMergeRecommendation } from './types';
 import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows, computeSignature, mergeTokenArr, refreshGroupsFromClusterSummaries } from './tokenMerge';
@@ -25,9 +25,22 @@ import MergeConfirmModal from './MergeConfirmModal';
 import { useToast } from './ToastContext';
 import ActivityLog from './ActivityLog';
 import AutoGroupPanel from './AutoGroupPanel';
+import TopicsSubTab from './TopicsSubTab';
+import ProjectsTab from './ProjectsTab';
 import InlineHelpHint from './InlineHelpHint';
 import TableHeader, { type FilterBag } from './TableHeader';
 import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, BLOCKED_COLUMNS, KEYWORDS_COLUMNS, CELL } from './tableConstants';
+import {
+  groupedTabChildCity,
+  groupedTabChildRowKey,
+  groupedTabChildState,
+  kdCellDisplay,
+  keywordLenForCell,
+  pagesTabChildCity,
+  pagesTabChildRowKey,
+  pagesTabChildState,
+  volumeCellDisplay,
+} from './clusterExpandChildRows';
 import {
   addOpenRouterUsage,
   applyKeywordRatingsToResults,
@@ -37,12 +50,15 @@ import {
   fetchSingleKeywordRating,
   formatKeywordRatingDuration,
   keywordRatingRowKey,
+  runPool,
   type KeywordRatingSettingsSlice,
   type OpenRouterUsage,
 } from './KeywordRatingEngine';
 import {
   addAutoMergeUsage,
   fetchAutoMergeMatches,
+  type AutoMergeTokenPageContext,
+  selectAutoMergeTokenRows,
   type AutoMergeSettingsSlice,
 } from './AutoMergeEngine';
 import {
@@ -401,10 +417,6 @@ const ClusterRow = React.memo(({
   setSelectedTokens,
   setCurrentPage,
   onMiddleClick,
-  saveCluster,
-  generateBrief,
-  briefLoading,
-  brief,
   labelColorMap,
   onBlockToken
 }: {
@@ -418,10 +430,6 @@ const ClusterRow = React.memo(({
   setCurrentPage: (p: number) => void;
   onMiddleClick: (e: React.MouseEvent) => void;
   onBlockToken?: (token: string) => void;
-  saveCluster: (c: ClusterSummary) => void;
-  generateBrief: (c: ClusterSummary) => void;
-  briefLoading: string | null;
-  brief: string | null;
   labelColorMap: Map<string, { border: string; bg: string; text: string; sectionName: string }>;
 }) => (
   <>
@@ -519,69 +527,30 @@ const ClusterRow = React.memo(({
         {row.locationState || '-'}
       </td>
     </tr>
-    {isExpanded && (
-      <tr className="bg-zinc-100/50 border-b border-zinc-200">
-        <td colSpan={11} className="px-8 py-3">
-          <div className="flex items-center justify-between mb-4">
-            <h4 className="text-sm font-medium text-zinc-900">Keywords in Cluster</h4>
-            <div className="flex items-center gap-2">
-              <button 
-                onClick={() => saveCluster(row)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-white border border-zinc-200 text-zinc-700 hover:bg-zinc-50 transition-colors shadow-sm"
-              >
-                <Bookmark className="w-3.5 h-3.5" />
-                Save Cluster
-              </button>
-              <button 
-                onClick={() => generateBrief(row)}
-                disabled={briefLoading === row.pageName}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition-colors shadow-sm disabled:opacity-50"
-              >
-                {briefLoading === row.pageName ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                Generate AI Brief
-              </button>
-            </div>
-          </div>
-          
-          {brief && (
-            <div className="mb-4 p-4 bg-white border border-indigo-100 rounded-lg shadow-sm">
-              <h5 className="text-sm font-semibold text-indigo-900 mb-2 flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-indigo-500" />
-                AI Content Brief
-              </h5>
-              <div className="text-sm text-zinc-700 whitespace-pre-wrap font-sans">
-                {brief}
-              </div>
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-2">
-            {row.keywords.map((kw, i) => (
-              <div key={i} className="flex justify-between items-center text-sm border-b border-zinc-200/50 pb-1 last:border-0">
-                <span className="text-zinc-600 truncate mr-4" title={kw.keyword}>{kw.keyword}</span>
-                <div className="flex items-center gap-3 shrink-0">
-                  {kw.kd !== null && <span className="text-xs text-zinc-400 font-medium">KD: {kw.kd}</span>}
-                  {kw.kwRating != null && (
-                    <span
-                      className={`text-[10px] font-semibold px-1 py-0.5 rounded border ${
-                        kw.kwRating === 1
-                          ? 'bg-emerald-100/90 text-emerald-900 border-emerald-200/80'
-                          : kw.kwRating === 2
-                            ? 'bg-amber-100/90 text-amber-950 border-amber-200/70'
-                            : 'bg-rose-100/90 text-rose-900 border-rose-200/70'
-                      }`}
-                    >
-                      R:{kw.kwRating}
-                    </span>
-                  )}
-                  <span className="text-zinc-500 tabular-nums">{kw.volume.toLocaleString()}</span>
-                </div>
-              </div>
-            ))}
+    {isExpanded && row.keywords.map((kw, i) => (
+      <tr
+        key={pagesTabChildRowKey(row.pageName, i, kw.keyword)}
+        className="bg-zinc-50/70 border-b border-zinc-100"
+      >
+        <td className="px-3 py-0.5" aria-hidden />
+        <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
+          <div className="pl-7 min-w-0">
+            <span className="text-[11px] font-medium text-zinc-600 break-words" title={kw.keyword}>
+              {kw.keyword}
+            </span>
           </div>
         </td>
+        <td className="px-3 py-0.5 min-w-0" aria-hidden />
+        <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">{keywordLenForCell(kw.keyword)}</td>
+        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">1</td>
+        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{volumeCellDisplay(kw.volume)}</td>
+        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{kdCellDisplay(kw.kd)}</td>
+        <KwRatingCell value={kw.kwRating} />
+        <td className="px-3 py-0.5 text-zinc-600 text-[12px]">{row.label}</td>
+        <td className="px-3 py-0.5 text-zinc-600 capitalize text-[12px]">{pagesTabChildCity(kw, row)}</td>
+        <td className="px-3 py-0.5 text-zinc-600 uppercase text-[12px]">{pagesTabChildState(kw, row)}</td>
       </tr>
-    )}
+    ))}
   </>
 ));
 
@@ -902,36 +871,32 @@ const GroupedClusterRow = React.memo(({
             <td className="px-3 py-0.5 text-zinc-600">{cluster.locationCity || '-'}</td>
             <td className="px-3 py-0.5 text-zinc-600">{cluster.locationState || '-'}</td>
           </tr>
-          {isSubExpanded && (
-            <tr className="bg-zinc-100/50 border-b border-zinc-200">
-              <td colSpan={12} className="px-12 py-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-1">
-                  {cluster.keywords.map((kw, i) => (
-                    <div key={i} className="flex justify-between items-center text-sm border-b border-zinc-200/50 pb-1 last:border-0">
-                      <span className="text-zinc-600 truncate mr-4" title={kw.keyword}>{kw.keyword}</span>
-                      <div className="flex items-center gap-3 shrink-0">
-                        {kw.kd !== null && <span className="text-xs text-zinc-400 font-medium">KD: {kw.kd}</span>}
-                        {kw.kwRating != null && (
-                          <span
-                            className={`text-[10px] font-semibold px-1 py-0.5 rounded border ${
-                              kw.kwRating === 1
-                                ? 'bg-emerald-100/90 text-emerald-900 border-emerald-200/80'
-                                : kw.kwRating === 2
-                                  ? 'bg-amber-100/90 text-amber-950 border-amber-200/70'
-                                  : 'bg-rose-100/90 text-rose-900 border-rose-200/70'
-                            }`}
-                          >
-                            R:{kw.kwRating}
-                          </span>
-                        )}
-                        <span className="text-zinc-500 tabular-nums">{kw.volume.toLocaleString()}</span>
-                      </div>
-                    </div>
-                  ))}
+          {isSubExpanded && cluster.keywords.map((kw, i) => (
+            <tr
+              key={groupedTabChildRowKey(subId, i, kw.keyword)}
+              className="bg-zinc-50/70 border-b border-zinc-100"
+            >
+              <td className="px-3 py-0.5" aria-hidden />
+              <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
+                <div className="pl-10 min-w-0">
+                  <span className="text-[11px] font-medium text-zinc-600 break-words" title={kw.keyword}>
+                    {kw.keyword}
+                  </span>
                 </div>
               </td>
+              <td className="px-3 py-0.5 min-w-0" aria-hidden />
+              <td className="px-1.5 py-0.5" aria-hidden />
+              <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">{keywordLenForCell(kw.keyword)}</td>
+              <td className="px-1 py-0.5 text-zinc-400 text-right tabular-nums text-xs">-</td>
+              <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">1</td>
+              <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{volumeCellDisplay(kw.volume)}</td>
+              <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{kdCellDisplay(kw.kd)}</td>
+              <KwRatingCell value={kw.kwRating} />
+              <td className="px-3 py-0.5 text-zinc-600 text-[12px]">{cluster.label}</td>
+              <td className="px-3 py-0.5 text-zinc-600 capitalize text-[12px]">{groupedTabChildCity(kw, cluster)}</td>
+              <td className="px-3 py-0.5 text-zinc-600 uppercase text-[12px]">{groupedTabChildState(kw, cluster)}</td>
             </tr>
-          )}
+          ))}
         </React.Fragment>
       );
     });
@@ -1010,7 +975,7 @@ export default function App() {
     datasetStats, autoGroupSuggestions, autoMergeRecommendations, tokenMergeRules,
     blockedTokens, labelSections, fileName,
     activeProjectId, setActiveProjectId,
-    loadProject, clearProject, syncFileNameLocal,
+    loadProject, clearProject, syncFileNameLocal, flushNow,
     removeFromApproved, ungroupPages,
     addActivityEntry,
     bulkSet,
@@ -1136,6 +1101,10 @@ export default function App() {
     apiCalls: 0,
     elapsedMs: 0,
   });
+  const [autoMergeSortConfig, setAutoMergeSortConfig] = useState<{
+    key: 'canonical' | 'mergeTokens' | 'impact' | 'confidence' | 'status';
+    direction: 'asc' | 'desc';
+  }>({ key: 'confidence', direction: 'desc' });
   const activeFilteredAutoGroupJobRef = useRef<FilteredAutoGroupJob | null>(null);
   const [isRunningFilteredAutoGroup, setIsRunningFilteredAutoGroup] = useState(false);
   const [pendingFilteredAutoGroupTokens, setPendingFilteredAutoGroupTokens] = useState<Set<string>>(new Set());
@@ -1282,10 +1251,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [savedClusters, setSavedClusters] = useState<any[]>([]);
-  const [briefLoading, setBriefLoading] = useState<string | null>(null);
-  const [briefs, setBriefs] = useState<Record<string, string>>({});
-
-  const { createProject, deleteProject, selectProject } = useProjectLifecycle({
+  const { createProject, deleteProject, reviveProject, permanentlyDeleteProject, selectProject } = useProjectLifecycle({
     projects,
     setProjects,
     activeProjectId,
@@ -1333,23 +1299,13 @@ export default function App() {
         setSavedClusters(remoteSavedClusters);
       }
       if (remoteActiveProjectId !== activeProjectIdRef.current) {
-        // If the remote active project no longer exists in the shared `projects` list,
-        // don't "reselect" a deleted/missing project. Clear instead so UI shows the
-        // correct empty state.
+        // Preserve selection when prefs arrive before the projects listener settles.
+        // A transient "project not in list yet" state should not clear the active project
+        // and flip UI to "Select Project".
         if (remoteActiveProjectId && !projects.some((p) => p.id === remoteActiveProjectId)) {
-          setActiveProjectId(null);
-          // Ensure UI switches back to the project picker immediately. In some test/mock
-          // timings the projects list listener may not run before React renders this
-          // empty workspace state.
-          setMainTab('group');
-          setGroupSubTab('projects');
-          clearProject();
-          if (typeof window !== 'undefined') {
-            window.history.replaceState({}, '', buildMainPath('group', 'projects'));
-          }
-        } else {
-          setActiveProjectId(remoteActiveProjectId);
+          return;
         }
+        setActiveProjectId(remoteActiveProjectId);
       }
     }, (err) => {
       markListenerError('user_preferences');
@@ -1377,67 +1333,6 @@ export default function App() {
       // Ignore sync preference-save exceptions; normal writes use project persistence.
     }
   }, [activeProjectId, savedClusters]);
-
-  const saveCluster = async (cluster: ClusterSummary) => {
-    const clusterId = `local_${cluster.pageName.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
-    const newCluster = {
-      id: clusterId,
-      pageName: cluster.pageName,
-      totalVolume: cluster.totalVolume,
-      keywordCount: cluster.keywordCount,
-      keywords: JSON.stringify(cluster.keywords),
-      createdAt: new Date().toISOString()
-    };
-    const updated = [...savedClusters, newCluster];
-    setSavedClusters(updated);
-    saveAppPrefsToFirestore(activeProjectId, updated);
-  };
-
-  const deleteSavedCluster = async (clusterId: string) => {
-    const updated = savedClusters.filter((c: any) => c.id !== clusterId);
-    setSavedClusters(updated);
-    saveAppPrefsToFirestore(activeProjectId, updated);
-  };
-
-  const generateBrief = async (cluster: ClusterSummary | any) => {
-    setBriefLoading(cluster.pageName);
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("GEMINI_API_KEY is not defined. Please add it to your secrets.");
-      }
-      let ai;
-      try {
-        console.log("GoogleGenAI is:", GoogleGenAI);
-        ai = new GoogleGenAI({ apiKey });
-      } catch (e: any) {
-        console.error("Error instantiating GoogleGenAI: ", e);
-        alert("Error instantiating GoogleGenAI: " + e.message + "\n" + e.stack);
-        throw e;
-      }
-      let keywordsList = [];
-      if (typeof cluster.keywords === 'string') {
-        keywordsList = JSON.parse(cluster.keywords).map((k: any) => k.keyword);
-      } else {
-        keywordsList = cluster.keywords.map((k: any) => k.keyword);
-      }
-      const prompt = `Create a short SEO content brief for a page targeting the topic "${cluster.pageName}". 
-      The page should cover these keywords: ${keywordsList.join(', ')}.
-      Include a suggested title, meta description, and 3-4 main headings (H2s). Format as Markdown.`;
-      
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-      });
-      
-      setBriefs(prev => ({ ...prev, [cluster.pageName]: response.text || '' }));
-    } catch (error) {
-      console.error("Error generating brief:", error);
-      alert(error instanceof Error ? error.message : "Failed to generate brief. Please try again.");
-    } finally {
-      setBriefLoading(null);
-    }
-  };
 
   const processCSV = (file: File) => {
     setIsProcessing(true);
@@ -2762,11 +2657,7 @@ export default function App() {
   }, []);
 
   const runKeywordRating = useCallback(async () => {
-    if (!groupReviewSettingsRef.current) {
-      addToast('Settings are still loading. Try again in a moment.', 'error');
-      return;
-    }
-    const gs = groupReviewSettingsRef.current.getSettings();
+    const gs = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
     if (!gs?.apiKey || gs.apiKey.trim().length < 10) {
       addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
       return;
@@ -2824,14 +2715,16 @@ export default function App() {
       mergeUsage(summaryUsage);
       apiCalls += 1;
       const nowIso = new Date().toISOString();
-      const gsFresh = groupReviewSettingsRef.current!.getSettings();
-      groupReviewSettingsRef.current!.updateSettings({
-        ...gsFresh,
-        keywordCoreIntentSummary: summary,
-        keywordCoreIntentSummaryUpdatedAt: nowIso,
-      });
+      const gsFresh = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
+      if (gsFresh) {
+        groupReviewSettingsRef.current?.updateSettings({
+          ...gsFresh,
+          keywordCoreIntentSummary: summary,
+          keywordCoreIntentSummaryUpdatedAt: nowIso,
+        });
+      }
       const ratingMap = new Map<string, 1 | 2 | 3>();
-      const concurrency = Math.max(1, Math.min(50, gs.keywordRatingConcurrency || 5));
+      const concurrency = Math.max(1, Math.min(500, gs.keywordRatingConcurrency || 5));
       let done = 0;
       /** Ref updates one frame after bulkSet; keep last merged snapshot so we never clobber with stale ref. */
       let lastMerged: ProcessedRow[] | null = null;
@@ -2931,10 +2824,19 @@ export default function App() {
       });
       const costToast =
         costReported && usageAcc.costUsd != null ? ` · $${usageAcc.costUsd.toFixed(4)}` : '';
-      addToast(
-        `Keyword rating complete: ${doneBuckets.n1} relevant (1), ${doneBuckets.n2} unsure (2), ${doneBuckets.n3} not relevant (3) · ${formatKeywordRatingDuration(finalElapsed)}${costToast}`,
-        'success',
-      );
+      await flushNow();
+      const cloud = getCloudSyncSnapshot();
+      if (activeProjectId && cloud.projectDataWriteFailed) {
+        addToast(
+          `Keyword rating complete locally, but cloud sync failed. Check Cloud status. ${doneBuckets.n1} / ${doneBuckets.n2} / ${doneBuckets.n3}${costToast}`,
+          'warning',
+        );
+      } else {
+        addToast(
+          `Keyword rating synced: ${doneBuckets.n1} relevant (1), ${doneBuckets.n2} unsure (2), ${doneBuckets.n3} not relevant (3) · ${formatKeywordRatingDuration(finalElapsed)}${costToast}`,
+          'success',
+        );
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const isAbort =
@@ -2980,7 +2882,60 @@ export default function App() {
       });
       addToast(msg, 'error');
     }
-  }, [addToast, bulkSet, hasBlockedToken]);
+  }, [addToast, bulkSet, groupReviewSettingsSnapshot, hasBlockedToken]);
+
+  const tokenTopPagesMap = useMemo(() => {
+    const AUTO_MERGE_PAGE_CONTEXT_LIMIT = 5;
+    const rows = (results || []) as ProcessedRow[];
+    const byToken = new Map<string, Map<string, { pageName: string; keywordCount: number; totalVolume: number; kdSum: number; kdCount: number }>>();
+    for (const row of rows) {
+      const uniqueTokens = Array.from(new Set(row.tokenArr || []));
+      for (const token of uniqueTokens) {
+        let pageMap = byToken.get(token);
+        if (!pageMap) {
+          pageMap = new Map();
+          byToken.set(token, pageMap);
+        }
+        const pageKey = row.pageName || row.tokens;
+        const prev = pageMap.get(pageKey) || { pageName: row.pageName || row.tokens, keywordCount: 0, totalVolume: 0, kdSum: 0, kdCount: 0 };
+        prev.keywordCount += 1;
+        prev.totalVolume += Number.isFinite(row.searchVolume) ? row.searchVolume : 0;
+        if (row.kd != null && Number.isFinite(row.kd)) {
+          prev.kdSum += row.kd;
+          prev.kdCount += 1;
+        }
+        pageMap.set(pageKey, prev);
+      }
+    }
+
+    const out = new Map<string, AutoMergeTokenPageContext[]>();
+    for (const [token, pageMap] of byToken.entries()) {
+      const topPages = Array.from(pageMap.values())
+        .map((p): AutoMergeTokenPageContext => ({
+          pageName: p.pageName,
+          keywordCount: p.keywordCount,
+          totalVolume: p.totalVolume,
+          avgKd: p.kdCount > 0 ? Math.round((p.kdSum / p.kdCount) * 10) / 10 : null,
+        }))
+        .sort((a, b) => {
+          if (a.totalVolume !== b.totalVolume) return b.totalVolume - a.totalVolume;
+          if (a.keywordCount !== b.keywordCount) return b.keywordCount - a.keywordCount;
+          return a.pageName.localeCompare(b.pageName);
+        })
+        .slice(0, AUTO_MERGE_PAGE_CONTEXT_LIMIT);
+      out.set(token, topPages);
+    }
+    return out;
+  }, [results]);
+
+  const tokenPagesTooltip = useCallback((token: string) => {
+    const pages = tokenTopPagesMap.get(token) || [];
+    if (pages.length === 0) return `${token}\nNo page context found.`;
+    const lines = pages.map(
+      (p, idx) => `${idx + 1}. ${p.pageName} | Vol ${p.totalVolume.toLocaleString()} | KD ${p.avgKd ?? '-'} | KWs ${p.keywordCount}`,
+    );
+    return `${token}\nTop ${pages.length} pages:\n${lines.join('\n')}`;
+  }, [tokenTopPagesMap]);
 
   const buildAutoMergeRecommendations = useCallback((
     tokenRows: TokenSummary[],
@@ -3029,8 +2984,12 @@ export default function App() {
         return a.localeCompare(b);
       });
       const canonicalToken = sorted[0];
-      const mergeTokens = sorted.slice(1);
-      const allInvolved = new Set(component);
+      // Prevent transitive chain pollution (A~B~C) from auto-merging C with A
+      // unless C is directly connected to the chosen canonical token.
+      const canonicalNeighbors = adj.get(canonicalToken) || new Set<string>();
+      const mergeTokens = sorted.slice(1).filter(t => canonicalNeighbors.has(t));
+      if (mergeTokens.length === 0) continue;
+      const allInvolved = new Set([canonicalToken, ...mergeTokens]);
       const affectedRows = allRows.filter(r => r.tokenArr.some(t => allInvolved.has(t)));
       const affectedKeywords = Array.from(new Set(affectedRows.map(r => r.keyword))).slice(0, 30);
       const affectedPageCount = new Set(affectedRows.map(r => r.tokens)).size;
@@ -3062,21 +3021,30 @@ export default function App() {
     return recs.sort((a, b) => b.affectedKeywordCount - a.affectedKeywordCount);
   }, []);
 
-  const runAutoMergeRecommendations = useCallback(async () => {
-    if (!groupReviewSettingsRef.current) {
-      addToast('Settings are still loading. Try again in a moment.', 'error');
-      return;
-    }
-    const gs = groupReviewSettingsRef.current.getSettings();
+  const runAutoMergeRecommendations = useCallback(async (samplePercent: number = 100) => {
+    const gs = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
     if (!gs?.apiKey || gs.apiKey.trim().length < 10) {
       addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
       return;
     }
-    const tokenRows = (tokenSummaryRef.current || []).filter(t => !blockedTokensRef.current.has(t.token) && !universalBlockedTokens.has(t.token));
+    const allEligibleTokenRows: TokenSummary[] = ((tokenSummaryRef.current || []) as TokenSummary[])
+      .filter(t => !blockedTokensRef.current.has(t.token) && !universalBlockedTokens.has(t.token));
     const rows = resultsRef.current || [];
-    if (tokenRows.length < 2 || rows.length === 0) {
+    if (allEligibleTokenRows.length < 2 || rows.length === 0) {
       addToast('Need at least 2 non-blocked tokens with loaded keywords.', 'error');
       return;
+    }
+    const tokenRows = selectAutoMergeTokenRows(allEligibleTokenRows, samplePercent);
+    const tokenContextByToken = new Map<string, AutoMergeTokenPageContext[]>();
+    for (const t of tokenRows) {
+      tokenContextByToken.set(t.token, tokenTopPagesMap.get(t.token) || []);
+    }
+    const isTestRun = samplePercent < 100;
+    if (isTestRun) {
+      addToast(
+        `Auto Merge test mode: running ${tokenRows.length.toLocaleString()} of ${allEligibleTokenRows.length.toLocaleString()} tokens (${Math.min(100, Math.max(1, Math.floor(samplePercent)))}%).`,
+        'info',
+      );
     }
 
     autoMergeAbortRef.current?.abort();
@@ -3086,11 +3054,11 @@ export default function App() {
 
     const slice: AutoMergeSettingsSlice = {
       apiKey: gs.apiKey,
-      model: gs.keywordRatingModel,
+      model: gs.autoMergeModel,
       fallbackModel: gs.selectedModel,
-      temperature: gs.keywordRatingTemperature,
-      maxTokens: gs.keywordRatingMaxTokens,
-      reasoningEffort: gs.keywordRatingReasoningEffort,
+      temperature: gs.autoMergeTemperature,
+      maxTokens: gs.autoMergeMaxTokens,
+      reasoningEffort: gs.autoMergeReasoningEffort,
       prompt: gs.autoMergePrompt,
     };
 
@@ -3104,7 +3072,7 @@ export default function App() {
     const elapsedNow = () => Math.round(performance.now() - autoMergeJobStartRef.current);
     setAutoMergeJob({
       phase: 'running',
-      progress: 0,
+      progress: 1,
       done: 0,
       total: tokenRows.length,
       recommendations: 0,
@@ -3117,42 +3085,99 @@ export default function App() {
       elapsedMs: 0,
     });
     try {
+      // Yield once so the "running" state paints before heavier loops.
+      await Promise.resolve();
       const responseMap = new Map<string, { matches: string[]; confidence: number; reason: string }>();
-      const concurrency = Math.max(1, Math.min(25, gs.keywordRatingConcurrency || 5));
+      const concurrency = Math.max(1, Math.min(500, gs.autoMergeConcurrency || 5));
+      const allowedTokens = tokenRows.map(t => t.token);
+      const allowedSet = new Set(allowedTokens);
       let done = 0;
-      for (let i = 0; i < tokenRows.length; i += concurrency) {
-        if (ac.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-        const batch = tokenRows.slice(i, i + concurrency);
-        const batchResults = await Promise.all(batch.map(async (row) => {
-          const candidates = tokenRows.filter(t => t.token !== row.token).map(t => t.token);
-          return fetchAutoMergeMatches(slice, row.token, candidates, ac.signal);
-        }));
-        for (let j = 0; j < batch.length; j++) {
-          const r = batchResults[j];
-          const allowed = new Set(tokenRows.map(t => t.token));
-          responseMap.set(batch[j].token, {
-            matches: r.result.matches.filter(m => m !== batch[j].token && allowed.has(m)),
-            confidence: r.result.confidence,
-            reason: r.result.reason,
+      const previewEvery = Math.max(1, Math.floor(tokenRows.length / 40));
+      await runPool(
+        tokenRows,
+        concurrency,
+        async (row) => {
+          const chunkSize = 200;
+          const mergedMatches = new Set<string>();
+          let confidenceAcc = 0;
+          let confidenceN = 0;
+          let firstReason = '';
+          let chunk: string[] = [];
+          for (const candidate of allowedTokens) {
+            if (candidate === row.token) continue;
+            chunk.push(candidate);
+            if (chunk.length < chunkSize) continue;
+            const candidateTopPagesByToken: Record<string, AutoMergeTokenPageContext[]> = {};
+            for (const candidateToken of chunk) {
+              candidateTopPagesByToken[candidateToken] = tokenContextByToken.get(candidateToken) || [];
+            }
+            const r = await fetchAutoMergeMatches(
+              slice,
+              row.token,
+              chunk,
+              ac.signal,
+              {
+                sourceTopPages: tokenContextByToken.get(row.token) || [],
+                candidateTopPagesByToken,
+              },
+            );
+            mergeUsage(r.usage);
+            apiCalls += 1;
+            confidenceAcc += r.result.confidence;
+            confidenceN += 1;
+            if (!firstReason && r.result.reason) firstReason = r.result.reason;
+            for (const m of r.result.matches) {
+              if (m !== row.token && allowedSet.has(m)) mergedMatches.add(m);
+            }
+            chunk = [];
+          }
+          if (chunk.length > 0) {
+            const candidateTopPagesByToken: Record<string, AutoMergeTokenPageContext[]> = {};
+            for (const candidateToken of chunk) {
+              candidateTopPagesByToken[candidateToken] = tokenContextByToken.get(candidateToken) || [];
+            }
+            const r = await fetchAutoMergeMatches(
+              slice,
+              row.token,
+              chunk,
+              ac.signal,
+              {
+                sourceTopPages: tokenContextByToken.get(row.token) || [],
+                candidateTopPagesByToken,
+              },
+            );
+            mergeUsage(r.usage);
+            apiCalls += 1;
+            confidenceAcc += r.result.confidence;
+            confidenceN += 1;
+            if (!firstReason && r.result.reason) firstReason = r.result.reason;
+            for (const m of r.result.matches) {
+              if (m !== row.token && allowedSet.has(m)) mergedMatches.add(m);
+            }
+          }
+          responseMap.set(row.token, {
+            matches: Array.from(mergedMatches),
+            confidence: confidenceN > 0 ? Math.max(0, Math.min(1, confidenceAcc / confidenceN)) : 0,
+            reason: firstReason,
           });
-          mergeUsage(r.usage);
-        }
-        apiCalls += batch.length;
-        done += batch.length;
-        const recsPreview = buildAutoMergeRecommendations(tokenRows, rows, responseMap);
-        setAutoMergeJob(prev => ({
-          ...prev,
-          progress: Math.round((done / tokenRows.length) * 100),
-          done,
-          recommendations: recsPreview.length,
-          costUsdTotal: usageAcc.costUsd ?? 0,
-          costReported,
-          promptTokens: usageAcc.promptTokens,
-          completionTokens: usageAcc.completionTokens,
-          apiCalls,
-          elapsedMs: elapsedNow(),
-        }));
-      }
+          done += 1;
+          const shouldPreview = done === 1 || done === tokenRows.length || done % previewEvery === 0;
+          setAutoMergeJob(prev => ({
+            ...prev,
+            progress: Math.max(1, Math.round((done / tokenRows.length) * 100)),
+            done,
+            recommendations: shouldPreview ? buildAutoMergeRecommendations(tokenRows, rows, responseMap).length : prev.recommendations,
+            costUsdTotal: usageAcc.costUsd ?? 0,
+            costReported,
+            promptTokens: usageAcc.promptTokens,
+            completionTokens: usageAcc.completionTokens,
+            apiCalls,
+            elapsedMs: elapsedNow(),
+          }));
+          return null;
+        },
+        ac.signal,
+      );
       const recs = buildAutoMergeRecommendations(tokenRows, rows, responseMap);
       const nextRecs = mergeRecommendationsAfterRerun(autoMergeRecommendationsRef.current, recs);
       autoMergeRecommendationsRef.current = nextRecs;
@@ -3174,7 +3199,19 @@ export default function App() {
       setTokenMgmtSubTab('auto-merge');
       setTokenMgmtPage(1);
       const visible = nextRecs.filter(r => r.status !== 'declined').length;
-      addToast(`Auto Merge complete: ${visible} recommendation${visible === 1 ? '' : 's'}.`, 'success');
+      await flushNow();
+      const cloud = getCloudSyncSnapshot();
+      if (activeProjectId && cloud.projectDataWriteFailed) {
+        addToast(
+          `${isTestRun ? 'Auto Merge test complete locally' : 'Auto Merge complete locally'}, but cloud sync failed. Check Cloud status.`,
+          'warning',
+        );
+      } else {
+        addToast(
+          `${isTestRun ? 'Auto Merge test synced' : 'Auto Merge synced'}: ${visible} recommendation${visible === 1 ? '' : 's'}.`,
+          'success',
+        );
+      }
     } catch (e) {
       const isAbort =
         (e instanceof DOMException && e.name === 'AbortError') ||
@@ -3206,7 +3243,7 @@ export default function App() {
       }));
       addToast(msg, 'error');
     }
-  }, [addToast, buildAutoMergeRecommendations, persistence, setTokenMgmtPage, setTokenMgmtSubTab, universalBlockedTokens]);
+  }, [addToast, buildAutoMergeRecommendations, groupReviewSettingsSnapshot, persistence, setTokenMgmtPage, setTokenMgmtSubTab, tokenTopPagesMap, universalBlockedTokens]);
 
   // Shared filter bag for TableHeader â€" single object passed to all tabs
   const filterBag = useMemo((): FilterBag => ({
@@ -3656,20 +3693,43 @@ export default function App() {
 
   const autoMergeRows = useMemo(() => {
     if (tokenMgmtSubTab !== 'auto-merge') return [];
+    const statusRank = (status: AutoMergeRecommendation['status']) =>
+      status === 'pending' ? 0 : status === 'approved' ? 1 : 2;
+    const dir = autoMergeSortConfig.direction === 'asc' ? 1 : -1;
     return (autoMergeRecommendations || [])
       .filter(r => r.status !== 'declined')
       .sort((a, b) => {
-        if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
+        let base: number;
+        if (autoMergeSortConfig.key === 'canonical') {
+          base = a.canonicalToken.localeCompare(b.canonicalToken);
+        } else if (autoMergeSortConfig.key === 'mergeTokens') {
+          if (a.mergeTokens.length !== b.mergeTokens.length) base = a.mergeTokens.length - b.mergeTokens.length;
+          else base = a.mergeTokens.join(',').localeCompare(b.mergeTokens.join(','));
+        } else if (autoMergeSortConfig.key === 'impact') {
+          if (a.affectedKeywordCount !== b.affectedKeywordCount) base = a.affectedKeywordCount - b.affectedKeywordCount;
+          else base = a.affectedPageCount - b.affectedPageCount;
+        } else if (autoMergeSortConfig.key === 'status') {
+          base = statusRank(a.status) - statusRank(b.status);
+        } else {
+          base = a.confidence - b.confidence;
+        }
+        if (base !== 0) return base * dir;
+        // Stable fallback keeps highest confidence near top unless explicitly inverted by chosen sort.
+        if (a.confidence !== b.confidence) return b.confidence - a.confidence;
         if (a.affectedKeywordCount !== b.affectedKeywordCount) return b.affectedKeywordCount - a.affectedKeywordCount;
-        return b.confidence - a.confidence;
+        return a.canonicalToken.localeCompare(b.canonicalToken);
       });
-  }, [tokenMgmtSubTab, autoMergeRecommendations]);
+  }, [tokenMgmtSubTab, autoMergeRecommendations, autoMergeSortConfig]);
   const autoMergeTotalPages = Math.max(1, Math.ceil(autoMergeRows.length / tokenMgmtPerPage));
   const safeAutoMergePage = Math.min(tokenMgmtPage, autoMergeTotalPages);
   const paginatedAutoMergeRows = useMemo(
     () => autoMergeRows.slice((safeAutoMergePage - 1) * tokenMgmtPerPage, safeAutoMergePage * tokenMgmtPerPage),
     [autoMergeRows, safeAutoMergePage],
   );
+  const autoMergeSortIcon = (key: 'canonical' | 'mergeTokens' | 'impact' | 'confidence' | 'status') => {
+    if (autoMergeSortConfig.key !== key) return <ArrowUpDown className="w-3 h-3" />;
+    return autoMergeSortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />;
+  };
 
   // Token Management panel: filtered, sorted, paginated with subtab support
   const filteredMgmtTokens = useMemo(() => {
@@ -4036,9 +4096,19 @@ export default function App() {
     const recs = autoMergeRecommendationsRef.current;
     const rec = recs.find(r => r.id === recommendationId && r.status === 'pending');
     const currentResults = resultsRef.current;
-    if (!rec || !currentResults) return;
+    if (!rec) {
+      addToast('That merge recommendation is no longer pending.', 'info');
+      return;
+    }
+    if (!currentResults) {
+      addToast('Keyword data is not loaded yet.', 'error');
+      return;
+    }
     const childTokens = rec.mergeTokens.filter(t => t !== rec.canonicalToken);
-    if (childTokens.length === 0) return;
+    if (childTokens.length === 0) {
+      addToast('Nothing to merge for this row (tokens already match canonical).', 'info');
+      return;
+    }
     const cascade = executeMergeCascade(
       currentResults,
       groupedClustersRef.current,
@@ -4063,8 +4133,10 @@ export default function App() {
     const nextRecs = markRecommendationApproved(recs, rec.id, new Date().toISOString());
     autoMergeRecommendationsRef.current = nextRecs;
     persistence.updateAutoMergeRecommendations(nextRecs);
+    setTokenMgmtSubTab('merge');
+    setTokenMgmtPage(1);
     logAndToast('merge', `Auto-merged ${childTokens.join(', ')} → ${rec.canonicalToken}`, childTokens.length, `Auto-merged into '${rec.canonicalToken}'`, 'success');
-  }, [logAndToast, persistence]);
+  }, [addToast, logAndToast, persistence, setTokenMgmtPage, setTokenMgmtSubTab]);
 
   const declineAutoMergeRecommendation = useCallback((recommendationId: string) => {
     const recs = autoMergeRecommendationsRef.current;
@@ -4372,24 +4444,11 @@ export default function App() {
   const isFilteredAutoGroupFilterActive =
     filteredAutoGroupFilterSummary !== 'No additional filters active';
 
-  const filteredAutoGroupSettingsStatus = useMemo(() => {
-    if (!groupReviewSettingsHydrated) {
-      return {
-        missing: [],
-        requiresLocalKey: false,
-        summary: 'Loading shared Group Review settings...',
-      };
-    }
-    const settingsData = groupReviewSettingsSnapshot;
-    const missing: string[] = [];
-    if (!settingsData?.apiKey.trim()) missing.push('API key');
-    if (!settingsData?.selectedModel) missing.push('model');
-    return {
-      missing,
-      requiresLocalKey: false,
-      summary: 'Uses shared Group Review settings: API Key, Model, Temperature, Max Tokens, Reasoning, Auto-Group Prompt.',
-    };
-  }, [groupReviewSettingsHydrated, groupReviewSettingsSnapshot]);
+  const filteredAutoGroupSettingsStatus = useMemo(
+    () =>
+      getFilteredAutoGroupSettingsStatus(groupReviewSettingsHydrated, groupReviewSettingsSnapshot),
+    [groupReviewSettingsHydrated, groupReviewSettingsSnapshot]
+  );
 
   const buildFilteredAutoGroupPrompt = useCallback((
     pages: ClusterSummary[],
@@ -4763,10 +4822,19 @@ FAILURE CONDITIONS TO AVOID:
                     activeTab === 'approved' ? approvedGroups.length :
                     allBlockedKeywords.length;
 
+  const tabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70';
+  const mainTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5';
+  const mainTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const mainTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/60';
+  const subTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
+  const subTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const subTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
+  const stateTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1';
+
   // Approved stats
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
-      <div className="max-w-[1600px] mx-auto px-4 py-3">
+      <div className="max-w-[1600px] mx-auto px-3 py-2.5">
         <AppStatusBar activeProjectId={activeProjectId} />
 
         <header className="mb-1.5">
@@ -4795,7 +4863,15 @@ FAILURE CONDITIONS TO AVOID:
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
                     <span className="text-zinc-600 font-medium capitalize">
-                      {groupSubTab === 'data' ? (activeProjectId ? 'Data' : 'Projects') : groupSubTab === 'settings' ? 'Settings' : groupSubTab === 'log' ? 'Log' : groupSubTab}
+                      {groupSubTab === 'data'
+                        ? (activeProjectId ? 'Data' : 'Projects')
+                        : groupSubTab === 'topics'
+                          ? 'Topics'
+                          : groupSubTab === 'settings'
+                            ? 'Settings'
+                            : groupSubTab === 'log'
+                              ? 'Log'
+                              : groupSubTab}
                     </span>
                     {groupSubTab === 'settings' && (
                       <>
@@ -4876,11 +4952,11 @@ FAILURE CONDITIONS TO AVOID:
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
               <FeedbackModalHost authorEmail={user?.email ?? null} />
-              <div className="flex space-x-0.5 bg-zinc-100/60 p-px rounded-md">
+              <div className={tabRailClass}>
                 <button
                   type="button"
                   onClick={() => navigateMainTab('group')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`${mainTabBtnBase} ${mainTab === 'group' ? mainTabBtnActive : mainTabBtnInactive}`}
                 >
                   <Layers className="w-3 h-3 shrink-0" aria-hidden />
                   Group
@@ -4888,7 +4964,7 @@ FAILURE CONDITIONS TO AVOID:
                 <button
                   type="button"
                   onClick={() => navigateMainTab('generate')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`${mainTabBtnBase} ${mainTab === 'generate' ? mainTabBtnActive : mainTabBtnInactive}`}
                 >
                   <Sparkles className="w-3 h-3 shrink-0" aria-hidden />
                   Generate
@@ -4896,7 +4972,7 @@ FAILURE CONDITIONS TO AVOID:
                 <button
                   type="button"
                   onClick={() => navigateMainTab('feedback')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'feedback' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`${mainTabBtnBase} ${mainTab === 'feedback' ? mainTabBtnActive : mainTabBtnInactive}`}
                 >
                   <ClipboardList className="w-3 h-3 shrink-0" aria-hidden />
                   Feedback
@@ -4904,7 +4980,7 @@ FAILURE CONDITIONS TO AVOID:
                 <button
                   type="button"
                   onClick={() => navigateMainTab('feature-ideas')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'feature-ideas' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`${mainTabBtnBase} ${mainTab === 'feature-ideas' ? mainTabBtnActive : mainTabBtnInactive}`}
                 >
                   <Lightbulb className="w-3 h-3 shrink-0" aria-hidden />
                   Feature ideas
@@ -4959,17 +5035,20 @@ FAILURE CONDITIONS TO AVOID:
                 )}
               </div>
               {/* Right: Group sub-tabs */}
-              <div className="flex space-x-0.5 bg-zinc-100/60 p-px rounded-md">
-                <button type="button" onClick={() => navigateGroupSub('data')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'data' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+              <div className={tabRailClass}>
+                <button type="button" onClick={() => navigateGroupSub('data')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'data' ? subTabBtnActive : subTabBtnInactive}`}>
                   <Database className="w-2.5 h-2.5 shrink-0" aria-hidden />Data
                 </button>
-                <button type="button" onClick={() => navigateGroupSub('projects')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'projects' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('projects')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'projects' ? subTabBtnActive : subTabBtnInactive}`}>
                   <Folder className="w-2.5 h-2.5 shrink-0" aria-hidden />Projects
                 </button>
-                <button type="button" onClick={() => navigateGroupSub('settings')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'settings' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('topics')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'topics' ? subTabBtnActive : subTabBtnInactive}`}>
+                  <List className="w-2.5 h-2.5 shrink-0" aria-hidden />Topics
+                </button>
+                <button type="button" onClick={() => navigateGroupSub('settings')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'settings' ? subTabBtnActive : subTabBtnInactive}`}>
                   <Settings className="w-2.5 h-2.5 shrink-0" aria-hidden />Settings
                 </button>
-                <button type="button" onClick={() => navigateGroupSub('log')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'log' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateGroupSub('log')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'log' ? subTabBtnActive : subTabBtnInactive}`}>
                   <ClipboardList className="w-2.5 h-2.5 shrink-0" aria-hidden />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
                 </button>
               </div>
@@ -5330,7 +5409,7 @@ FAILURE CONDITIONS TO AVOID:
 
               {/* Keyword Management */}
               <div className="bg-white border border-zinc-100 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col flex-1 min-w-0">
-              <div className="px-3 py-2 border-b border-zinc-100 bg-zinc-50/30 flex flex-col shrink-0 relative z-20 gap-1">
+              <div className="px-2.5 py-1.5 border-b border-zinc-100 bg-zinc-50/30 flex flex-col shrink-0 relative z-20 gap-1">
                 <div className="flex items-center gap-1.5">
                   <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Hash className="w-3.5 h-3.5 text-zinc-500" />Keyword Management</h3>
                   {/* AI Review stats â€" always visible */}
@@ -5352,23 +5431,23 @@ FAILURE CONDITIONS TO AVOID:
                   })()}
                 </div>
                 {/* Row 1: Tabs with live counts */}
-                <div className="flex items-center gap-2">
-                  <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg w-fit">
+                <div className="flex items-center gap-1">
+                  <div className={`${tabRailClass} w-fit`}>
                     <button
                       onClick={() => switchTab('auto-group')}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'auto-group' ? 'bg-gradient-to-r from-violet-500 to-purple-500 shadow-sm text-white' : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'auto-group' ? 'bg-violet-50 shadow-sm text-violet-700 border border-violet-200' : mainTabBtnInactive}`}
                     >
                       <Zap className="w-3 h-3" />Auto-Group
                     </button>
                     <button
                       onClick={() => switchTab('pages')}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'pages' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'pages' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
                       <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('keywords')}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'keywords' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'keywords' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
                       <List className="w-3 h-3" />All Keywords {(effectiveResults?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
                     </button>
@@ -5379,20 +5458,20 @@ FAILURE CONDITIONS TO AVOID:
                         }
                         switchTab('grouped');
                       }}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'grouped' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'grouped' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
                       <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
                       {(() => { const mc = groupedClusters.filter(g => g.reviewStatus === 'mismatch').length; return mc > 0 ? <span className="ml-1 px-1 py-0.5 text-[9px] font-bold bg-red-100 text-red-700 rounded-full">{mc}</span> : null; })()}
                     </button>
                     <button
                       onClick={() => switchTab('approved')}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : mainTabBtnInactive}`}
                     >
                       <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('blocked')}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : mainTabBtnInactive}`}
                     >
                       <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
                     </button>
@@ -5421,23 +5500,9 @@ FAILURE CONDITIONS TO AVOID:
                     >
                       Rate KWs
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void runAutoMergeRecommendations()}
-                      disabled={autoMergeJob.phase === 'running'}
-                      className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-                      title="Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations"
-                    >
-                      Auto Merge KWs
-                    </button>
                     {(kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating') && (
                       <button type="button" onClick={handleCancelKeywordRating} className="text-zinc-500 hover:text-zinc-800 underline">
                         Cancel
-                      </button>
-                    )}
-                    {autoMergeJob.phase === 'running' && (
-                      <button type="button" onClick={handleCancelAutoMerge} className="text-zinc-500 hover:text-zinc-800 underline">
-                        Cancel Auto Merge
                       </button>
                     )}
                     {kwRatingJob.phase !== 'idle' && (
@@ -5494,43 +5559,6 @@ FAILURE CONDITIONS TO AVOID:
                         {kwRatingJob.phase === 'done' && <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden />}
                         {kwRatingJob.phase === 'error' && kwRatingJob.error && (
                           <span className="text-red-600 truncate max-w-[200px]" title={kwRatingJob.error}>{kwRatingJob.error}</span>
-                        )}
-                      </div>
-                    )}
-                    {autoMergeJob.phase !== 'idle' && (
-                      <div className="flex flex-wrap items-center gap-2 min-w-[200px] flex-1">
-                        <div className="flex-1 min-w-[120px] max-w-[280px] h-1.5 rounded-full bg-zinc-100 overflow-hidden">
-                          <div
-                            className={`h-full transition-all duration-300 ${autoMergeJob.phase === 'done' ? 'bg-emerald-500' : autoMergeJob.phase === 'error' ? 'bg-red-400' : 'bg-violet-500'}`}
-                            style={{ width: `${autoMergeJob.progress}%` }}
-                          />
-                        </div>
-                        <span className="tabular-nums text-zinc-700">
-                          {autoMergeJob.progress}%
-                        </span>
-                        <span className="text-zinc-500 tabular-nums">
-                          {autoMergeJob.done} / {autoMergeJob.total} tokens
-                        </span>
-                        <span className="text-zinc-500 tabular-nums">
-                          {autoMergeJob.recommendations} recommendations
-                        </span>
-                        {autoMergeJob.total > 0 && (
-                          <span className="text-zinc-500 tabular-nums max-w-[min(100%,320px)]">
-                            {formatKeywordRatingDuration(autoMergeJob.elapsedMs)}
-                            {autoMergeJob.costReported ? (
-                              <span> · ${autoMergeJob.costUsdTotal.toFixed(4)}</span>
-                            ) : (
-                              <span> · —</span>
-                            )}
-                            <span>
-                              {' '}
-                              · {autoMergeJob.promptTokens.toLocaleString()} in / {autoMergeJob.completionTokens.toLocaleString()} out · {autoMergeJob.apiCalls} API
-                            </span>
-                          </span>
-                        )}
-                        {autoMergeJob.phase === 'done' && <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden />}
-                        {autoMergeJob.phase === 'error' && autoMergeJob.error && (
-                          <span className="text-red-600 truncate max-w-[200px]" title={autoMergeJob.error}>{autoMergeJob.error}</span>
                         )}
                       </div>
                     )}
@@ -5730,46 +5758,99 @@ FAILURE CONDITIONS TO AVOID:
                   </div>
                 </div>
                 {activeTab !== 'auto-group' && (
-                  <div className="mt-1 flex items-center gap-x-2 gap-y-1 flex-wrap rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-[10px] text-zinc-600">
-                    <span className="font-semibold text-zinc-700">Auto Group</span>
-                    <span className={`font-medium ${
-                      filteredAutoGroupStats.status === 'running'
-                        ? 'text-blue-600'
-                        : filteredAutoGroupStats.status === 'complete'
-                          ? 'text-emerald-600'
-                          : filteredAutoGroupStats.status === 'error'
-                            ? 'text-red-600'
-                            : 'text-zinc-500'
-                    }`}>
+                  <div
+                    className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md border border-zinc-200/90 bg-zinc-50 px-2 py-0.5 text-[10px] leading-tight text-zinc-600"
+                    title={
+                      filteredAutoGroupSettingsStatus.missing.length > 0
+                        ? undefined
+                        : filteredAutoGroupSettingsStatus.summary
+                    }
+                  >
+                    <span className="inline-flex items-center gap-0.5 font-semibold text-zinc-700 shrink-0">
+                      <Sparkles className="w-3 h-3 text-violet-600" aria-hidden />
+                      Auto Group
+                    </span>
+                    <span
+                      className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-medium shrink-0 ${
+                        filteredAutoGroupStats.status === 'running'
+                          ? 'bg-blue-100 text-blue-700'
+                          : filteredAutoGroupStats.status === 'complete'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : filteredAutoGroupStats.status === 'error'
+                              ? 'bg-red-100 text-red-700'
+                              : 'bg-zinc-200/80 text-zinc-600'
+                      }`}
+                    >
+                      {filteredAutoGroupStats.status === 'running' ? (
+                        <Loader2 className="w-3 h-3 animate-spin shrink-0" aria-hidden />
+                      ) : filteredAutoGroupStats.status === 'complete' ? (
+                        <CheckCircle2 className="w-3 h-3 shrink-0" aria-hidden />
+                      ) : filteredAutoGroupStats.status === 'error' ? (
+                        <AlertCircle className="w-3 h-3 shrink-0" aria-hidden />
+                      ) : (
+                        <span className="w-2 h-2 rounded-full bg-zinc-400 shrink-0" aria-hidden />
+                      )}
                       {filteredAutoGroupStats.status === 'running'
                         ? 'Running'
                         : filteredAutoGroupStats.status === 'complete'
-                          ? 'Complete'
+                          ? 'Done'
                           : filteredAutoGroupStats.status === 'error'
                             ? 'Error'
                             : 'Idle'}
                     </span>
-                    <span>{filteredAutoGroupStats.groupsCreated} groups</span>
-                    <span>{filteredAutoGroupStats.pagesGrouped} grouped</span>
-                    <span>{filteredAutoGroupStats.pagesRemaining} left</span>
-                    <span>{filteredAutoGroupQueue.length} queued</span>
-                    <span>{filteredAutoGroupStats.totalVolumeGrouped.toLocaleString()} vol</span>
-                    <span>${filteredAutoGroupStats.cost.toFixed(4)}</span>
+                    <span className="text-zinc-300 select-none" aria-hidden>
+                      |
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0" title="Groups created">
+                      <Layers className="w-3 h-3 text-violet-600 shrink-0" aria-hidden />
+                      {filteredAutoGroupStats.groupsCreated}
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0" title="Pages grouped">
+                      <Check className="w-3 h-3 text-emerald-600 shrink-0" aria-hidden />
+                      {filteredAutoGroupStats.pagesGrouped}
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0" title="Pages remaining">
+                      <List className="w-3 h-3 text-amber-600 shrink-0" aria-hidden />
+                      {filteredAutoGroupStats.pagesRemaining}
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0" title="Jobs queued">
+                      <Inbox className="w-3 h-3 text-indigo-600 shrink-0" aria-hidden />
+                      {filteredAutoGroupQueue.length}
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0" title="Volume grouped">
+                      <TrendingUp className="w-3 h-3 text-sky-600 shrink-0" aria-hidden />
+                      {filteredAutoGroupStats.totalVolumeGrouped.toLocaleString()}
+                    </span>
+                    <span className="inline-flex items-center gap-0.5 tabular-nums shrink-0" title="API cost (last run)">
+                      <DollarSign className="w-3 h-3 text-emerald-700 shrink-0" aria-hidden />
+                      {filteredAutoGroupStats.cost.toFixed(4)}
+                    </span>
                     {filteredAutoGroupStats.elapsedMs > 0 && (
-                      <span>{(filteredAutoGroupStats.elapsedMs / 1000).toFixed(1)}s</span>
+                      <span className="tabular-nums text-zinc-500 shrink-0" title="Elapsed">
+                        {(filteredAutoGroupStats.elapsedMs / 1000).toFixed(1)}s
+                      </span>
                     )}
                     {filteredAutoGroupStats.error && (
-                      <span className="text-red-600">{filteredAutoGroupStats.error}</span>
+                      <span className="max-w-[min(100%,12rem)] truncate text-red-600" title={filteredAutoGroupStats.error}>
+                        {filteredAutoGroupStats.error}
+                      </span>
                     )}
+                    <span className="text-zinc-300 select-none hidden sm:inline" aria-hidden>
+                      |
+                    </span>
                     {filteredAutoGroupSettingsStatus.missing.length > 0 ? (
-                      <span className="text-amber-600">
-                        Missing settings: {filteredAutoGroupSettingsStatus.missing.join(', ')}
+                      <span className="inline-flex items-center gap-0.5 text-amber-700 shrink-0">
+                        <AlertCircle className="w-3 h-3 shrink-0" aria-hidden />
+                        Missing: {filteredAutoGroupSettingsStatus.missing.join(', ')}
                       </span>
                     ) : (
-                      <span className="text-zinc-500">{filteredAutoGroupSettingsStatus.summary}</span>
+                      <span className="inline-flex items-center gap-0.5 text-zinc-500 min-w-0 truncate">
+                        <Settings className="w-3 h-3 shrink-0 text-zinc-400" aria-hidden />
+                        <span className="truncate">Group Review</span>
+                      </span>
                     )}
-                    <span className="text-zinc-400">
-                      Shortcut: Shift+1{activeTab === 'pages' ? '' : ' (from Ungrouped)'}
+                    <span className="text-zinc-400 shrink-0" title="Keyboard shortcut">
+                      Shift+1{activeTab === 'pages' ? '' : ' (Ungrouped)'}
                     </span>
                   </div>
                 )}
@@ -5933,10 +6014,6 @@ FAILURE CONDITIONS TO AVOID:
                             }
                           }
                         }}
-                        saveCluster={saveCluster}
-                        generateBrief={generateBrief}
-                        briefLoading={briefLoading}
-                        brief={briefs[row.pageName]}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                       />
@@ -6306,6 +6383,70 @@ FAILURE CONDITIONS TO AVOID:
                       </button>
                     )}
                   </div>
+                  {results && results.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
+                      <button
+                        type="button"
+                        onClick={() => void runAutoMergeRecommendations()}
+                        disabled={autoMergeJob.phase === 'running'}
+                        className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                        title="Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations"
+                      >
+                        Auto Merge KWs
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void runAutoMergeRecommendations(10)}
+                        disabled={autoMergeJob.phase === 'running'}
+                        className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                        title="Run Auto Merge on top 10% of eligible tokens (cost-saving test mode)"
+                      >
+                        Test 10%
+                      </button>
+                      {autoMergeJob.phase === 'running' && (
+                        <button type="button" onClick={handleCancelAutoMerge} className="text-zinc-500 hover:text-zinc-800 underline">
+                          Cancel
+                        </button>
+                      )}
+                      {autoMergeJob.phase !== 'idle' && (
+                        <div className="flex flex-wrap items-center gap-2 min-w-[200px] flex-1">
+                          <div className="flex-1 min-w-[120px] max-w-[280px] h-1.5 rounded-full bg-zinc-100 overflow-hidden">
+                            <div
+                              className={`h-full transition-all duration-300 ${autoMergeJob.phase === 'done' ? 'bg-emerald-500' : autoMergeJob.phase === 'error' ? 'bg-red-400' : 'bg-violet-500'}`}
+                              style={{ width: `${autoMergeJob.progress}%` }}
+                            />
+                          </div>
+                          <span className="tabular-nums text-zinc-700">
+                            {autoMergeJob.progress}%
+                          </span>
+                          <span className="text-zinc-500 tabular-nums">
+                            {autoMergeJob.done} / {autoMergeJob.total} tokens
+                          </span>
+                          <span className="text-zinc-500 tabular-nums">
+                            {autoMergeJob.recommendations} recommendations
+                          </span>
+                          {autoMergeJob.total > 0 && (
+                            <span className="text-zinc-500 tabular-nums max-w-[min(100%,320px)]">
+                              {formatKeywordRatingDuration(autoMergeJob.elapsedMs)}
+                              {autoMergeJob.costReported ? (
+                                <span> · ${autoMergeJob.costUsdTotal.toFixed(4)}</span>
+                              ) : (
+                                <span> · —</span>
+                              )}
+                              <span>
+                                {' '}
+                                · {autoMergeJob.promptTokens.toLocaleString()} in / {autoMergeJob.completionTokens.toLocaleString()} out · {autoMergeJob.apiCalls} API
+                              </span>
+                            </span>
+                          )}
+                          {autoMergeJob.phase === 'done' && <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden />}
+                          {autoMergeJob.phase === 'error' && autoMergeJob.error && (
+                            <span className="text-red-600 truncate max-w-[200px]" title={autoMergeJob.error}>{autoMergeJob.error}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Merge subtab is rendered in the table below */}
@@ -6408,7 +6549,7 @@ FAILURE CONDITIONS TO AVOID:
                                         if (newTokens.size > 0) switchTab('pages');
                                       }}
                                       className={`${selectedTokens.has(ruleRow.parentToken) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors cursor-pointer`}
-                                      title="Filter keyword management by this token"
+                                      title={tokenPagesTooltip(ruleRow.parentToken)}
                                     >
                                       {ruleRow.parentToken}
                                     </button>
@@ -6454,7 +6595,7 @@ FAILURE CONDITIONS TO AVOID:
                                             if (newTokens.size > 0) switchTab('pages');
                                           }}
                                           className={`${selectedTokens.has(childToken) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors cursor-pointer`}
-                                          title="Filter keyword management by this token"
+                                          title={tokenPagesTooltip(childToken)}
                                         >
                                           {childToken}
                                         </button>
@@ -6494,11 +6635,51 @@ FAILURE CONDITIONS TO AVOID:
                     <table className="w-full text-left text-xs">
                       <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#f0f0f0]">
                         <tr>
-                          <th className="px-2 py-1.5">Canonical</th>
-                          <th className="px-2 py-1.5">Merge Tokens</th>
-                          <th className="px-2 py-1.5 text-right">Impact</th>
-                          <th className="px-2 py-1.5 text-right">Conf.</th>
-                          <th className="px-2 py-1.5 text-right">Actions</th>
+                          <th
+                            className="px-2 py-1.5 cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setAutoMergeSortConfig(prev => ({ key: 'canonical', direction: prev.key === 'canonical' && prev.direction === 'asc' ? 'desc' : 'asc' }))}
+                          >
+                            <div className="flex items-center gap-1">
+                              Canonical
+                              {autoMergeSortIcon('canonical')}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setAutoMergeSortConfig(prev => ({ key: 'mergeTokens', direction: prev.key === 'mergeTokens' && prev.direction === 'asc' ? 'desc' : 'asc' }))}
+                          >
+                            <div className="flex items-center gap-1">
+                              Merge Tokens
+                              {autoMergeSortIcon('mergeTokens')}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 text-right cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setAutoMergeSortConfig(prev => ({ key: 'impact', direction: prev.key === 'impact' && prev.direction === 'asc' ? 'desc' : 'asc' }))}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              Impact
+                              {autoMergeSortIcon('impact')}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 text-right cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setAutoMergeSortConfig(prev => ({ key: 'confidence', direction: prev.key === 'confidence' && prev.direction === 'asc' ? 'desc' : 'asc' }))}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              Conf.
+                              {autoMergeSortIcon('confidence')}
+                            </div>
+                          </th>
+                          <th
+                            className="px-2 py-1.5 text-right cursor-pointer hover:bg-zinc-100 transition-colors select-none"
+                            onClick={() => setAutoMergeSortConfig(prev => ({ key: 'status', direction: prev.key === 'status' && prev.direction === 'asc' ? 'desc' : 'asc' }))}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              Status
+                              {autoMergeSortIcon('status')}
+                            </div>
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
@@ -6506,18 +6687,32 @@ FAILURE CONDITIONS TO AVOID:
                           const mergeRule = tokenMergeRules.find(r => r.recommendationId === rec.id);
                           return (
                             <tr key={rec.id} className="hover:bg-zinc-50/50 transition-colors">
-                              <td className="px-2 py-1.5 font-mono text-zinc-800">{rec.canonicalToken}</td>
+                              <td className="px-2 py-1.5 font-mono text-zinc-800" title={tokenPagesTooltip(rec.canonicalToken)}>{rec.canonicalToken}</td>
                               <td className="px-2 py-1.5 text-zinc-700">
                                 <div className="flex flex-wrap gap-1">
                                   {rec.mergeTokens.map(t => (
-                                    <span key={t} className="px-1.5 py-px rounded bg-zinc-100 text-zinc-700 font-mono">{t}</span>
+                                    <span key={t} className="px-1.5 py-px rounded bg-zinc-100 text-zinc-700 font-mono" title={tokenPagesTooltip(t)}>{t}</span>
                                   ))}
                                 </div>
                               </td>
                               <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">
                                 {rec.affectedKeywordCount.toLocaleString()} kws · {rec.affectedPageCount.toLocaleString()} pages
                               </td>
-                              <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{Math.round(rec.confidence * 100)}%</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">
+                                <span
+                                  className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                                    rec.confidence >= 0.999
+                                      ? 'bg-emerald-600 text-white'
+                                      : rec.confidence >= 0.95
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : rec.confidence >= 0.85
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : 'bg-rose-100 text-rose-800'
+                                  }`}
+                                >
+                                  {Math.round(rec.confidence * 100)}%
+                                </span>
+                              </td>
                               <td className="px-2 py-1.5 text-right">
                                 <div className="flex items-center justify-end gap-1">
                                   {rec.status === 'pending' ? (
@@ -6677,7 +6872,7 @@ FAILURE CONDITIONS TO AVOID:
                                 if (newTokens.size > 0) switchTab('pages');
                               }}
                               className={`${selectedTokens.has(row.token) ? 'bg-purple-100 text-purple-700 font-semibold' : 'hover:text-indigo-600 hover:bg-indigo-50'} px-1 rounded transition-colors cursor-pointer`}
-                              title="Click to filter keyword management by this token"
+                              title={tokenPagesTooltip(row.token)}
                             >
                               {row.token}
                             </button>
@@ -6765,174 +6960,25 @@ FAILURE CONDITIONS TO AVOID:
         )}
 
         {mainTab === 'group' && groupSubTab === 'projects' && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-2xl font-semibold text-zinc-900">Projects</h2>
-                    <p className="text-zinc-500 text-sm">Select a project to view or upload keyword data.</p>
-                  </div>
-                  <button
-                    onClick={() => setIsCreatingProject(true)}
-                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-sm font-medium"
-                  >
-                    <Plus className="w-4 h-4" />
-                    New Project
-                  </button>
-                </div>
-
-                {isCreatingProject && (
-                  <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-md animate-in zoom-in-95 duration-200">
-                    <h3 className="text-lg font-medium text-zinc-900 mb-4">Create New Project</h3>
-                    
-                    {projectError && (
-                      <div className="mb-4 p-3 bg-red-50 border border-red-100 rounded-lg flex items-center gap-2 text-red-600 text-sm">
-                        <AlertCircle className="w-4 h-4" />
-                        {projectError}
-                      </div>
-                    )}
-
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-zinc-700 mb-1">Project Name</label>
-                        <input
-                          type="text"
-                          value={newProjectName}
-                          onChange={(e) => setNewProjectName(e.target.value)}
-                          placeholder="e.g., Q1 SEO Strategy"
-                          className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-zinc-700 mb-1">Description (Optional)</label>
-                        <textarea
-                          value={newProjectDescription}
-                          onChange={(e) => setNewProjectDescription(e.target.value)}
-                          placeholder="What is this project about?"
-                          className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all h-24 resize-none"
-                        />
-                      </div>
-                      <div className="flex justify-end gap-3 pt-2">
-                        <button
-                          onClick={() => setIsCreatingProject(false)}
-                          className="px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-50 rounded-lg transition-colors"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={createProject}
-                          disabled={!newProjectName.trim() || isProjectLoading}
-                          className="px-4 py-2 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                        >
-                          {isProjectLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                          {isProjectLoading ? 'Creating...' : 'Create Project'}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {projects.length === 0 ? (
-                    <div className="col-span-full py-20 bg-white border border-dashed border-zinc-300 rounded-2xl flex flex-col items-center justify-center text-center">
-                      <Folder className="w-12 h-12 text-zinc-300 mb-4" />
-                      <h3 className="text-lg font-medium text-zinc-900 mb-1">No projects yet</h3>
-                      <p className="text-zinc-500 max-w-xs">Create your first project to start organizing your keyword data.</p>
-                    </div>
-                  ) : (
-                    projects.map((project) => {
-                      const isActive = activeProjectId === project.id;
-                      return (
-                        <div
-                          key={project.id}
-                          className={`bg-white border rounded-2xl shadow-sm hover:shadow-md transition-all cursor-pointer relative overflow-hidden ${isActive ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-zinc-200 hover:border-zinc-300'}`}
-                          onClick={() => selectProject(project.id)}
-                        >
-                          {/* Active indicator bar */}
-                          {isActive && <div className="absolute top-0 left-0 right-0 h-1 bg-indigo-500" />}
-
-                          <div className="p-5">
-                            {/* Row 1: Icon + Name (editable) + Actions */}
-                            <div className="flex items-center gap-3 mb-2">
-                              <div className={`p-2 rounded-lg shrink-0 ${isActive ? 'bg-indigo-100 text-indigo-600' : 'bg-zinc-100 text-zinc-400'}`}>
-                                <Folder className="w-5 h-5" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <h3
-                                  className="text-sm font-semibold text-zinc-900 truncate cursor-text"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    const el = e.currentTarget;
-                                    el.contentEditable = 'true';
-                                    el.focus();
-                                    // Select all text
-                                    const range = document.createRange();
-                                    range.selectNodeContents(el);
-                                    window.getSelection()?.removeAllRanges();
-                                    window.getSelection()?.addRange(range);
-                                      const finish = () => {
-                                      el.contentEditable = 'false';
-                                      const newName = el.textContent?.trim();
-                                      if (newName && newName !== project.name) {
-                                        setProjects(prev => {
-                                          const updated = prev.map(p => p.id === project.id ? { ...p, name: newName } : p);
-                                          return updated;
-                                        });
-                                        // Persist to Firestore
-                                        setDoc(doc(db, 'projects', project.id), { name: newName }, { merge: true }).catch((err) =>
-                                        reportPersistFailure(addToast, 'rename project', err),
-                                      );
-                                      } else {
-                                        el.textContent = project.name;
-                                      }
-                                    };
-                                    el.onblur = finish;
-                                    el.onkeydown = (ev: KeyboardEvent) => { if (ev.key === 'Enter') { ev.preventDefault(); el.blur(); } if (ev.key === 'Escape') { el.textContent = project.name; el.blur(); } };
-                                  }}
-                                  title="Click to rename"
-                                  suppressContentEditableWarning
-                                >
-                                  {project.name}
-                                </h3>
-                              </div>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); deleteProject(project.id); }}
-                                className="p-1.5 text-zinc-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all shrink-0"
-                                title="Delete project"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-
-                            {/* Description */}
-                            {project.description && (
-                              <p className="text-xs text-zinc-400 mb-3 line-clamp-2 pl-11">{project.description}</p>
-                            )}
-
-                            {/* Row 2: Stats */}
-                            <div className="flex items-center gap-3 pl-11 text-[11px]">
-                              <span className="text-zinc-400 flex items-center gap-1">
-                                <Calendar className="w-3 h-3" />
-                                {new Date(project.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                              </span>
-                              {project.fileName && (
-                                <span className="text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-medium flex items-center gap-1">
-                                  <FileText className="w-3 h-3" />
-                                  CSV
-                                </span>
-                              )}
-                              {isActive && (
-                                <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-semibold">Active</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </>
-          </div>
+          <ProjectsTab
+            projects={projects}
+            setProjects={setProjects}
+            activeProjectId={activeProjectId}
+            selectProject={selectProject}
+            deleteProject={deleteProject}
+            reviveProject={reviveProject}
+            permanentlyDeleteProject={permanentlyDeleteProject}
+            createProject={createProject}
+            isCreatingProject={isCreatingProject}
+            setIsCreatingProject={setIsCreatingProject}
+            newProjectName={newProjectName}
+            setNewProjectName={setNewProjectName}
+            newProjectDescription={newProjectDescription}
+            setNewProjectDescription={setNewProjectDescription}
+            projectError={projectError}
+            isProjectLoading={isProjectLoading}
+            addToast={addToast}
+          />
         )}
 
         {/* Settings sub-tab â€" Universal Blocked Tokens */}
@@ -6941,17 +6987,17 @@ FAILURE CONDITIONS TO AVOID:
             {/* Settings header with sub-tabs */}
             <div className="px-6 py-4 border-b border-zinc-100">
               <h2 className="text-base font-semibold text-zinc-900 mb-3">Settings</h2>
-              <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg w-fit">
-                <button type="button" onClick={() => navigateSettingsSub('general')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'general' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+              <div className={`${tabRailClass} w-fit`}>
+                <button type="button" onClick={() => navigateSettingsSub('general')} className={`${subTabBtnBase} text-[11px] ${settingsSubTab === 'general' ? subTabBtnActive : subTabBtnInactive}`}>
                   General
                 </button>
-                <button type="button" onClick={() => navigateSettingsSub('how-it-works')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'how-it-works' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('how-it-works')} className={`${subTabBtnBase} text-[11px] ${settingsSubTab === 'how-it-works' ? subTabBtnActive : subTabBtnInactive}`}>
                   How it Works
                 </button>
-                <button type="button" onClick={() => navigateSettingsSub('dictionaries')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'dictionaries' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('dictionaries')} className={`${subTabBtnBase} text-[11px] ${settingsSubTab === 'dictionaries' ? subTabBtnActive : subTabBtnInactive}`}>
                   Dictionaries
                 </button>
-                <button type="button" onClick={() => navigateSettingsSub('blocked')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all ${settingsSubTab === 'blocked' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                <button type="button" onClick={() => navigateSettingsSub('blocked')} className={`${subTabBtnBase} text-[11px] ${settingsSubTab === 'blocked' ? subTabBtnActive : subTabBtnInactive}`}>
                   Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
                 </button>
               </div>
@@ -7160,6 +7206,12 @@ FAILURE CONDITIONS TO AVOID:
                 addToast('Activity log cleared', 'info');
               }}
             />
+          </div>
+        )}
+
+        {mainTab === 'group' && groupSubTab === 'topics' && (
+          <div className="max-w-6xl mx-auto mt-4">
+            <TopicsSubTab />
           </div>
         )}
 

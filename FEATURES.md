@@ -4,11 +4,37 @@
 
 ---
 
+## Topics Library (Group > Topics)
+
+- Added a new `Topics` sub-tab under the `Group` tab.
+- Added an initial `Loans` topic catalog as a table-based lead model for credit repair campaigns.
+- Expanded `Loans` coverage with broad umbrella subtopics (personal, auto, mortgage, refinance, student, business, equity, medical, property, and debt-relief) so the topic net is comprehensive in addition to long-tail/problem-intent variants.
+- Includes a comprehensive list of loan-related subtopics with a `1-4` relevance score (`4 = highest`) plus intent and rationale columns.
+- Route support added for `/seo-magic/group/topics`.
+- `Topics > Loans` is now a persisted editable grid with:
+  - Sortable columns (subtopic, source score, intent score, average, seed KW counts, Ahrefs link count, notes).
+  - `Lead Intent` upgraded to `1-4` scoring with color-coded badges.
+  - Auto-calculated `Best of Both Avg = (Source Rank + Lead Intent) / 2` and top-row highlighting for highest averages.
+  - Dual seed keyword recommendation fields (`Seed KWs (Source)` + `Seed KWs (Intent)`).
+  - Full row editing: add/remove subtopics, edit scores/rationale/notes, add/remove/edit multiple Ahrefs links per subtopic.
+  - Live persistence to IndexedDB + Firestore (`app_settings/topics_loans`) so edits survive refresh and sync across users.
+
+---
+
 ## Auto Merge KWs (Token Management)
 
 - New `Auto Merge KWs` action runs an OpenRouter job that compares each non-blocked token against all other non-blocked tokens and returns only lexically/semantically identical matches (including very minor spelling variants).
 - Added a dedicated shared prompt (`Auto Merge Prompt`) in Group Review settings to control strict exact-identity matching behavior.
 - Job UI mirrors `Rate KWs`: progress bar, processed/total counts, recommendation count, elapsed time, token usage, API calls, and cancel support.
+- Added `Test 10%` action next to `Auto Merge KWs` to run a lower-cost trial on the top 10% of eligible tokens (ranked by frequency/volume) before a full run.
+- Full-run startup no longer prebuilds a token->all-candidates matrix (which could freeze large projects at apparent `0%`); candidate chunks now stream per token and the running state yields once so progress paints immediately.
+- Auto Merge JSON parsing is now hardened against malformed model wrappers (extra prose, fenced code blocks, and trailing objects), reducing false "did not return valid JSON" failures.
+- Auto Merge default instructions are now explicitly strict: merge only for literal semantic identity or super-minor lexical variants with zero meaning drift; any ambiguity or nuance difference must be excluded.
+- Auto Merge request payload now always includes a non-overrideable strict policy block (even if a custom prompt is saved), and recommendation assembly excludes transitive chain-only tokens that are not directly linked to the canonical token.
+- Auto Merge evaluation context now includes top 5 pages per token (page name, keyword count, volume, avg KD) for source and candidate tokens; token hover in Token Management + Auto Merge shows the same top-page context.
+- Auto Merge completion now forces an immediate project flush and waits for cloud write completion before the final toast; completion toast now distinguishes synced success vs local-complete/cloud-failed.
+- Auto Merge results table now defaults to highest confidence first, supports sorting on every column header (canonical, merge tokens, impact, confidence, actions/status), and colors confidence percentages (green/amber/red bands) for faster scan.
+- Applying an auto-merge recommendation now routes users directly to the `Merge` sub-tab (page 1) so the resulting merge rule is visible immediately.
 - Token Management now includes an `auto-merge` sub-tab for review workflow:
   - Review recommendation rows with canonical token, merge tokens, confidence, and impacted keyword/page counts.
   - Apply one merge, decline one recommendation, or bulk `Merge All` pending recommendations.
@@ -22,17 +48,24 @@
 - Saved immediately to localStorage, IndexedDB, and Firestore
 - Each project stores its own independent keyword data
 
+### Projects tab (folders & deleted)
+- **Folders:** Create named folders (Firestore `app_settings/project_folders` + localStorage + IndexedDB cache). Drag project cards onto **Unassigned** or a folder to set `folderId` on the project doc, or use the **Move to folder** control on each card (keyboard-accessible). Rename a folder by clicking its title; remove a folder with the trash control — projects in that folder move back to **Unassigned** (nothing is deleted).
+- **Delete project (soft):** Trash on a card moves the project to **Deleted projects**; keyword data stays in IDB + Firestore until **Delete forever**. Removing a folder never deletes projects.
+- **Restore / permanent delete:** Deleted list shows **Restore** (clears `deletedAt`) or **Delete forever** (same as legacy hard delete: metadata doc, chunks, IDB).
+- If the active project is deleted or soft-deleted, the workspace clears and the app returns to the Projects sub-tab.
+
 ### Delete Project
-- Trash icon on project card (always visible)
-- Confirmation dialog before deletion
-- Removes from all 3 storage layers (localStorage, IDB, Firestore metadata + data chunks)
-- If deleting the active project, clears all state
+- Trash icon on project card moves it to **Deleted projects** (see above). **Delete forever** in that list performs the final removal.
+- Confirmation before soft-delete and before permanent delete
+- Permanent delete removes from all storage layers (localStorage project cache, IDB, Firestore metadata + data chunks)
+- If deleting the active project (soft or permanent), clears all workspace state
 
 ### Select Project
 - Click project card to load its data
 - Loads **IDB + Firestore in parallel**; Firestore leg uses **`getDocsFromServer`** (falls back to cache if offline) so refresh does not merge against a **stale local Firestore cache**. Merges with `pickNewerProjectPayload`: monotonic `lastSaveId`, then `updatedAt`; **ties prefer Firestore**; safety rules when IDB has higher `lastSaveId` but **fewer CSV rows or fewer groups** vs server (legacy `saveId`, or large id gap). Fixes grouped/pages drops and “CSV disappeared” after refresh.
 - If Firestore wins, IDB cache is refreshed from it
 - Restores all state: results, clusters, tokens, groups, blocked keywords, stats
+- Active project sync no longer clears selection when `user_preferences.activeProjectId` arrives before the `projects` listener has that project in memory; this removes intermittent fallback to the amber **Select Project** button while a valid project still exists.
 
 ### Persistence
 - Project metadata: localStorage + Firestore projects/{id} doc
@@ -68,7 +101,7 @@
 6. Local intent unification — "near me", "close to me", etc. to "nearby"
 7. Singularization — Runs BEFORE synonym lookup (so map only needs singular forms)
 8. Synonym replacement — 300+ curated SEO-intent synonym pairs
-9. Stop word removal — 130+ common English stop words
+9. Stop word removal — common English stop words (includes `vancouver` so city tokens do not create separate page signatures; `no` / `not` / `without` / `with` are **not** stripped so negation phrases keep distinct signatures)
 10. State normalization — Full names to abbreviations in token signatures
 11. Number normalization — Word numbers to digits
 12. Stemming — Lightweight suffix stripper (-ing, -ed, -er, -tion, -ment, -ness, -able, -ful, -ly)
@@ -108,6 +141,7 @@
 - **Phase 2 — Per-keyword ratings:** each keyword receives JSON `{"rating":1|2|3}` (1 = relevant to core intent, 2 = unsure, 3 = not relevant). Ratings appear in the **Rating** column with soft green / amber / red styling.
 - **Filters:** min/max **Rating** (1–3); rows without a rating are excluded when either bound is set.
 - **Progress:** bar, percent, done/total; live **1 / 2 / 3** counts (same styling as the Rating column); **elapsed time**, **OpenRouter cost** (`usage.cost` when returned), **prompt/completion token totals**, and **API call count** (1 summary + one per keyword); checkmark when complete; success toast summarizes counts + duration + cost when known; **Cancel** aborts in-flight requests.
+- **Done means cloud-written:** when `Rate KWs` finishes, the app now forces an immediate project flush (skips debounce) and waits for queued Firestore writes before showing the completion toast. Toast copy now distinguishes **synced** vs **local complete but cloud write failed**.
 - **Persistence:** `kwRating` on each `ProcessedRow` is saved with the project (IndexedDB + Firestore); ratings are written in batches after each parallel chunk. Each batch merges into the **latest** results snapshot (ref + last merged write) so in-flight rating does not overwrite concurrent edits from a stale array.
 - **Live UI:** After each batch, `clusterSummary` is rebuilt from results and **Grouped** / **Approved** groups get fresh cluster rows + aggregates so **Ungrouped / Grouped / Approved** rating columns update in real time (not only after the job finishes).
 - **After refresh:** On project load (IDB/Firestore), `clusterSummary` and group cluster rows are **always rebuilt from `results`** so `kwRating` on rows is the source of truth — rating columns stay filled and the Rate KWs control shows **done** / partial progress from saved `kwRating` (job UI state itself is not persisted).
@@ -203,8 +237,8 @@
 - Len column: positioned to right of tokens
 
 ### Expandable Rows
-- Pages tab: Click to expand and see individual keywords
-- Grouped tab: Click to expand groups to sub-clusters to keywords
+- Pages tab: Click to expand — child keywords render as extra table rows: keyword text is indented under **Page Name**; **Len**, **KWs** (1 per child), **Vol.**, **KD**, **Rating**, and location columns align with the main header (no horizontal scroller, no “Keywords in Cluster” header or Save/Generate actions)
+- Grouped tab: Click to expand groups to sub-clusters; expand a sub-cluster to see the same column-aligned child keyword rows
 
 ### CSV Export
 - Export button downloads current view as CSV
@@ -225,7 +259,8 @@
 - Common typos for finance, legal, and general English terms
 
 ### Stop Words (~130 entries)
-- Standard English stop words
+- Standard English stop words, plus `vancouver` (always stripped from signatures; also listed under foreign cities for foreign-entity detection)
+- **Not** stripped: `no`, `not`, `without`, `with` (preserves negation / “with no title” style intent in token signatures)
 
 ### Foreign Countries/Cities
 - ~200 foreign country names + abbreviations
@@ -245,6 +280,8 @@
 - Two-panel layout: Keyword Management (left), Token Management (right)
 - Both panels at same vertical level
 - **Compact chrome:** main shell uses reduced padding (`px-4 py-3`); **status bar** (sync + clocks + weather) is denser; **SEO Magic** title + **breadcrumb** + **main tabs** (Group / Generate / Feedback / Feature ideas) share one header row on larger screens with a single subtitle line below; **Group** sub-tabs (Data / Projects / Settings / Log) use a thinner pill row
+- **Unified tab system:** main tabs + sub-tabs now share one segmented-control style (soft rail + white active pill + consistent typography/spacing) across Group, Generate, Auto-Group/Cosine, and Settings for a cleaner, tighter visual rhythm with compact but readable hit targets
+- **Tab density polish:** reduced tab-rail/button padding and tightened surrounding panel/header spacing in Group + Generate + Auto-Group so screens feel more minimalist while preserving clear active/inactive separation and status color cues
 - Compact project header
 - **Top status bar:** today’s date (**calendar** icon); **Local** clock line (**clock** icon); **US Eastern** line (**globe** icon); **local weather** from Open-Meteo (**thermometer** + condition icon; while loading: **Finding your location…** then **Loading forecast…** in a light sky-tint dashed pill; if location is **blocked**: amber **Location blocked — hover for help** with portal steps for Chrome/Edge/Safari/Firefox on Windows & Mac (+ OS location notes); **unavailable** uses cloud-off; **°F** when the device timezone is a known US zone, otherwise **°C** for Canada, EU, and the rest of the world; temperature tint follows cold→hot hues; **manual Refresh/Retry buttons** let users force an immediate weather re-fetch instead of waiting for cadence; **hover / focus / tap** opens a portal tooltip with a **7-day** min/max forecast, per-day icons, and per-day tint **plus short nowcast insight lines**: update cadence (**every 15 minutes**), **next refresh countdown**, likely hold duration for current conditions, estimated next weather-change time, and likely rain windows in the next 24h; day rows reserve a dedicated temperature column and truncate long condition labels to prevent overlap in narrow widths; graceful fallback if location is blocked/unavailable); **Status** badge (small **cloud** icon + `Status` + line such as Cloud: synced; colored dot) with **hover / focus / tap** (portal tooltip — structured panel with icons, sections, light gradient header, status-tinted accents; tight **4px** gap to anchor; not the slow browser `title` attribute) showing diagnostics (network, `first-db`, server snapshot, project id, flush queue, last save, listener channel errors) — not driven by one listener: **aggregated Firestore listener error callbacks** (projects list, project chunks, app_settings docs, Generate/AutoGroup/feedback/table width/group-review listeners, etc.), **any snapshot with server metadata** (`metadata.fromCache === false`) for “connected”, **project coalesced flush depth** (“Syncing…”), and **last project Firestore save success vs failure** from the persist queue. Copy: **Cloud: synced** / **Syncing…** / **Offline — saved locally** / **Sync problem — retry** / **Connecting…**
 
@@ -345,6 +382,9 @@
 
 | Date | Change |
 |------|--------|
+| 2026-03-27 | Token signatures: removed `no`, `not`, `without`, `with` from stop-word stripping; added `vancouver` to stop words (still in foreign cities for detection) |
+| 2026-03-27 | Auto-Group v1: assignment batch size up to **500** ungrouped keywords per API call; dynamic `max_tokens` for large assignment and cosine-summary JSON; default two-token LLM batches span up to 500 pages |
+| 2026-03-27 | UI polish: unified main tabs/sub-tabs into a shared segmented-control pattern and tightened tab/header spacing for a more compact, consistent light-theme look across Group, Generate, Auto-Group, and Settings |
 | 2026-03-26 | Feature ideas tab: four new backlog items (CSV relevance gate, token merge pass, unique-token auto-merge + tiers, unique-token 1–4 priority ranking) |
 | 2026-03-26 | **Bugfixes:** Cosine similarity skips embedding when fewer than two pages (avoids useless API calls and NaN progress); grouped/approved sub-cluster keys parse only the first `::` so token strings containing `::` (e.g. cosine anchor pages) ungroup correctly |
 | 2026-03-26 | **Cosine Test** (Auto-Group sub-tab): **Send mismatches to Ungrouped** — after Initial Cosine QA flags mismatches, one click removes those pages from grouped clusters so they only appear under Cosine Ungrouped (manual step until automatic handling lands) |
@@ -611,4 +651,4 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 
 ---
 
-*Last updated: 2026-03-24*
+*Last updated: 2026-03-27*

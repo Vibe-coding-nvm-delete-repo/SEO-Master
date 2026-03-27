@@ -6,6 +6,9 @@ import { ChevronDown, ChevronRight, Play, Square, CheckCircle2, AlertCircle, Loa
 import ModelSelector from './ModelSelector';
 import SettingsControls from './SettingsControls';
 import {
+  AUTO_GROUP_MAX_BATCH_PAGES,
+  computeAutoGroupAssignmentMaxTokens,
+  computeCosineSummaryMaxTokens,
   DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT,
   DEFAULT_AUTO_GROUP_QA_PROMPT,
   DEFAULT_COSINE_SUMMARY_PROMPT,
@@ -367,7 +370,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       if (d?.model) setAgModel(d.model);
       if (d?.temperature !== undefined) setAgTemperature(Number(d.temperature));
       if (d?.concurrency !== undefined) setAgConcurrency(Math.min(250, Math.max(1, Number(d.concurrency) || 5)));
-      if (d?.batchSize !== undefined) setAgBatchSize(Math.min(25, Math.max(5, Number(d.batchSize))));
+      if (d?.batchSize !== undefined) setAgBatchSize(Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))));
       if (d?.reasoning) {
         if (d.reasoning === 'off') setAgReasoning(false);
         else if (['low', 'medium', 'high'].includes(d.reasoning)) setAgReasoning(d.reasoning);
@@ -694,7 +697,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     onProgress?: (processed: number, total: number, cost: number, tokens: number) => void,
     onBatchComplete?: (batchSummaries: Map<string, string>) => void
   ) => {
-    const batchSize = 25;
+    const batchSize = AUTO_GROUP_MAX_BATCH_PAGES;
     const totalBatches = Math.ceil(pages.length / batchSize);
     const summaryMap = new Map<string, string>();
     let totalCostLocal = 0;
@@ -727,6 +730,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
             ],
             temperature: activeSettings.temperature ?? 0.2,
             response_format: { type: 'json_object' },
+            max_tokens: computeCosineSummaryMaxTokens(batch.length),
             ...(activeSettings.reasoning && activeSettings.reasoning !== false
               ? { reasoning: { effort: activeSettings.reasoning } }
               : {}),
@@ -1704,16 +1708,17 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         'Content-Type': 'application/json',
         'HTTP-Referer': window.location.origin,
       },
-      body: JSON.stringify({
-        model: agModel,
-        messages: [
-          { role: 'system', content: agAssignmentPrompt || system },
-          { role: 'user', content: user },
-        ],
-        temperature: agTemperature,
-        response_format: { type: 'json_object' },
-        ...(agReasoning && agReasoning !== false ? { reasoning: { effort: agReasoning } } : {}),
-      }),
+        body: JSON.stringify({
+          model: agModel,
+          messages: [
+            { role: 'system', content: agAssignmentPrompt || system },
+            { role: 'user', content: user },
+          ],
+          temperature: agTemperature,
+          response_format: { type: 'json_object' },
+          max_tokens: computeAutoGroupAssignmentMaxTokens(batch.length),
+          ...(agReasoning && agReasoning !== false ? { reasoning: { effort: agReasoning } } : {}),
+        }),
       signal: controller.signal,
     });
 
@@ -2467,9 +2472,14 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     logAndToast('export', `Exported ${rows.length} Retry Loop grouped rows`, rows.length, `Exported ${rows.length} Retry Loop grouped rows`, 'success');
   }, [cosineViewTab, cosineStageTab, initialRetrySeedPool, retryPoolPages, cosinePageSummaries, logAndToast, cosineClusters, cosineOutlierFloor, cosineQaMismatchPages, retryStableGroups, retryFinalSingletons]);
 
+  const compactTabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70';
+  const compactTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
+  const compactTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const compactTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
+
   return (
     <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm flex flex-col flex-1 min-w-0">
-      <div className="px-4 py-2 border-b border-zinc-200 bg-zinc-50/50">
+      <div className="px-3 py-1.5 border-b border-zinc-200 bg-zinc-50/50">
         <div className="flex items-center justify-between mb-1.5">
           <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Zap className="w-3.5 h-3.5 text-violet-500" />Auto-Group</h3>
           <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
@@ -2478,16 +2488,16 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
             <span>{coveredPages.toLocaleString()} / {totalPages.toLocaleString()} pages ({coveragePercent}%)</span>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className={`${compactTabRailClass} w-fit`}>
           <button
             onClick={() => setSubTab('auto-group')}
-            className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${subTab === 'auto-group' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+            className={`${compactTabBtnBase} ${subTab === 'auto-group' ? compactTabBtnActive : compactTabBtnInactive}`}
           >
             Auto-Group {suggestions.length > 0 && `(${suggestions.length})`}
           </button>
           <button
             onClick={() => setSubTab('cosine-test')}
-            className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${subTab === 'cosine-test' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+            className={`${compactTabBtnBase} ${subTab === 'cosine-test' ? compactTabBtnActive : compactTabBtnInactive}`}
           >
             Cosine Test {cosineClusters.length > 0 && `(${cosineClusters.length})`}
           </button>
@@ -2550,14 +2560,14 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
             <input
               type="range"
               min="5"
-              max="25"
+              max={AUTO_GROUP_MAX_BATCH_PAGES}
               step="1"
               value={agBatchSize}
-              onChange={e => setAgBatchSize(Math.min(25, Math.max(5, parseInt(e.target.value) || 5)))}
+              onChange={e => setAgBatchSize(Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, parseInt(e.target.value) || 5)))}
               className="w-full h-1.5 accent-indigo-500"
             />
             <p className="mt-1 text-[10px] text-zinc-400">
-              Higher batch size reduces the number of API calls. Start with 10 to 15 if you want faster runs.
+              Up to {AUTO_GROUP_MAX_BATCH_PAGES} ungrouped keywords per request. Larger batches mean fewer API calls; use a smaller batch if the model struggles with very long JSON.
             </p>
           </div>
 
@@ -2898,16 +2908,16 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 font-medium">QA approved {[...qaResults.values()].filter(status => status === 'approve').length}</span>
             </div>
 
-            <div className="flex items-center gap-1">
+            <div className={`${compactTabRailClass} w-fit`}>
               <button
                 onClick={() => setAutoGroupTab('ungrouped')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${autoGroupTab === 'ungrouped' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+                className={`${compactTabBtnBase} ${autoGroupTab === 'ungrouped' ? compactTabBtnActive : compactTabBtnInactive}`}
               >
                 Ungrouped Pages ({ungroupedPages.length})
               </button>
               <button
                 onClick={() => setAutoGroupTab('grouped')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${autoGroupTab === 'grouped' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+                className={`${compactTabBtnBase} ${autoGroupTab === 'grouped' ? compactTabBtnActive : compactTabBtnInactive}`}
               >
                 Grouped Pages ({suggestions.length})
               </button>
@@ -2916,7 +2926,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
           <div className="flex-1 min-h-0 overflow-auto">
             {autoGroupTab === 'ungrouped' ? (
-              <div className="p-4 space-y-4">
+              <div className="p-3 space-y-3">
                 {ungroupedPages.length === 0 ? (
                   <div className="py-12 text-center text-sm text-zinc-400">
                     No ungrouped pages remain. Run QA and remove mismatches, or approve the current groups.
@@ -2990,7 +3000,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                 )}
               </div>
             ) : (
-              <div className="p-4 space-y-4">
+              <div className="p-3 space-y-3">
                 {suggestions.length === 0 ? (
                   <div className="py-12 text-center text-sm text-zinc-400">
                     No grouped pages yet. Run Auto Group to begin.
@@ -3731,36 +3741,40 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               </div>
           </div>
 
-          <div className="px-3 py-2 border-b border-zinc-100 flex items-center gap-2 bg-zinc-50/50">
+          <div className="px-3 py-1.5 border-b border-zinc-100 flex items-center gap-2 bg-zinc-50/50">
+            <div className={compactTabRailClass}>
             <button
               onClick={() => setCosineStageTab('initial')}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${cosineStageTab === 'initial' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+              className={`${compactTabBtnBase} ${cosineStageTab === 'initial' ? compactTabBtnActive : compactTabBtnInactive}`}
             >
               Initial Cosine
             </button>
             <button
               onClick={() => setCosineStageTab('retry-loop')}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${cosineStageTab === 'retry-loop' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+              className={`${compactTabBtnBase} ${cosineStageTab === 'retry-loop' ? compactTabBtnActive : compactTabBtnInactive}`}
             >
               Retry Loop {retryCycleResults.length > 0 && `(${retryCycleResults.length})`}
             </button>
+            </div>
             <div className="flex-1" />
             <span className="text-[10px] text-zinc-400">Outliers and QA mismatches both feed the retry pool</span>
           </div>
 
-          <div className="px-3 py-2 border-b border-zinc-100 flex items-center gap-2 bg-white">
+          <div className="px-3 py-1.5 border-b border-zinc-100 flex items-center gap-2 bg-white">
+            <div className={compactTabRailClass}>
             <button
               onClick={() => setCosineViewTab('grouped')}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${cosineViewTab === 'grouped' ? 'bg-zinc-900 text-white' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'}`}
+              className={`${compactTabBtnBase} ${cosineViewTab === 'grouped' ? compactTabBtnActive : compactTabBtnInactive}`}
             >
               Grouped
             </button>
             <button
               onClick={() => setCosineViewTab('ungrouped')}
-              className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${cosineViewTab === 'ungrouped' ? 'bg-zinc-900 text-white' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'}`}
+              className={`${compactTabBtnBase} ${cosineViewTab === 'ungrouped' ? compactTabBtnActive : compactTabBtnInactive}`}
             >
               Ungrouped ({(cosineStageTab === 'initial' ? initialRetrySeedPool : retryPoolPages).length})
             </button>
+            </div>
           </div>
 
           {/* Results */}

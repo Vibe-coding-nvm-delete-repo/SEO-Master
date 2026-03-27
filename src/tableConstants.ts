@@ -84,6 +84,9 @@ export const PAGES_COLUMNS: ColumnDef[] = [
   textFilterCol('state', 'State', 'locationState', 'state'),
 ];
 
+/** Checkbox + data columns — expanded detail rows must use this `colSpan` */
+export const PAGES_TABLE_COL_COUNT = 1 + PAGES_COLUMNS.length;
+
 // Pages (Grouped) — same as ungrouped but Group Name + QA + Pages column
 export const GROUPED_COLUMNS: ColumnDef[] = [
   nameCol('Group Name', 'groupName'),
@@ -99,6 +102,9 @@ export const GROUPED_COLUMNS: ColumnDef[] = [
   textFilterCol('city', 'City', 'locationCity', 'city'),
   textFilterCol('state', 'State', 'locationState', 'state'),
 ];
+
+/** Checkbox + data columns — expanded detail rows must use this `colSpan` */
+export const GROUPED_TABLE_COL_COUNT = 1 + GROUPED_COLUMNS.length;
 
 // Pages (Approved) — identical to grouped
 export const APPROVED_COLUMNS: ColumnDef[] = [...GROUPED_COLUMNS];

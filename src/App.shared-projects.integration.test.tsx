@@ -366,7 +366,7 @@ describe('App shared project visibility', () => {
       firestoreListeners.handlers.get('projects')?.(makeProjectSnapshot([]));
     });
 
-    expect(await screen.findByText('Select a project to view or upload keyword data.')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Projects' })).toBeTruthy();
     expect(screen.queryByText('shared.csv')).toBeNull();
     expect(screen.queryByText('Keyword Management')).toBeNull();
   });

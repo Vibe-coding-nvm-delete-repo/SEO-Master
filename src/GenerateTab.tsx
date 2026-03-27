@@ -65,6 +65,10 @@ const settingsCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:settings$
 const logsCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:logs${suffix || '_1'}`;
 const viewStateCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:view${suffix || '_1'}`;
 const activeSubTabCacheKey = `${GENERATE_CACHE_PREFIX}:active_subtab`;
+const compactTabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70 w-fit';
+const compactTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
+const compactTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+const compactTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
 
 const makeEmptyRows = (count: number): GenerateRow[] =>
   Array.from({ length: count }, (_, i) => ({
@@ -2003,16 +2007,16 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       )}
 
       {/* Subtab switcher */}
-      <div className="flex items-center gap-1">
+      <div className={compactTabRailClass}>
         <button
           onClick={() => setGenSubTab('table')}
-          className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${genSubTab === 'table' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+          className={`${compactTabBtnBase} ${genSubTab === 'table' ? compactTabBtnActive : compactTabBtnInactive}`}
         >
           Table
         </button>
         <button
           onClick={() => setGenSubTab('log')}
-          className={`px-3 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${genSubTab === 'log' ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200' : 'text-zinc-500 hover:text-zinc-700'}`}
+          className={`${compactTabBtnBase} flex items-center gap-1 ${genSubTab === 'log' ? compactTabBtnActive : compactTabBtnInactive}`}
         >
           <ScrollText className="w-3 h-3" />
           Log ({logs.length})
@@ -2249,23 +2253,23 @@ export default function GenerateTab() {
   return (
     <>
       {/* Sub-tab switcher */}
-      <div className="max-w-4xl mx-auto flex items-center gap-1 pt-3 pb-1">
+      <div className={`max-w-4xl mx-auto ${compactTabRailClass} mt-2 mb-1`}>
         <button
           onClick={() => switchTab('1')}
-          className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+          className={`${compactTabBtnBase} ${
             activeSubTab === '1'
-              ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200'
-              : 'text-zinc-500 hover:text-zinc-700'
+              ? compactTabBtnActive
+              : compactTabBtnInactive
           }`}
         >
           Generate 1
         </button>
         <button
           onClick={() => switchTab('2')}
-          className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+          className={`${compactTabBtnBase} ${
             activeSubTab === '2'
-              ? 'bg-white shadow-sm text-zinc-900 border border-zinc-200'
-              : 'text-zinc-500 hover:text-zinc-700'
+              ? compactTabBtnActive
+              : compactTabBtnInactive
           }`}
         >
           Generate 2
