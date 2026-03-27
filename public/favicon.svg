@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="SEO Magic">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#g)"/>
+  <!-- Magnifying glass + list lines (search / keywords) -->
+  <circle cx="13" cy="13" r="5.5" fill="none" stroke="#fff" stroke-width="2"/>
+  <path d="M17 17l5 5" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  <path d="M8 22h4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" opacity="0.9"/>
+  <path d="M8 24.5h6" stroke="#fff" stroke-width="1.5" stroke-linecap="round" opacity="0.65"/>
+</svg>

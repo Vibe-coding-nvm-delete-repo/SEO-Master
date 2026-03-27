@@ -10,7 +10,7 @@ const typeStyles: Record<ToastType, { border: string; icon: string; bg: string }
 };
 
 const ToastIcon = ({ type }: { type: ToastType }) => {
-  const cls = `w-4 h-4 ${typeStyles[type].icon}`;
+  const cls = `w-3.5 h-3.5 ${typeStyles[type].icon}`;
   if (type === 'success') return <CheckCircle2 className={cls} />;
   return <AlertCircle className={cls} />;
 };
@@ -20,17 +20,16 @@ const ToastItem = React.memo(({ toast, onDismiss }: { toast: Toast; onDismiss: (
   return (
     <div
       className={`
-        flex items-start gap-2.5 px-3 py-2.5 rounded-lg border-l-4 ${styles.border} ${styles.bg}
-        bg-white shadow-lg border border-zinc-200 max-w-sm min-w-[280px]
-        ${toast.exiting ? 'toast-exit' : 'toast-enter'}
+        flex items-start gap-2 px-2 py-1.5 rounded-md border-l-3 ${styles.border} ${styles.bg}
+        bg-white shadow-sm border border-zinc-200 max-w-[320px] min-w-[240px]
       `}
       role="alert"
     >
       <ToastIcon type={toast.type} />
-      <p className="flex-1 text-[12px] text-zinc-700 leading-snug">{toast.message}</p>
+      <p className="flex-1 text-[11px] text-zinc-700 leading-snug">{toast.message}</p>
       <button
         onClick={() => onDismiss(toast.id)}
-        className="p-0.5 text-zinc-400 hover:text-zinc-600 transition-colors shrink-0"
+        className="p-0.5 text-zinc-400 hover:text-zinc-600 shrink-0"
       >
         <X className="w-3.5 h-3.5" />
       </button>
@@ -45,7 +44,7 @@ const ToastContainer: React.FC = () => {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-auto">
+    <div className="fixed bottom-4 left-4 z-[9999] flex flex-col gap-2 pointer-events-auto max-h-[40vh] overflow-hidden">
       {toasts.map(toast => (
         <ToastItem key={toast.id} toast={toast} onDismiss={removeToast} />
       ))}

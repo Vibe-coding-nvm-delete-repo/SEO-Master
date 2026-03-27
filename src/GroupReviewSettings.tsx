@@ -7,6 +7,12 @@ import { db } from './firebase';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { DEFAULT_SYSTEM_PROMPT } from './GroupReviewEngine';
 import { DEFAULT_AUTO_GROUP_PROMPT } from './AutoGroupEngine';
+import { DEFAULT_KEYWORD_RATING_PROMPT } from './KeywordRatingEngine';
+import { DEFAULT_AUTO_MERGE_PROMPT } from './AutoMergeEngine';
+import type { PersistToastFn } from './persistenceErrors';
+import { reportPersistFailure } from './persistenceErrors';
+import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import InlineHelpHint from './InlineHelpHint';
 
 // ============ Types ============
 
@@ -19,6 +25,16 @@ export interface GroupReviewSettingsData {
   systemPrompt: string;
   autoGroupPrompt: string;
   reasoningEffort: 'none' | 'low' | 'medium' | 'high';
+  /** Keyword relevance job — same OpenRouter API key; separate model/params */
+  keywordRatingModel: string;
+  keywordRatingTemperature: number;
+  keywordRatingMaxTokens: number;
+  keywordRatingConcurrency: number;
+  keywordRatingReasoningEffort: 'none' | 'low' | 'medium' | 'high';
+  keywordRatingPrompt: string;
+  keywordCoreIntentSummary: string;
+  keywordCoreIntentSummaryUpdatedAt: string;
+  autoMergePrompt: string;
 }
 
 interface OpenRouterModel {
@@ -48,18 +64,27 @@ const toSharedSettings = (settings: GroupReviewSettingsData) => ({
   systemPrompt: settings.systemPrompt,
   autoGroupPrompt: settings.autoGroupPrompt,
   reasoningEffort: settings.reasoningEffort,
+  keywordRatingModel: settings.keywordRatingModel,
+  keywordRatingTemperature: settings.keywordRatingTemperature,
+  keywordRatingMaxTokens: settings.keywordRatingMaxTokens,
+  keywordRatingConcurrency: settings.keywordRatingConcurrency,
+  keywordRatingReasoningEffort: settings.keywordRatingReasoningEffort,
+  keywordRatingPrompt: settings.keywordRatingPrompt,
+  keywordCoreIntentSummary: settings.keywordCoreIntentSummary,
+  keywordCoreIntentSummaryUpdatedAt: settings.keywordCoreIntentSummaryUpdatedAt,
+  autoMergePrompt: settings.autoMergePrompt,
 });
 
 const HelpLabel = ({ label, help, trailing }: { label: string; help: string; trailing?: React.ReactNode }) => (
   <div className="flex items-center gap-1 mb-1">
     <label className="block text-[10px] font-medium text-zinc-500">{label}</label>
-    <span
-      className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-zinc-300 px-1 text-[9px] font-semibold text-zinc-500 cursor-help"
-      title={help}
-      aria-label={`${label} help: ${help}`}
+    <InlineHelpHint
+      text={help}
+      ariaLabel={`${label} help: ${help}`}
+      className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-zinc-300 px-1 text-[9px] font-semibold text-zinc-500 cursor-help bg-white"
     >
       ?
-    </span>
+    </InlineHelpHint>
     {trailing}
   </div>
 );
@@ -73,7 +98,9 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   onToggleStar: (modelId: string) => void;
   onSettingsChange?: (settings: GroupReviewSettingsData) => void;
   onHydratedChange?: (hydrated: boolean) => void;
-}>(({ isOpen, onToggle, starredModels, onToggleStar, onSettingsChange, onHydratedChange }, ref) => {
+  /** User-visible toast for Firestore sync failures (REFACTOR_PLAN P0.3 / P0.4) */
+  addToast?: PersistToastFn;
+}>(({ isOpen, onToggle, starredModels, onToggleStar, onSettingsChange, onHydratedChange, addToast }, ref) => {
   // Settings state
   const [settings, setSettings] = useState<GroupReviewSettingsData>(() => {
     // Hydrate from localStorage immediately (sync) so API key is available before Firestore loads
@@ -90,6 +117,15 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           systemPrompt: parsed.systemPrompt || DEFAULT_SYSTEM_PROMPT,
           autoGroupPrompt: parsed.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
           reasoningEffort: parsed.reasoningEffort || 'none',
+          keywordRatingModel: parsed.keywordRatingModel || '',
+          keywordRatingTemperature: parsed.keywordRatingTemperature ?? 0.3,
+          keywordRatingMaxTokens: parsed.keywordRatingMaxTokens ?? 0,
+          keywordRatingConcurrency: parsed.keywordRatingConcurrency ?? 5,
+          keywordRatingReasoningEffort: parsed.keywordRatingReasoningEffort || 'none',
+          keywordRatingPrompt: parsed.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
+          keywordCoreIntentSummary: parsed.keywordCoreIntentSummary || '',
+          keywordCoreIntentSummaryUpdatedAt: parsed.keywordCoreIntentSummaryUpdatedAt || '',
+          autoMergePrompt: parsed.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
         };
       }
     } catch { /* ignore parse errors */ }
@@ -102,6 +138,15 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
       autoGroupPrompt: DEFAULT_AUTO_GROUP_PROMPT,
       reasoningEffort: 'none' as const,
+      keywordRatingModel: '',
+      keywordRatingTemperature: 0.3,
+      keywordRatingMaxTokens: 0,
+      keywordRatingConcurrency: 5,
+      keywordRatingReasoningEffort: 'none' as const,
+      keywordRatingPrompt: DEFAULT_KEYWORD_RATING_PROMPT,
+      keywordCoreIntentSummary: '',
+      keywordCoreIntentSummaryUpdatedAt: '',
+      autoMergePrompt: DEFAULT_AUTO_MERGE_PROMPT,
     };
   });
 
@@ -146,12 +191,13 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
     setDoc(doc(db, 'app_settings', FS_DOC), {
       ...shared,
       updatedAt: new Date().toISOString(),
-    }).catch(e => console.warn('Firestore group review settings save error:', e));
-  }, [settings]);
+    }).catch((e) => reportPersistFailure(addToast, 'group review settings', e));
+  }, [settings, addToast]);
 
   // Load shared settings from Firestore on mount
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', FS_DOC), (snap) => {
+      markListenerSnapshot('group_review_settings', snap);
       const remote = snap.exists() ? snap.data() : null;
       setSettings(() => {
         const merged: GroupReviewSettingsData = {
@@ -163,12 +209,21 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
           autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
           reasoningEffort: remote?.reasoningEffort || 'none',
+          keywordRatingModel: remote?.keywordRatingModel || '',
+          keywordRatingTemperature: remote?.keywordRatingTemperature ?? 0.3,
+          keywordRatingMaxTokens: remote?.keywordRatingMaxTokens ?? 0,
+          keywordRatingConcurrency: remote?.keywordRatingConcurrency ?? 5,
+          keywordRatingReasoningEffort: remote?.keywordRatingReasoningEffort || 'none',
+          keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
+          keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
+          keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
+          autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
         };
 
         const mergedSharedJson = JSON.stringify(toSharedSettings(merged));
         lastSharedSavedRef.current = mergedSharedJson;
 
-        const remoteSharedJson = JSON.stringify({
+        const remoteSharedJson = JSON.stringify(toSharedSettings({
           apiKey: remote?.apiKey || '',
           selectedModel: remote?.selectedModel || '',
           concurrency: remote?.concurrency ?? 5,
@@ -177,36 +232,61 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
           autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
           reasoningEffort: remote?.reasoningEffort || 'none',
-        });
+          keywordRatingModel: remote?.keywordRatingModel || '',
+          keywordRatingTemperature: remote?.keywordRatingTemperature ?? 0.3,
+          keywordRatingMaxTokens: remote?.keywordRatingMaxTokens ?? 0,
+          keywordRatingConcurrency: remote?.keywordRatingConcurrency ?? 5,
+          keywordRatingReasoningEffort: remote?.keywordRatingReasoningEffort || 'none',
+          keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
+          keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
+          keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
+          autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
+        }));
 
         if (mergedSharedJson !== remoteSharedJson) {
           setDoc(doc(db, 'app_settings', FS_DOC), {
             ...toSharedSettings(merged),
             updatedAt: new Date().toISOString(),
-          }).catch(e => console.warn('Firestore group review settings backfill error:', e));
+          }).catch((e) => reportPersistFailure(addToast, 'group review settings backfill', e));
         }
 
         return merged;
       });
       // Cache remote settings to localStorage so next load is instant
       if (remote) {
-        try { localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(toSharedSettings({
-          apiKey: remote.apiKey || '',
-          selectedModel: remote.selectedModel || '',
-          concurrency: remote.concurrency ?? 5,
-          temperature: remote.temperature ?? 0.3,
-          maxTokens: remote.maxTokens ?? 0,
-          systemPrompt: remote.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-          autoGroupPrompt: remote.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
-          reasoningEffort: remote.reasoningEffort || 'none',
-        }))); } catch { /* quota */ }
+        try {
+          localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(toSharedSettings({
+            apiKey: remote.apiKey || '',
+            selectedModel: remote.selectedModel || '',
+            concurrency: remote.concurrency ?? 5,
+            temperature: remote.temperature ?? 0.3,
+            maxTokens: remote.maxTokens ?? 0,
+            systemPrompt: remote.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+            autoGroupPrompt: remote.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+            reasoningEffort: remote.reasoningEffort || 'none',
+            keywordRatingModel: remote.keywordRatingModel || '',
+            keywordRatingTemperature: remote.keywordRatingTemperature ?? 0.3,
+            keywordRatingMaxTokens: remote.keywordRatingMaxTokens ?? 0,
+            keywordRatingConcurrency: remote.keywordRatingConcurrency ?? 5,
+            keywordRatingReasoningEffort: remote.keywordRatingReasoningEffort || 'none',
+            keywordRatingPrompt: remote.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
+            keywordCoreIntentSummary: remote.keywordCoreIntentSummary || '',
+            keywordCoreIntentSummaryUpdatedAt: remote.keywordCoreIntentSummaryUpdatedAt || '',
+            autoMergePrompt: remote.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
+          })));
+        } catch { /* quota */ }
       }
       setHasHydratedSharedSettings(true);
-    }, () => {
+    }, (err) => {
+      markListenerError('group_review_settings');
+      reportPersistFailure(addToast, 'group review settings sync', err);
       setHasHydratedSharedSettings(true);
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, []);
+    return () => {
+      clearListenerError('group_review_settings');
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [addToast]);
 
   // Fetch models when API key changes
   const fetchModels = useCallback(async () => {
@@ -483,6 +563,152 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
             Reset to default prompt
           </button>
         )}
+      </div>
+
+      {/* Keyword relevance rating — same API key, separate model/params */}
+      <div className="rounded-lg border border-emerald-100 bg-emerald-50/50 px-3 py-2 space-y-2">
+        <h4 className="text-xs font-semibold text-zinc-700">Keyword relevance rating</h4>
+        <p className="text-[10px] text-zinc-600 leading-relaxed">
+          Used by <span className="font-medium">Rate KWs</span> on the All Keywords tab. Phase 1 generates a core-intent summary of all keywords; phase 2 scores each keyword 1–3. Same OpenRouter key as above; pick a dedicated model if you want.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div>
+            <HelpLabel
+              label="Keyword rating model"
+              help="If empty, the main Model above is used. Otherwise this model runs summary + per-keyword JSON ratings."
+            />
+            <select
+              value={settings.keywordRatingModel}
+              onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingModel: e.target.value }))}
+              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+            >
+              <option value="">Same as main model</option>
+              {models.map(m => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <HelpLabel
+              label={`KW rating concurrency (${settings.keywordRatingConcurrency})`}
+              help="Parallel OpenRouter requests during phase 2 (per-keyword ratings). Lower if you hit rate limits."
+            />
+            <input
+              type="range"
+              min={1}
+              max={50}
+              value={settings.keywordRatingConcurrency}
+              onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingConcurrency: parseInt(e.target.value, 10) }))}
+              className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div>
+            <HelpLabel
+              label={`KW rating temperature (${settings.keywordRatingTemperature})`}
+              help="Temperature for summary + rating calls. Lower is usually better for stable JSON."
+            />
+            <input
+              type="range"
+              min={0}
+              max={200}
+              value={Math.round(settings.keywordRatingTemperature * 100)}
+              onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingTemperature: parseInt(e.target.value, 10) / 100 }))}
+              className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+            />
+          </div>
+          <div>
+            <HelpLabel label="KW max tokens (0 = auto)" help="Max completion tokens for keyword rating calls." />
+            <input
+              type="number"
+              value={settings.keywordRatingMaxTokens}
+              onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingMaxTokens: parseInt(e.target.value, 10) || 0 }))}
+              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+          <div>
+            <HelpLabel label="KW reasoning" help="Reasoning effort for models that support it (keyword rating only)." />
+            <select
+              value={settings.keywordRatingReasoningEffort}
+              onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingReasoningEffort: e.target.value as GroupReviewSettingsData['keywordRatingReasoningEffort'] }))}
+              className="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+            >
+              <option value="none">None</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <HelpLabel
+            label="Rating prompt"
+            help="Explains the 1–3 scale to the model. The final user message also includes the stored core-intent summary and the keyword being rated."
+          />
+          <textarea
+            value={settings.keywordRatingPrompt}
+            onChange={(e) => setSettings(prev => ({ ...prev, keywordRatingPrompt: e.target.value }))}
+            rows={5}
+            className="w-full px-2.5 py-2 text-xs font-mono border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y leading-relaxed"
+            placeholder="Rules for 1 = relevant, 2 = unsure, 3 = not relevant..."
+          />
+          {settings.keywordRatingPrompt !== DEFAULT_KEYWORD_RATING_PROMPT && (
+            <button
+              type="button"
+              onClick={() => setSettings(prev => ({ ...prev, keywordRatingPrompt: DEFAULT_KEYWORD_RATING_PROMPT }))}
+              className="mt-1 text-[10px] text-emerald-700 hover:text-emerald-800"
+            >
+              Reset to default rating prompt
+            </button>
+          )}
+        </div>
+        <div>
+          <HelpLabel
+            label="Core intent summary (from last Rate KWs run)"
+            help="Generated before per-keyword ratings. Stored here so you can inspect or reuse it."
+          />
+          <textarea
+            value={settings.keywordCoreIntentSummary}
+            readOnly
+            rows={4}
+            className="w-full px-2.5 py-2 text-xs border border-zinc-200 rounded-lg bg-zinc-50 text-zinc-700 resize-y leading-relaxed"
+            placeholder="Run Rate KWs on the All Keywords tab to populate..."
+          />
+          {settings.keywordCoreIntentSummaryUpdatedAt ? (
+            <p className="mt-0.5 text-[10px] text-zinc-400">
+              Updated {new Date(settings.keywordCoreIntentSummaryUpdatedAt).toLocaleString()}
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-2 space-y-2">
+        <h4 className="text-xs font-semibold text-zinc-700">Auto Merge KWs</h4>
+        <p className="text-[10px] text-zinc-600 leading-relaxed">
+          Used by <span className="font-medium">Auto Merge KWs</span> in token management. The model receives one source token and all non-blocked tokens, then returns only exact lexical/semantic equivalents.
+        </p>
+        <div>
+          <HelpLabel
+            label="Auto Merge Prompt"
+            help="Strict prompt requiring exact identity (not broad similarity). The run compares each token against all other non-blocked tokens."
+          />
+          <textarea
+            value={settings.autoMergePrompt}
+            onChange={(e) => setSettings(prev => ({ ...prev, autoMergePrompt: e.target.value }))}
+            rows={6}
+            className="w-full px-2.5 py-2 text-xs font-mono border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-y leading-relaxed"
+          />
+          {settings.autoMergePrompt !== DEFAULT_AUTO_MERGE_PROMPT && (
+            <button
+              type="button"
+              onClick={() => setSettings(prev => ({ ...prev, autoMergePrompt: DEFAULT_AUTO_MERGE_PROMPT }))}
+              className="mt-1 text-[10px] text-indigo-700 hover:text-indigo-800"
+            >
+              Reset to default auto merge prompt
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

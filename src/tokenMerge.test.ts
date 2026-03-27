@@ -5,6 +5,7 @@ import {
   applyMergeToRows,
   rebuildClusters,
   updateGroupsAfterMerge,
+  refreshGroupsFromClusterSummaries,
   updateApprovedAfterMerge,
   handleCrossGroupConflict,
   rebuildTokenSummary,
@@ -29,7 +30,7 @@ function makeCluster(pageName: string, tokens: string[], volume: number, kwCount
   return {
     pageName, pageNameLower: pageName.toLowerCase(), pageNameLen: pageName.length,
     tokens: tokens.sort().join(' '), tokenArr: tokens.sort(),
-    keywordCount: kwCount, totalVolume: volume, avgKd: null,
+    keywordCount: kwCount, totalVolume: volume, avgKd: null, avgKwRating: null,
     label: '', labelArr: [], locationCity: null, locationState: null,
     keywords: [{ keyword: pageName, volume, kd: null, locationCity: null, locationState: null }],
   };
@@ -42,6 +43,7 @@ function makeGroup(name: string, clusters: ClusterSummary[]): GroupedCluster {
     totalVolume: clusters.reduce((s, c) => s + c.totalVolume, 0),
     keywordCount: clusters.reduce((s, c) => s + c.keywordCount, 0),
     avgKd: null,
+    avgKwRating: null,
   };
 }
 
@@ -108,6 +110,18 @@ describe('rebuildClusters', () => {
 
     const clusters = rebuildClusters(rows);
     expect(clusters.length).toBe(2);
+  });
+});
+
+describe('refreshGroupsFromClusterSummaries', () => {
+  it('should replace cluster refs and recalc group avgKwRating', () => {
+    const c1 = makeCluster('page a', ['a', 'b'], 100, 2);
+    const c2 = { ...c1, avgKwRating: 2 as number | null };
+    const g = makeGroup('G', [c1]);
+    const rebuilt = [c2];
+    const { groupedClusters } = refreshGroupsFromClusterSummaries([g], [], rebuilt);
+    expect(groupedClusters[0].clusters[0].avgKwRating).toBe(2);
+    expect(groupedClusters[0].avgKwRating).toBe(2);
   });
 });
 

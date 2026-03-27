@@ -1,5 +1,6 @@
 import type {
   ActivityLogEntry,
+  AutoMergeRecommendation,
   AutoGroupSuggestion,
   BlockedKeyword,
   ClusterSummary,
@@ -22,6 +23,8 @@ import {
   type AppPrefs,
   type ProjectDataPayload,
 } from './projectStorage';
+import { logPersistError } from './persistenceErrors';
+import { rebuildClusters, refreshGroupsFromClusterSummaries } from './tokenMerge';
 
 export interface ProjectViewState {
   results: ProcessedRow[] | null;
@@ -32,6 +35,7 @@ export interface ProjectViewState {
   activityLog: ActivityLogEntry[];
   tokenMergeRules: TokenMergeRule[];
   autoGroupSuggestions: AutoGroupSuggestion[];
+  autoMergeRecommendations: AutoMergeRecommendation[];
   stats: Stats | null;
   datasetStats: unknown | null;
   blockedTokens: string[];
@@ -49,6 +53,7 @@ export const createEmptyProjectViewState = (): ProjectViewState => ({
   activityLog: [],
   tokenMergeRules: [],
   autoGroupSuggestions: [],
+  autoMergeRecommendations: [],
   stats: null,
   datasetStats: null,
   blockedTokens: [],
@@ -65,15 +70,35 @@ export const toProjectViewState = (
     return createEmptyProjectViewState();
   }
 
+  const results = data.results || null;
+  let clusterSummary = data.clusterSummary || null;
+  let groupedClusters = data.groupedClusters || [];
+  let approvedGroups = data.approvedGroups || [];
+
+  // `results` is the source of truth for per-keyword fields (e.g. kwRating). Chunked
+  // Firestore/IDB payloads can have stale clusterSummary vs results after a refresh or
+  // older saves — rebuild aggregates so Ungrouped / Grouped / Approved rating columns match.
+  if (results && results.length > 0) {
+    clusterSummary = rebuildClusters(results);
+    const refreshed = refreshGroupsFromClusterSummaries(
+      groupedClusters,
+      approvedGroups,
+      clusterSummary,
+    );
+    groupedClusters = refreshed.groupedClusters;
+    approvedGroups = refreshed.approvedGroups;
+  }
+
   return {
-    results: data.results || null,
-    clusterSummary: data.clusterSummary || null,
+    results,
+    clusterSummary,
     tokenSummary: data.tokenSummary || null,
-    groupedClusters: data.groupedClusters || [],
-    approvedGroups: data.approvedGroups || [],
+    groupedClusters,
+    approvedGroups,
     activityLog: data.activityLog || [],
     tokenMergeRules: data.tokenMergeRules || [],
     autoGroupSuggestions: data.autoGroupSuggestions || [],
+    autoMergeRecommendations: data.autoMergeRecommendations || [],
     stats: data.stats || null,
     datasetStats: data.datasetStats || null,
     blockedTokens: data.blockedTokens || [],
@@ -88,12 +113,16 @@ export const loadSavedWorkspacePrefs = async (): Promise<AppPrefs> => {
   try {
     const idbPrefs = await loadAppPrefsFromIDB();
     if (idbPrefs) return idbPrefs;
-  } catch { /* fall through */ }
+  } catch (e) {
+    logPersistError('load app prefs from IDB', e);
+  }
 
   // IDB miss — fallback to Firestore
   const prefs = await loadAppPrefsFromFirestore();
   if (prefs) {
-    saveAppPrefsToIDB(prefs.activeProjectId, prefs.savedClusters).catch(() => {});
+    saveAppPrefsToIDB(prefs.activeProjectId, prefs.savedClusters).catch((e) =>
+      logPersistError('cache app prefs to IDB', e),
+    );
     return prefs;
   }
 
@@ -111,14 +140,20 @@ export const loadProjectDataForView = async (projectId: string): Promise<Project
 
   if (!idbData && !fsData) return null;
   if (!idbData) {
-    if (fsData) saveToIDB(projectId, fsData).catch(() => {});
+    if (fsData) {
+      saveToIDB(projectId, fsData).catch((e) =>
+        logPersistError('cache Firestore project to IDB (no local)', e),
+      );
+    }
     return fsData;
   }
   if (!fsData) return idbData;
 
   const picked = pickNewerProjectPayload(idbData, fsData);
   if (picked === fsData) {
-    saveToIDB(projectId, fsData).catch(() => {});
+    saveToIDB(projectId, fsData).catch((e) =>
+      logPersistError('refresh IDB from Firestore after merge', e),
+    );
   }
   return picked;
 };

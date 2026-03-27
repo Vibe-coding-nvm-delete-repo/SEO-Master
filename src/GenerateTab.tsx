@@ -5,7 +5,7 @@ import { db } from './firebase';
 import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 import { useToast } from './ToastContext';
 import { reportPersistFailure } from './persistenceErrors';
-import { markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
 import InlineHelpHint from './InlineHelpHint';
 
 // ============ Types ============
@@ -58,6 +58,13 @@ interface OpenRouterModel {
   pricing: { prompt: string; completion: string };
   context_length: number;
 }
+
+const GENERATE_CACHE_PREFIX = 'kwg_generate_cache';
+const rowsCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:rows${suffix || '_1'}`;
+const settingsCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:settings${suffix || '_1'}`;
+const logsCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:logs${suffix || '_1'}`;
+const viewStateCacheKey = (suffix: string) => `${GENERATE_CACHE_PREFIX}:view${suffix || '_1'}`;
+const activeSubTabCacheKey = `${GENERATE_CACHE_PREFIX}:active_subtab`;
 
 const makeEmptyRows = (count: number): GenerateRow[] =>
   Array.from({ length: count }, (_, i) => ({
@@ -279,8 +286,28 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logsRef = useRef(logs);
   useEffect(() => { logsRef.current = logs; }, [logs]);
-  const [genSubTab, setGenSubTab] = useState<'table' | 'log'>('table');
+  const [genSubTab, setGenSubTab] = useState<'table' | 'log'>(() => {
+    try {
+      const raw = localStorage.getItem(viewStateCacheKey(suffix));
+      if (!raw) return 'table';
+      const parsed = JSON.parse(raw);
+      return parsed?.genSubTab === 'log' ? 'log' : 'table';
+    } catch {
+      return 'table';
+    }
+  });
   const logsLoadedRef = useRef(false);
+  const readRowsFromLocalCache = useCallback((): GenerateRow[] | null => {
+    try {
+      const raw = localStorage.getItem(rowsCacheKey(suffix));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return null;
+      return parsed as GenerateRow[];
+    } catch {
+      return null;
+    }
+  }, [suffix]);
 
   // Load rows from Firestore and keep them live-synced
   useEffect(() => {
@@ -289,6 +316,8 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       markListenerSnapshot(`generate_rows${suffix}`, snap);
       try {
         if (!alive) return;
+        const isFromCache = snap.metadata.fromCache;
+        if (!snap.exists() && isFromCache) return;
         if (snap.exists()) {
           const data = snap.data();
           let loadedRows: GenerateRow[] = [];
@@ -312,6 +341,11 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
               ? loadedRows.map((r: GenerateRow) => ({ ...r, retries: r.retries || 0, status: r.status === 'generating' ? 'pending' as const : r.status }))
               : makeEmptyRows(20)
           );
+          try {
+            localStorage.setItem(rowsCacheKey(suffix), JSON.stringify(loadedRows));
+          } catch {
+            // Ignore local cache write failures.
+          }
           lastSavedRowsJsonRef.current = JSON.stringify(loadedRows);
           setIsLoaded(true);
           return;
@@ -320,24 +354,41 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
         // Best-effort local fallback; keep default rows on read failure.
       }
       if (alive) {
-        setRows(makeEmptyRows(20));
-        lastSavedRowsJsonRef.current = JSON.stringify([]);
+        const cachedRows = readRowsFromLocalCache();
+        if (cachedRows && cachedRows.length > 0) {
+          setRows(
+            cachedRows.map((r: GenerateRow) => ({ ...r, retries: r.retries || 0, status: r.status === 'generating' ? 'pending' as const : r.status })),
+          );
+          lastSavedRowsJsonRef.current = JSON.stringify(cachedRows);
+        } else {
+          setRows(makeEmptyRows(20));
+          lastSavedRowsJsonRef.current = JSON.stringify([]);
+        }
         setIsLoaded(true);
       }
     }, (err) => {
       markListenerError(`generate_rows${suffix}`);
       reportPersistFailure(addToast, 'generate rows sync', err);
       if (alive) {
-        setRows(makeEmptyRows(20));
-        lastSavedRowsJsonRef.current = JSON.stringify([]);
+        const cachedRows = readRowsFromLocalCache();
+        if (cachedRows && cachedRows.length > 0) {
+          setRows(
+            cachedRows.map((r: GenerateRow) => ({ ...r, retries: r.retries || 0, status: r.status === 'generating' ? 'pending' as const : r.status })),
+          );
+          lastSavedRowsJsonRef.current = JSON.stringify(cachedRows);
+        } else {
+          setRows(makeEmptyRows(20));
+          lastSavedRowsJsonRef.current = JSON.stringify([]);
+        }
         setIsLoaded(true);
       }
     });
     return () => {
       alive = false;
+      clearListenerError(`generate_rows${suffix}`);
       if (typeof unsub === 'function') unsub();
     };
-  }, [suffix, addToast]);
+  }, [suffix, addToast, readRowsFromLocalCache]);
 
   // Debounced save to IDB + Firestore when rows change (skip initial load)
   // During generation: save at most every 5s (interval-based, not debounced) so data isn't lost if tab closes
@@ -348,6 +399,37 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const lastSaveTimeRef = useRef(0);
   const pendingSaveRef = useRef(false);
 
+  const persistRows = useCallback((rowsToSave: GenerateRow[], errorContext: string) => {
+    const json = JSON.stringify(rowsToSave);
+    const estimatedBytes = json.length;
+    if (estimatedBytes > 900_000) {
+      // Too large for single doc — chunk into 400-row docs (same pattern as main app)
+      const CHUNK_SIZE = 400;
+      const chunks: typeof rowsToSave[] = [];
+      for (let i = 0; i < rowsToSave.length; i += CHUNK_SIZE) {
+        chunks.push(rowsToSave.slice(i, i + CHUNK_SIZE));
+      }
+      const updatedAt = new Date().toISOString();
+      chunks.forEach((chunk, i) => {
+        setDoc(doc(db, 'app_settings', `generate_rows${suffix}_chunk_${i}`), {
+          rows: chunk,
+          updatedAt,
+        }).catch((e) => reportPersistFailure(addToast, `${errorContext} chunk ${i}`, e));
+      });
+      setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
+        chunked: true,
+        chunkCount: chunks.length,
+        totalRows: rowsToSave.length,
+        updatedAt,
+      }).catch((e) => reportPersistFailure(addToast, `${errorContext} meta`, e));
+      return;
+    }
+    setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
+      rows: rowsToSave,
+      updatedAt: new Date().toISOString(),
+    }).catch((e) => reportPersistFailure(addToast, errorContext, e));
+  }, [suffix, addToast]);
+
   const doSave = useCallback(() => {
     try {
       const rowsToSave = rowsRef.current.filter(r => r.input.trim() || r.output.trim());
@@ -355,41 +437,18 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       const json = JSON.stringify(rowsToSave);
       if (json === lastSavedRowsJsonRef.current) return;
       lastSavedRowsJsonRef.current = json;
+      try {
+        localStorage.setItem(rowsCacheKey(suffix), json);
+      } catch {
+        // Ignore local cache write failures.
+      }
       lastSaveTimeRef.current = Date.now();
       pendingSaveRef.current = false;
-      // Firestore 1MB doc limit guard — use string length as rough byte estimate (avoid Blob allocation)
-      // UTF-8: ASCII chars = 1 byte each, so json.length is a reasonable lower bound
-      const estimatedBytes = json.length;
-      if (estimatedBytes > 900_000) {
-        // Too large for single doc — chunk into 400-row docs (same pattern as main app)
-        const CHUNK_SIZE = 400;
-        const chunks: typeof rowsToSave[] = [];
-        for (let i = 0; i < rowsToSave.length; i += CHUNK_SIZE) {
-          chunks.push(rowsToSave.slice(i, i + CHUNK_SIZE));
-        }
-        const updatedAt = new Date().toISOString();
-        chunks.forEach((chunk, i) => {
-          setDoc(doc(db, 'app_settings', `generate_rows${suffix}_chunk_${i}`), {
-            rows: chunk,
-            updatedAt,
-          }).catch((e) => reportPersistFailure(addToast, `generate rows chunk ${i}`, e));
-        });
-        setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
-          chunked: true,
-          chunkCount: chunks.length,
-          totalRows: rowsToSave.length,
-          updatedAt,
-        }).catch((e) => reportPersistFailure(addToast, 'generate rows meta', e));
-      } else {
-        setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
-          rows: rowsToSave,
-          updatedAt: new Date().toISOString(),
-        }).catch((e) => reportPersistFailure(addToast, 'generate rows', e));
-      }
+      persistRows(rowsToSave, 'generate rows');
     } catch (e) {
       console.warn('doSave error:', e);
     }
-  }, [suffix, addToast]);
+  }, [suffix, persistRows]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -415,22 +474,45 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', `generate_logs${suffix}`), (snap) => {
       markListenerSnapshot(`generate_logs${suffix}`, snap);
+      const isFromCache = snap.metadata.fromCache;
+      if (!snap.exists() && isFromCache) return;
       if (snap.exists()) {
         const logData = snap.data();
         if (logData?.logs && Array.isArray(logData.logs)) {
           setLogs(logData.logs);
+          try {
+            localStorage.setItem(logsCacheKey(suffix), JSON.stringify(logData.logs));
+          } catch {
+            // Ignore local cache write failures.
+          }
           logsLoadedRef.current = true;
           return;
         }
       }
-      setLogs([]);
+      try {
+        const raw = localStorage.getItem(logsCacheKey(suffix));
+        const cached = raw ? JSON.parse(raw) : [];
+        setLogs(Array.isArray(cached) ? cached : []);
+      } catch {
+        setLogs([]);
+      }
       logsLoadedRef.current = true;
     }, (err) => {
       markListenerError(`generate_logs${suffix}`);
       reportPersistFailure(addToast, 'generate logs sync', err);
+      try {
+        const raw = localStorage.getItem(logsCacheKey(suffix));
+        const cached = raw ? JSON.parse(raw) : [];
+        setLogs(Array.isArray(cached) ? cached : []);
+      } catch {
+        setLogs([]);
+      }
       logsLoadedRef.current = true;
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError(`generate_logs${suffix}`);
+      if (typeof unsub === 'function') unsub();
+    };
   }, [suffix, addToast]);
 
   // Save logs when they change
@@ -441,6 +523,11 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     logSaveTimerRef.current = setTimeout(async () => {
       // Keep only last 500 log entries
       const trimmed = logs.slice(-500);
+      try {
+        localStorage.setItem(logsCacheKey(suffix), JSON.stringify(trimmed));
+      } catch {
+        // Ignore local cache write failures.
+      }
       setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), { logs: trimmed, updatedAt: new Date().toISOString() }).catch((e) =>
         reportPersistFailure(addToast, 'generate logs', e),
       );
@@ -561,7 +648,19 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const [undoStack, setUndoStack] = useState<GenerateRow[][]>([]);
 
   // Status filter — auto-reset to 'all' when filtered view becomes empty
-  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'generated' | 'error'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'generated' | 'error'>(() => {
+    try {
+      const raw = localStorage.getItem(viewStateCacheKey(suffix));
+      if (!raw) return 'all';
+      const parsed = JSON.parse(raw);
+      if (parsed?.statusFilter === 'pending') return 'pending';
+      if (parsed?.statusFilter === 'generated') return 'generated';
+      if (parsed?.statusFilter === 'error') return 'error';
+      return 'all';
+    } catch {
+      return 'all';
+    }
+  });
   const displayRows = useMemo(() => {
     if (statusFilter === 'all') return rows.map((r, i) => ({ row: r, origIdx: i }));
     const filtered = rows.map((r, i) => ({ row: r, origIdx: i })).filter(({ row }) => row.status === statusFilter);
@@ -570,6 +669,79 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   useEffect(() => {
     if (statusFilter !== 'all' && displayRows.length === 0) setStatusFilter('all');
   }, [statusFilter, displayRows.length]);
+
+  // Persist view state (table/log tab + status filter) per Generate instance.
+  const viewStateLoadedRef = useRef(false);
+  const lastSavedViewStateRef = useRef<string>('');
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'app_settings', `generate_view_state${suffix}`), (snap) => {
+      markListenerSnapshot(`generate_view_state${suffix}`, snap);
+      const isFromCache = snap.metadata.fromCache;
+      if (!snap.exists() && isFromCache) return;
+      if (snap.exists()) {
+        const data = snap.data() as { genSubTab?: 'table' | 'log'; statusFilter?: 'all' | 'pending' | 'generated' | 'error' };
+        const nextGenSubTab: 'table' | 'log' = data?.genSubTab === 'log' ? 'log' : 'table';
+        const nextStatus: 'all' | 'pending' | 'generated' | 'error' =
+          data?.statusFilter === 'pending' || data?.statusFilter === 'generated' || data?.statusFilter === 'error'
+            ? data.statusFilter
+            : 'all';
+        setGenSubTab(nextGenSubTab);
+        setStatusFilter(nextStatus);
+        const json = JSON.stringify({ genSubTab: nextGenSubTab, statusFilter: nextStatus });
+        lastSavedViewStateRef.current = json;
+        try {
+          localStorage.setItem(viewStateCacheKey(suffix), json);
+        } catch {
+          // Ignore local cache write failures.
+        }
+        viewStateLoadedRef.current = true;
+        return;
+      }
+      try {
+        const raw = localStorage.getItem(viewStateCacheKey(suffix));
+        const parsed = raw ? JSON.parse(raw) : null;
+        const nextGenSubTab: 'table' | 'log' = parsed?.genSubTab === 'log' ? 'log' : 'table';
+        const nextStatus: 'all' | 'pending' | 'generated' | 'error' =
+          parsed?.statusFilter === 'pending' || parsed?.statusFilter === 'generated' || parsed?.statusFilter === 'error'
+            ? parsed.statusFilter
+            : 'all';
+        setGenSubTab(nextGenSubTab);
+        setStatusFilter(nextStatus);
+        lastSavedViewStateRef.current = JSON.stringify({ genSubTab: nextGenSubTab, statusFilter: nextStatus });
+      } catch {
+        lastSavedViewStateRef.current = JSON.stringify({ genSubTab: 'table', statusFilter: 'all' });
+      }
+      viewStateLoadedRef.current = true;
+    }, (err) => {
+      markListenerError(`generate_view_state${suffix}`);
+      reportPersistFailure(addToast, 'generate view state sync', err);
+      viewStateLoadedRef.current = true;
+    });
+    return () => {
+      clearListenerError(`generate_view_state${suffix}`);
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [suffix, addToast]);
+
+  useEffect(() => {
+    if (!viewStateLoadedRef.current) return;
+    const json = JSON.stringify({ genSubTab, statusFilter });
+    if (json === lastSavedViewStateRef.current) return;
+    lastSavedViewStateRef.current = json;
+    try {
+      localStorage.setItem(viewStateCacheKey(suffix), json);
+    } catch {
+      // Ignore local cache write failures.
+    }
+    const timer = setTimeout(() => {
+      setDoc(doc(db, 'app_settings', `generate_view_state${suffix}`), {
+        genSubTab,
+        statusFilter,
+        updatedAt: new Date().toISOString(),
+      }).catch((e) => reportPersistFailure(addToast, 'generate view state', e));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [genSubTab, statusFilter, suffix, addToast]);
 
   // Clear all inputs
   const handleClearAll = useCallback(() => {
@@ -687,6 +859,11 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     const json = JSON.stringify(toSharedGenerateSettings(settings));
     if (json === lastSavedSettingsRef.current) return;
     lastSavedSettingsRef.current = json;
+    try {
+      localStorage.setItem(settingsCacheKey(suffix), json);
+    } catch {
+      // Ignore local cache write failures.
+    }
     if (settingsSaveTimerRef.current) clearTimeout(settingsSaveTimerRef.current);
     settingsSaveTimerRef.current = setTimeout(() => {
       setDoc(doc(db, 'app_settings', `generate_settings${suffix}`), {
@@ -701,6 +878,8 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', `generate_settings${suffix}`), (snap) => {
       markListenerSnapshot(`generate_settings${suffix}`, snap);
+      const isFromCache = snap.metadata.fromCache;
+      if (!snap.exists() && isFromCache) return;
       if (snap.exists()) {
         const data = snap.data();
         const fsSettings: GenerateSettings = {
@@ -714,12 +893,35 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
           maxTokens: data.maxTokens || 0,
           webSearch: data.webSearch ?? false,
         };
+        try {
+          localStorage.setItem(settingsCacheKey(suffix), JSON.stringify(toSharedGenerateSettings(fsSettings)));
+        } catch {
+          // Ignore local cache write failures.
+        }
         lastSavedSettingsRef.current = JSON.stringify(toSharedGenerateSettings(fsSettings));
         setSettings(fsSettings);
         settingsLoadedRef.current = true;
         return;
       }
-      const defaultSettings: GenerateSettings = {
+      const cached = (() => {
+        try {
+          const raw = localStorage.getItem(settingsCacheKey(suffix));
+          return raw ? JSON.parse(raw) : null;
+        } catch {
+          return null;
+        }
+      })();
+      const defaultSettings: GenerateSettings = cached ? {
+        apiKey: cached.apiKey || '',
+        selectedModel: cached.selectedModel || '',
+        rateLimit: Math.max(1, Math.min(100, Number(cached.rateLimit) || 5)),
+        minLen: cached.minLen || 0,
+        maxLen: cached.maxLen || 0,
+        maxRetries: cached.maxRetries ?? 3,
+        temperature: cached.temperature ?? 1.0,
+        maxTokens: cached.maxTokens || 0,
+        webSearch: cached.webSearch ?? false,
+      } : {
         apiKey: '',
         selectedModel: '',
         rateLimit: 5,
@@ -738,7 +940,10 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       reportPersistFailure(addToast, 'generate settings sync', err);
       settingsLoadedRef.current = true;
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError(`generate_settings${suffix}`);
+      if (typeof unsub === 'function') unsub();
+    };
   }, [suffix, toSharedGenerateSettings, addToast]);
 
   // Close model dropdown on outside click — only listen when dropdown is actually open
@@ -777,10 +982,12 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       const json = JSON.stringify(rowsToSave);
       if (json !== lastSavedRowsJsonRef.current) {
         lastSavedRowsJsonRef.current = json;
-        setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
-          rows: rowsToSave,
-          updatedAt: new Date().toISOString(),
-        }).catch((e) => reportPersistFailure(addToast, 'generate rows (flush)', e));
+        try {
+          localStorage.setItem(rowsCacheKey(suffix), json);
+        } catch {
+          // Ignore local cache write failures.
+        }
+        persistRows(rowsToSave, 'generate rows (flush)');
       }
       // Flush pending log save timer
       if (logSaveTimerRef.current) {
@@ -790,6 +997,11 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       // Save logs (best-effort)
       if (logsLoadedRef.current && logsRef.current.length > 0) {
         const trimmed = logsRef.current.slice(-500);
+        try {
+          localStorage.setItem(logsCacheKey(suffix), JSON.stringify(trimmed));
+        } catch {
+          // Ignore local cache write failures.
+        }
         setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), {
           logs: trimmed,
           updatedAt: new Date().toISOString(),
@@ -798,7 +1010,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     } catch (e) {
       console.warn('flushAllSaves error:', e);
     }
-  }, [suffix, addToast]);
+  }, [suffix, persistRows]);
 
   // beforeunload — flush on tab close / browser close
   useEffect(() => {
@@ -1946,7 +2158,14 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
 // ============ Wrapper with sub-tabs ============
 export default function GenerateTab() {
   const { addToast } = useToast();
-  const [activeSubTab, setActiveSubTab] = useState<'1' | '2'>('1');
+  const [activeSubTab, setActiveSubTab] = useState<'1' | '2'>(() => {
+    try {
+      const raw = localStorage.getItem(activeSubTabCacheKey);
+      return raw === '2' ? '2' : '1';
+    } catch {
+      return '1';
+    }
+  });
   const tabRef = useRef(activeSubTab);
   const [gen2Activated, setGen2Activated] = useState(() => activeSubTab === '2');
 
@@ -1956,6 +2175,11 @@ export default function GenerateTab() {
       if (!snap.exists()) return;
       const tab = snap.data()?.tab;
       if (tab === '1' || tab === '2') {
+        try {
+          localStorage.setItem(activeSubTabCacheKey, tab);
+        } catch {
+          // Ignore local cache write failures.
+        }
         tabRef.current = tab;
         setActiveSubTab(tab);
         if (tab === '2') setGen2Activated(true);
@@ -1964,7 +2188,10 @@ export default function GenerateTab() {
       markListenerError('generate_active_subtab');
       reportPersistFailure(addToast, 'generate active subtab sync', err);
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError('generate_active_subtab');
+      if (typeof unsub === 'function') unsub();
+    };
   }, [addToast]);
 
   // Starred models — shared across both instances, persisted to Firestore
@@ -1983,7 +2210,10 @@ export default function GenerateTab() {
       reportPersistFailure(addToast, 'starred models sync (generate)', err);
       starredLoadedRef.current = true;
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError('starred_models');
+      if (typeof unsub === 'function') unsub();
+    };
   }, [addToast]);
 
   const toggleStarModel = useCallback((modelId: string) => {
@@ -2003,6 +2233,11 @@ export default function GenerateTab() {
   const switchTab = useCallback((tab: '1' | '2') => {
     if (tabRef.current === tab) return; // Already on this tab — skip entirely
     tabRef.current = tab;
+    try {
+      localStorage.setItem(activeSubTabCacheKey, tab);
+    } catch {
+      // Ignore local cache write failures.
+    }
     setDoc(doc(db, 'app_settings', 'generate_active_subtab'), {
       tab,
       updatedAt: new Date().toISOString(),

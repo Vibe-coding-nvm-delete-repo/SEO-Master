@@ -1,5 +1,7 @@
 # Architecture
 
+**Documentation map:** [`AGENTS.md`](./AGENTS.md) (agent entry + debt/test checklist) · [`CLAUDE.md`](./CLAUDE.md) (persistence & env) · [`CONTRIBUTING.md`](./CONTRIBUTING.md) (workflow & standards) · this file (system shape).
+
 ## System Overview
 
 SEO Master Tool is a client-side SPA for keyword clustering, page grouping, approval workflows, and AI content generation.

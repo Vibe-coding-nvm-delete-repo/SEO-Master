@@ -3,37 +3,58 @@
 /* eslint-disable prefer-const */
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
-import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr, getLabelColor } from './processing';
 import { auth, db, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { collection, doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
+import { doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
 import { GoogleGenAI } from '@google/genai';
 import GenerateTab from './GenerateTab';
 import FeedbackTab from './FeedbackTab';
 import FeatureIdeasTab from './FeatureIdeasTab';
 import FeedbackModalHost from './FeedbackModalHost';
+import AppStatusBar from './AppStatusBar';
+import { clearListenerError, clearProjectPersistErrorFlag, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
-import { processReviewQueue, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
-import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion } from './types';
-import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows, computeSignature, mergeTokenArr } from './tokenMerge';
+import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
+import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion, AutoMergeRecommendation } from './types';
+import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows, computeSignature, mergeTokenArr, refreshGroupsFromClusterSummaries } from './tokenMerge';
 import MergeConfirmModal from './MergeConfirmModal';
 import { useToast } from './ToastContext';
 import ActivityLog from './ActivityLog';
 import AutoGroupPanel from './AutoGroupPanel';
+import InlineHelpHint from './InlineHelpHint';
 import TableHeader, { type FilterBag } from './TableHeader';
-import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, BLOCKED_COLUMNS } from './tableConstants';
+import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, BLOCKED_COLUMNS, KEYWORDS_COLUMNS, CELL } from './tableConstants';
+import {
+  addOpenRouterUsage,
+  applyKeywordRatingsToResults,
+  buildKeywordLinesForSummary,
+  countKwRatingBucketsForRows,
+  fetchCoreIntentSummary,
+  fetchSingleKeywordRating,
+  formatKeywordRatingDuration,
+  keywordRatingRowKey,
+  type KeywordRatingSettingsSlice,
+  type OpenRouterUsage,
+} from './KeywordRatingEngine';
+import {
+  addAutoMergeUsage,
+  fetchAutoMergeMatches,
+  type AutoMergeSettingsSlice,
+} from './AutoMergeEngine';
+import {
+  markRecommendationApproved,
+  markRecommendationPendingAfterUndo,
+  mergeRecommendationsAfterRerun,
+} from './autoMergeRecommendations';
 import {
   buildProjectDataPayloadFromChunkDocs,
   loadProjectDataFromFirestore,
-  deleteFromIDB,
-  deleteProjectDataFromFirestore,
-  deleteProjectFromFirestore,
-  loadProjectsFromFirestore,
   saveAppPrefsToFirestore,
   saveAppPrefsToIDB,
-  saveProjectToFirestore,
   saveToIDB,
   type ProjectDataPayload,
 } from './projectStorage';
@@ -46,6 +67,19 @@ import {
 } from './projectWorkspace';
 import { useProjectPersistence } from './useProjectPersistence';
 import { parseTokenMgmtSearchTerms, tokenIncludesAnyTerm } from './tokenMgmtSearch';
+import { parseSubClusterKey } from './subClusterKeys';
+import { reportPersistFailure } from './persistenceErrors';
+import {
+  buildMainPath,
+  type MainTab,
+  type GroupSubTab,
+  type SettingsSubTab,
+} from './appRouting';
+import { useProjectLifecycle } from './hooks/useProjectLifecycle';
+import { useNavigationState } from './hooks/useNavigationState';
+import { useKeywordWorkspace } from './hooks/useKeywordWorkspace';
+import { useGroupingActions } from './hooks/useGroupingActions';
+import { useTokenActions } from './hooks/useTokenActions';
 
 // Error boundary â€" catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
@@ -80,136 +114,6 @@ const ErrorBoundary = (() => {
   return Comp as React.ComponentType<Props>;
 })();
 
-type MainTab = 'group' | 'generate' | 'feedback' | 'feature-ideas';
-
-/** Group area sub-routes (under /seo-magic/group/...). */
-type GroupSubTab = 'data' | 'projects' | 'settings' | 'log';
-
-/** Settings screen sub-tabs (path under /seo-magic/group/settings/...). */
-type SettingsSubTab = 'general' | 'how-it-works' | 'dictionaries' | 'blocked';
-
-const SETTINGS_TAB_TO_SEG: Record<SettingsSubTab, string> = {
-  general: 'general',
-  'how-it-works': 'how-it-works',
-  dictionaries: 'dictionaries',
-  blocked: 'blocked',
-};
-
-function settingsSegToTab(seg: string): SettingsSubTab | null {
-  const map: Record<string, SettingsSubTab> = {
-    general: 'general',
-    'how-it-works': 'how-it-works',
-    dictionaries: 'dictionaries',
-    blocked: 'blocked',
-  };
-  return map[seg] ?? null;
-}
-
-/** URL segment for this app (matches SEO Magic branding). All main tabs live under /{slug}/... */
-const APP_URL_SLUG = 'seo-magic';
-const APP_BASE_PATH = `/${APP_URL_SLUG}`;
-
-interface ParsedAppLocation {
-  mainTab: MainTab;
-  groupSubTab: GroupSubTab | null;
-  /** Project slug when path is /seo-magic/group/data/:key */
-  dataRouteProjectKey: string | null;
-  /** Settings inner tab when path is /seo-magic/group/settings/:segment */
-  settingsSubTab: SettingsSubTab | null;
-}
-
-/** Parse pathname into main tab, group sub-tab, and optional data-route project key. */
-function parseAppPath(pathname: string): ParsedAppLocation {
-  const p = pathname.replace(/\/$/, '') || '/';
-  const base = APP_BASE_PATH;
-
-  if (p === `${base}/feedback` || p === '/feedback') {
-    return { mainTab: 'feedback', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p === `${base}/feature-ideas` || p === '/feature-ideas') {
-    return { mainTab: 'feature-ideas', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p === `${base}/generate` || p === '/generate') {
-    return { mainTab: 'generate', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  // Short aliases (canonicalized on load to /group/...)
-  if (p === `${base}/log` || p === '/log') {
-    return { mainTab: 'group', groupSubTab: 'log', dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p === `${base}/settings` || p === '/settings') {
-    return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: 'general' };
-  }
-
-  const groupPrefix = `${base}/group`;
-  if (p === groupPrefix || p === `${groupPrefix}/`) {
-    return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p === `${groupPrefix}/projects`) {
-    return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p === `${groupPrefix}/settings` || p === `${groupPrefix}/settings/`) {
-    return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: 'general' };
-  }
-  if (p.startsWith(`${groupPrefix}/settings/`)) {
-    const rest = p.slice(`${groupPrefix}/settings/`.length);
-    const seg = (rest.split('/')[0] || 'general').trim();
-    const st = settingsSegToTab(seg) ?? 'general';
-    return { mainTab: 'group', groupSubTab: 'settings', dataRouteProjectKey: null, settingsSubTab: st };
-  }
-  if (p === `${groupPrefix}/log`) {
-    return { mainTab: 'group', groupSubTab: 'log', dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p === `${groupPrefix}/data`) {
-    return { mainTab: 'group', groupSubTab: 'data', dataRouteProjectKey: null, settingsSubTab: null };
-  }
-  if (p.startsWith(`${groupPrefix}/data/`)) {
-    const raw = p.slice(`${groupPrefix}/data/`.length);
-    try {
-      const key = decodeURIComponent(raw) || null;
-      return { mainTab: 'group', groupSubTab: 'data', dataRouteProjectKey: key, settingsSubTab: null };
-    } catch {
-      return { mainTab: 'group', groupSubTab: 'data', dataRouteProjectKey: raw || null, settingsSubTab: null };
-    }
-  }
-
-  // Legacy: /seo-magic without /group (older deploys)
-  if (p === base || p === `${base}/`) {
-    return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
-  }
-
-  return { mainTab: 'group', groupSubTab: 'projects', dataRouteProjectKey: null, settingsSubTab: null };
-}
-
-/** Shorthand: extract just the mainTab from a pathname. */
-function pathToMainTab(pathname: string): MainTab {
-  return parseAppPath(pathname).mainTab;
-}
-
-function buildMainPath(
-  tab: MainTab,
-  groupSub?: GroupSubTab,
-  dataProjectKey?: string | null,
-  settingsSub?: SettingsSubTab | null,
-): string {
-  if (tab === 'feedback') return `${APP_BASE_PATH}/feedback`;
-  if (tab === 'generate') return `${APP_BASE_PATH}/generate`;
-  if (tab === 'feature-ideas') return `${APP_BASE_PATH}/feature-ideas`;
-  const g = groupSub ?? 'projects';
-  if (g === 'data') {
-    if (dataProjectKey) {
-      return `${APP_BASE_PATH}/group/data/${encodeURIComponent(dataProjectKey)}`;
-    }
-    return `${APP_BASE_PATH}/group/data`;
-  }
-  if (g === 'settings') {
-    const st = settingsSub ?? 'general';
-    return `${APP_BASE_PATH}/group/settings/${SETTINGS_TAB_TO_SEG[st]}`;
-  }
-  return `${APP_BASE_PATH}/group/${g}`;
-}
-
-type GroupDataTab = 'pages' | 'grouped' | 'approved' | 'blocked' | 'auto-group';
-
 interface FilteredAutoGroupRunStats {
   status: 'idle' | 'running' | 'complete' | 'error';
   totalPages: number;
@@ -242,21 +146,75 @@ function buildGroupedClusterFromPages(
   const keywordCount = sortedPages.reduce((sum, page) => sum + page.keywordCount, 0);
   let totalKd = 0;
   let kdCount = 0;
+  let totalKw = 0;
+  let kwCount = 0;
   for (const page of sortedPages) {
     if (page.avgKd !== null) {
       totalKd += page.avgKd * page.keywordCount;
       kdCount += page.keywordCount;
     }
+    if (page.avgKwRating != null) {
+      totalKw += page.avgKwRating * page.keywordCount;
+      kwCount += page.keywordCount;
+    }
   }
-  return {
+
+  const tokenSig = sortedPages.map(p => p.tokens).slice().sort().join(' ');
+  const existingTokenSig = existing?.clusters
+    ? existing.clusters.map(c => c.tokens).slice().sort().join(' ')
+    : null;
+
+  const existingReviewed =
+    existing?.reviewStatus === 'approve' || existing?.reviewStatus === 'mismatch';
+
+  const tokensSame =
+    existingReviewed && existingTokenSig != null && existingTokenSig === tokenSig;
+
+  // When a merge changes group membership, we keep the last known review result
+  // to avoid badge flicker, but mark it for re-review.
+  const mergeAffected =
+    hasReviewApi && existingReviewed && existingTokenSig != null && !tokensSame;
+
+  const reviewStatus: GroupedCluster['reviewStatus'] | undefined =
+    sortedPages.length === 1
+      ? 'approve'
+      : hasReviewApi
+        ? (existingReviewed ? existing.reviewStatus : 'pending')
+        : existing?.reviewStatus;
+
+  const next: GroupedCluster = {
     id: existing?.id || `llm_group_${sortedPages[0]?.tokens || Date.now()}`,
     groupName: sortedPages[0]?.pageName || existing?.groupName || 'Untitled group',
     clusters: sortedPages,
     totalVolume,
     keywordCount,
     avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
-    reviewStatus: sortedPages.length === 1 ? 'approve' : (hasReviewApi ? 'pending' : existing?.reviewStatus),
+    avgKwRating: kwCount > 0 ? Math.round(totalKw / kwCount) : null,
+    reviewStatus,
+    ...(mergeAffected ? { mergeAffected: true } : {}),
+    ...(existingReviewed ? {
+      reviewMismatchedPages: existing.reviewMismatchedPages,
+      reviewReason: existing.reviewReason,
+      reviewCost: existing.reviewCost,
+      reviewedAt: existing.reviewedAt,
+    } : {}),
   };
+
+  if (existingReviewed && tokensSame) {
+    delete next.mergeAffected;
+  }
+
+  // If we don't have a previous approved/mismatch result to preserve, clear
+  // stale review fields for consistency.
+  if (next.reviewStatus === 'pending') {
+    delete next.reviewMismatchedPages;
+    delete next.reviewReason;
+    delete next.reviewCost;
+    delete next.reviewedAt;
+    delete next.mergeAffected;
+  }
+
+  return next;
 }
 
 function mergeGroupedClustersByName(
@@ -264,49 +222,52 @@ function mergeGroupedClustersByName(
   incomingGroups: GroupedCluster[],
   hasReviewApi: boolean
 ): GroupedCluster[] {
-  const byName = new Map<string, { template: GroupedCluster; pages: ClusterSummary[] }>();
+  const byName = new Map<
+    string,
+    { template: GroupedCluster; pages: ClusterSummary[]; candidates: GroupedCluster[] }
+  >();
   const seedGroups = [...existingGroups, ...incomingGroups];
 
   for (const group of seedGroups) {
     const key = group.groupName.trim().toLowerCase();
     const existing = byName.get(key);
     if (!existing) {
-      byName.set(key, { template: group, pages: [...group.clusters] });
+      byName.set(key, { template: group, pages: [...group.clusters], candidates: [group] });
       continue;
     }
     const mergedPages = [...existing.pages];
+    existing.candidates.push(group);
     for (const page of group.clusters) {
       if (!mergedPages.some(item => item.tokens === page.tokens)) mergedPages.push(page);
     }
-    const preferredTemplate = existing.template.totalVolume >= group.totalVolume ? existing.template : group;
-    byName.set(key, { template: preferredTemplate, pages: mergedPages });
+    const preferredTemplate =
+      existing.template.totalVolume >= group.totalVolume ? existing.template : group;
+    byName.set(key, { ...existing, template: preferredTemplate, pages: mergedPages });
   }
+
+  const clusterTokensSig = (clusters: ClusterSummary[]) =>
+    clusters.map(c => c.tokens).slice().sort().join(' ');
 
   return [...byName.values()]
-    .map(({ template, pages }) => buildGroupedClusterFromPages(pages, hasReviewApi, template))
+    .map(({ template, pages, candidates }) => {
+      const mergedSig = clusterTokensSig(pages);
+      const reviewedCandidates = candidates.filter(
+        c => c.reviewStatus === 'approve' || c.reviewStatus === 'mismatch'
+      );
+
+      const matchingReviewed = reviewedCandidates.find(
+        c => clusterTokensSig(c.clusters) === mergedSig
+      );
+
+      const preferredTemplate = matchingReviewed
+        ? matchingReviewed
+        : (reviewedCandidates.length > 0
+          ? reviewedCandidates.reduce((best, c) => c.totalVolume > best.totalVolume ? c : best, reviewedCandidates[0])
+          : template);
+
+      return buildGroupedClusterFromPages(pages, hasReviewApi, preferredTemplate);
+    })
     .sort((a, b) => b.totalVolume - a.totalVolume);
-}
-
-function slugifyProjectName(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-{2,}/g, '-') || 'project';
-}
-
-function stableProjectSuffix(projectId: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < projectId.length; i++) {
-    hash ^= projectId.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `p${(hash >>> 0).toString(16).padStart(8, '0').slice(0, 6)}`;
-}
-
-function projectUrlKey(project: Project): string {
-  return `${slugifyProjectName(project.name)}--${stableProjectSuffix(project.id)}`;
 }
 
 function escapeJsonFromModelResponse(content: string): string | null {
@@ -408,6 +369,27 @@ function parseFilteredAutoGroupResponse(
 
   return resolvedGroups;
 }
+
+/** Single-cell display for aggregate or per-keyword relevance (1–3) */
+const KwRatingCell = React.memo(({ value }: { value: number | null | undefined }) => (
+  <td className={CELL.dataCompact}>
+    {value != null ? (
+      <span
+        className={`inline-flex min-w-[1.5rem] justify-center px-1 py-0.5 rounded text-[11px] font-semibold tabular-nums border ${
+          value === 1
+            ? 'bg-emerald-100/90 text-emerald-900 border-emerald-200/80'
+            : value === 2
+              ? 'bg-amber-100/90 text-amber-950 border-amber-200/70'
+              : 'bg-rose-100/90 text-rose-900 border-rose-200/70'
+        }`}
+      >
+        {value}
+      </span>
+    ) : (
+      <span className="text-zinc-300">—</span>
+    )}
+  </td>
+));
 
 const ClusterRow = React.memo(({
   row,
@@ -526,6 +508,7 @@ const ClusterRow = React.memo(({
       <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.avgKd !== null ? row.avgKd : '-'}
       </td>
+      <KwRatingCell value={row.avgKwRating} />
       <td className="px-3 py-0.5 text-zinc-600">
         {row.label}
       </td>
@@ -538,7 +521,7 @@ const ClusterRow = React.memo(({
     </tr>
     {isExpanded && (
       <tr className="bg-zinc-100/50 border-b border-zinc-200">
-        <td colSpan={10} className="px-8 py-3">
+        <td colSpan={11} className="px-8 py-3">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-sm font-medium text-zinc-900">Keywords in Cluster</h4>
             <div className="flex items-center gap-2">
@@ -578,6 +561,19 @@ const ClusterRow = React.memo(({
                 <span className="text-zinc-600 truncate mr-4" title={kw.keyword}>{kw.keyword}</span>
                 <div className="flex items-center gap-3 shrink-0">
                   {kw.kd !== null && <span className="text-xs text-zinc-400 font-medium">KD: {kw.kd}</span>}
+                  {kw.kwRating != null && (
+                    <span
+                      className={`text-[10px] font-semibold px-1 py-0.5 rounded border ${
+                        kw.kwRating === 1
+                          ? 'bg-emerald-100/90 text-emerald-900 border-emerald-200/80'
+                          : kw.kwRating === 2
+                            ? 'bg-amber-100/90 text-amber-950 border-amber-200/70'
+                            : 'bg-rose-100/90 text-rose-900 border-rose-200/70'
+                      }`}
+                    >
+                      R:{kw.kwRating}
+                    </span>
+                  )}
                   <span className="text-zinc-500 tabular-nums">{kw.volume.toLocaleString()}</span>
                 </div>
               </div>
@@ -771,6 +767,7 @@ const GroupedClusterRow = React.memo(({
       <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
         {row.avgKd !== null ? row.avgKd : '-'}
       </td>
+      <KwRatingCell value={row.avgKwRating} />
       <td className="px-3 py-0.5 text-zinc-600 text-xs">
         {(() => {
           const labels = new Set<string>();
@@ -793,7 +790,14 @@ const GroupedClusterRow = React.memo(({
         })()}
       </td>
     </tr>
-    {isExpanded && row.clusters.map((cluster, cIdx) => {
+    {isExpanded && (() => {
+      const pageNames = row.clusters.map(c => c.pageName);
+      const mismatchNorm = new Set(
+        normalizeMismatchedPageNames(pageNames, row.reviewMismatchedPages || [])
+      );
+      const mismatchAmbiguous =
+        row.reviewStatus === 'mismatch' && mismatchNorm.size === 0;
+      return row.clusters.map((cluster, cIdx) => {
       const subId = `${row.id}-${cluster.pageName}`;
       const isSubExpanded = expandedSubClusters.has(subId);
       return (
@@ -868,12 +872,16 @@ const GroupedClusterRow = React.memo(({
                 })}
               </div>
             </td>
-            {/* Sub-cluster review status â€" red dot if this page is flagged as mismatched */}
+            {/* Sub-cluster QA: red = mismatched page; green = OK (approve group, or non-mismatch pages in a mismatch group) */}
             <td className="px-1.5 py-0.5 text-center">
-              {row.reviewMismatchedPages?.includes(cluster.pageName) ? (
+              {mismatchNorm.has(cluster.pageName) ? (
                 <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="Flagged as mismatched" />
               ) : row.reviewStatus === 'approve' ? (
                 <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" title="Matches group" />
+              ) : row.reviewStatus === 'mismatch' && !mismatchAmbiguous ? (
+                <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" title="Matches group theme" />
+              ) : mismatchAmbiguous ? (
+                <span className="inline-block w-2 h-2 rounded-full bg-amber-400" title="Group mismatch — page list missing or could not be matched" />
               ) : null}
             </td>
             <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">
@@ -889,19 +897,33 @@ const GroupedClusterRow = React.memo(({
             <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
               {cluster.avgKd !== null ? cluster.avgKd : '-'}
             </td>
+            <KwRatingCell value={cluster.avgKwRating} />
             <td className="px-3 py-0.5 text-zinc-600">{cluster.label}</td>
             <td className="px-3 py-0.5 text-zinc-600">{cluster.locationCity || '-'}</td>
             <td className="px-3 py-0.5 text-zinc-600">{cluster.locationState || '-'}</td>
           </tr>
           {isSubExpanded && (
             <tr className="bg-zinc-100/50 border-b border-zinc-200">
-              <td colSpan={11} className="px-12 py-2">
+              <td colSpan={12} className="px-12 py-2">
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-1">
                   {cluster.keywords.map((kw, i) => (
                     <div key={i} className="flex justify-between items-center text-sm border-b border-zinc-200/50 pb-1 last:border-0">
                       <span className="text-zinc-600 truncate mr-4" title={kw.keyword}>{kw.keyword}</span>
                       <div className="flex items-center gap-3 shrink-0">
                         {kw.kd !== null && <span className="text-xs text-zinc-400 font-medium">KD: {kw.kd}</span>}
+                        {kw.kwRating != null && (
+                          <span
+                            className={`text-[10px] font-semibold px-1 py-0.5 rounded border ${
+                              kw.kwRating === 1
+                                ? 'bg-emerald-100/90 text-emerald-900 border-emerald-200/80'
+                                : kw.kwRating === 2
+                                  ? 'bg-amber-100/90 text-amber-950 border-amber-200/70'
+                                  : 'bg-rose-100/90 text-rose-900 border-rose-200/70'
+                            }`}
+                          >
+                            R:{kw.kwRating}
+                          </span>
+                        )}
                         <span className="text-zinc-500 tabular-nums">{kw.volume.toLocaleString()}</span>
                       </div>
                     </div>
@@ -912,7 +934,8 @@ const GroupedClusterRow = React.memo(({
           )}
         </React.Fragment>
       );
-    })}
+    });
+    })()}
   </>
 ));
 
@@ -931,114 +954,77 @@ const CURRENT_PROJECT_ID = 'new-final-8edfc';
 })();
 
 export default function App() {
-  const [mainTab, setMainTab] = useState<MainTab>(() => {
-    if (typeof window === 'undefined') return 'group';
-    return parseAppPath(window.location.pathname).mainTab;
-  });
-  const [groupSubTab, setGroupSubTab] = useState<GroupSubTab>(() => {
-    if (typeof window === 'undefined') return 'projects';
-    return parseAppPath(window.location.pathname).groupSubTab ?? 'projects';
-  });
-  const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>(() => {
-    if (typeof window === 'undefined') return 'general';
-    return parseAppPath(window.location.pathname).settingsSubTab ?? 'general';
-  });
-  const navigateMainTab = useCallback((tab: MainTab) => {
-    setMainTab(tab);
-    const path =
-      tab === 'group'
-        ? buildMainPath('group', 'projects')
-        : tab === 'generate'
-          ? buildMainPath('generate')
-          : tab === 'feedback'
-            ? buildMainPath('feedback')
-            : buildMainPath('feature-ideas');
-    if (typeof window !== 'undefined') {
-      const cur = window.location.pathname.replace(/\/$/, '') || '/';
-      const next = path.replace(/\/$/, '') || '/';
-      if (cur !== next) {
-        window.history.pushState({ kwgMainTab: tab }, '', path);
-      }
-    }
-  }, []);
-  // Canonicalize legacy URLs to /seo-magic/group/... and top-level slugs
-  useEffect(() => {
-    const p = window.location.pathname.replace(/\/$/, '') || '/';
-    const base = APP_BASE_PATH;
-    if (p === '/feedback') {
-      window.history.replaceState({}, '', `${base}/feedback`);
-      return;
-    }
-    if (p === '/generate') {
-      window.history.replaceState({}, '', `${base}/generate`);
-      return;
-    }
-    if (p === '/feature-ideas') {
-      window.history.replaceState({}, '', `${base}/feature-ideas`);
-      return;
-    }
-    if (p === '/' || p === '') {
-      window.history.replaceState({}, '', `${base}/group/projects`);
-      return;
-    }
-    if (p === base || p === `${base}/`) {
-      window.history.replaceState({}, '', `${base}/group/projects`);
-      return;
-    }
-    if (p === '/log' || p === `${base}/log`) {
-      window.history.replaceState({}, '', `${base}/group/log`);
-      return;
-    }
-    if (p === '/settings' || p === `${base}/settings`) {
-      window.history.replaceState({}, '', buildMainPath('group', 'settings', undefined, 'general'));
-      return;
-    }
-    if (p === `${base}/group/settings` || p === `${base}/group/settings/`) {
-      window.history.replaceState({}, '', buildMainPath('group', 'settings', undefined, 'general'));
-    }
-  }, []);
+  const projectsNavRef = useRef<Project[]>([]);
+  const activeProjectIdNavRef = useRef<string | null>(null);
+  const {
+    mainTab,
+    setMainTab,
+    groupSubTab,
+    setGroupSubTab,
+    settingsSubTab,
+    setSettingsSubTab,
+    navigateMainTab,
+    navigateGroupSub,
+    navigateSettingsSub,
+  } = useNavigationState({ activeProjectIdRef: activeProjectIdNavRef, projectsRef: projectsNavRef });
   // Starred models â€" shared across Generate tab and Group Review
   const [starredModels, setStarredModels] = useState<Set<string>>(new Set());
+  const { addToast } = useToast();
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'starred_models'), (snap) => {
+      markListenerSnapshot('starred_models', snap);
       if (!snap.exists()) {
         setStarredModels(new Set());
         return;
       }
       const ids: string[] = snap.data()?.ids || [];
       setStarredModels(new Set(ids));
-    }, () => {});
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, []);
+    }, (err) => {
+      markListenerError('starred_models');
+      reportPersistFailure(addToast, 'starred models sync', err);
+    });
+    return () => {
+      clearListenerError('starred_models');
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [addToast]);
   const toggleStarModel = useCallback((modelId: string) => {
     setStarredModels(prev => {
       const next = new Set(prev);
       if (next.has(modelId)) next.delete(modelId);
       else next.add(modelId);
       const arr = [...next];
-      setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch(() => {});
+      setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch((err) =>
+        reportPersistFailure(addToast, 'save starred models', err),
+      );
       return next;
     });
-  }, []);
+  }, [addToast]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const { addToast } = useToast();
 
   // -- Project persistence hook -- single source of truth for all 14 persisted state variables --
   const persistence = useProjectPersistence({ projects, setProjects, addToast });
   const {
     results, clusterSummary, tokenSummary, groupedClusters,
     approvedGroups, blockedKeywords, activityLog, stats,
-    datasetStats, autoGroupSuggestions, tokenMergeRules,
+    datasetStats, autoGroupSuggestions, autoMergeRecommendations, tokenMergeRules,
     blockedTokens, labelSections, fileName,
     activeProjectId, setActiveProjectId,
-    loadProject, clearProject,
+    loadProject, clearProject, syncFileNameLocal,
+    removeFromApproved, ungroupPages,
+    addActivityEntry,
+    bulkSet,
     // Transitional setters (will be removed as mutations replace them)
     setResults, setClusterSummary, setTokenSummary, setGroupedClusters,
     setApprovedGroups, setBlockedKeywords, setActivityLog, setStats,
-    setDatasetStats, setAutoGroupSuggestions, setTokenMergeRules,
+    setDatasetStats, setAutoGroupSuggestions, setAutoMergeRecommendations, setTokenMergeRules,
     setBlockedTokens, setLabelSections, setFileName,
     refs: persistenceRefs,
   } = persistence;
+
+  useEffect(() => {
+    clearProjectPersistErrorFlag();
+  }, [activeProjectId]);
 
   // Convenience aliases for transitional refs (used by legacy code during migration)
   const activeProjectIdRef = persistenceRefs.activeProjectId;
@@ -1048,50 +1034,17 @@ export default function App() {
   const groupedClustersRef = persistenceRefs.groupedClusters;
   const approvedGroupsRef = persistenceRefs.approvedGroups;
   const blockedKeywordsRef = persistenceRefs.blockedKeywords;
-  const activityLogRef = persistenceRefs.activityLog;
   const statsRef = persistenceRefs.stats;
   const datasetStatsRef = persistenceRefs.datasetStats;
   const autoGroupSuggestionsRef = persistenceRefs.autoGroupSuggestions;
+  const autoMergeRecommendationsRef = persistenceRefs.autoMergeRecommendations;
   const tokenMergeRulesRef = persistenceRefs.tokenMergeRules;
   const blockedTokensRef = persistenceRefs.blockedTokens;
   const labelSectionsRef = persistenceRefs.labelSections;
   const fileNameRef = persistenceRefs.fileName;
 
-  const navigateGroupSub = useCallback((sub: GroupSubTab) => {
-    setMainTab('group');
-    setGroupSubTab(sub);
-    let path: string;
-    if (sub === 'data' && activeProjectId) {
-      const proj = projects.find((p) => p.id === activeProjectId);
-      const key = proj ? projectUrlKey(proj) : activeProjectId;
-      path = buildMainPath('group', 'data', key);
-    } else if (sub === 'settings') {
-      path = buildMainPath('group', 'settings', undefined, settingsSubTab ?? 'general');
-    } else {
-      path = buildMainPath('group', sub);
-    }
-    if (typeof window !== 'undefined') {
-      const cur = window.location.pathname.replace(/\/$/, '') || '/';
-      const next = path.replace(/\/$/, '') || '/';
-      if (cur !== next) {
-        window.history.pushState({ kwgGroupSub: sub }, '', path);
-      }
-    }
-  }, [activeProjectId, projects, settingsSubTab]);
-
-  const navigateSettingsSub = useCallback((st: SettingsSubTab) => {
-    setMainTab('group');
-    setGroupSubTab('settings');
-    setSettingsSubTab(st);
-    const path = buildMainPath('group', 'settings', undefined, st);
-    if (typeof window !== 'undefined') {
-      const cur = window.location.pathname.replace(/\/$/, '') || '/';
-      const next = path.replace(/\/$/, '') || '/';
-      if (cur !== next) {
-        window.history.pushState({ kwgSettingsSub: st }, '', path);
-      }
-    }
-  }, []);
+  projectsNavRef.current = projects;
+  activeProjectIdNavRef.current = activeProjectId;
 
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isProjectLoading, setIsProjectLoading] = useState(false);
@@ -1115,6 +1068,74 @@ export default function App() {
   const reviewAbortRef = useRef<AbortController | null>(null);
   const reviewProcessingRef = useRef(false);
   const filteredAutoGroupAbortRef = useRef<AbortController | null>(null);
+  const kwRatingAbortRef = useRef<AbortController | null>(null);
+  const autoMergeAbortRef = useRef<AbortController | null>(null);
+  /** Wall-clock start for Rate KWs job (summary + rating). */
+  const kwRatingJobStartRef = useRef(0);
+  const autoMergeJobStartRef = useRef(0);
+  const [kwRatingJob, setKwRatingJob] = useState<{
+    phase: 'idle' | 'summary' | 'rating' | 'done' | 'error';
+    progress: number;
+    done: number;
+    total: number;
+    /** Counts among ratable rows (blocked-token rows excluded) */
+    n1: number;
+    n2: number;
+    n3: number;
+    error: string | null;
+    apiErrors: number;
+    /** Cumulative OpenRouter `usage.cost` (USD) when returned */
+    costUsdTotal: number;
+    costReported: boolean;
+    promptTokens: number;
+    completionTokens: number;
+    /** Summary request + one per keyword rating call */
+    apiCalls: number;
+    elapsedMs: number;
+  }>({
+    phase: 'idle',
+    progress: 0,
+    done: 0,
+    total: 0,
+    n1: 0,
+    n2: 0,
+    n3: 0,
+    error: null,
+    apiErrors: 0,
+    costUsdTotal: 0,
+    costReported: false,
+    promptTokens: 0,
+    completionTokens: 0,
+    apiCalls: 0,
+    elapsedMs: 0,
+  });
+  const [autoMergeJob, setAutoMergeJob] = useState<{
+    phase: 'idle' | 'running' | 'done' | 'error';
+    progress: number;
+    done: number;
+    total: number;
+    recommendations: number;
+    error: string | null;
+    costUsdTotal: number;
+    costReported: boolean;
+    promptTokens: number;
+    completionTokens: number;
+    apiCalls: number;
+    elapsedMs: number;
+  }>({
+    phase: 'idle',
+    progress: 0,
+    done: 0,
+    total: 0,
+    recommendations: 0,
+    error: null,
+    costUsdTotal: 0,
+    costReported: false,
+    promptTokens: 0,
+    completionTokens: 0,
+    apiCalls: 0,
+    elapsedMs: 0,
+  });
   const activeFilteredAutoGroupJobRef = useRef<FilteredAutoGroupJob | null>(null);
   const [isRunningFilteredAutoGroup, setIsRunningFilteredAutoGroup] = useState(false);
   const [pendingFilteredAutoGroupTokens, setPendingFilteredAutoGroupTokens] = useState<Set<string>>(new Set());
@@ -1134,66 +1155,93 @@ export default function App() {
   // Debounced QA re-review
   const reReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reReviewGroupIds = useRef<Set<string>>(new Set());
-  // Ungrouping: track selected groups and sub-clusters within groups
-  const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
-  const [selectedSubClusters, setSelectedSubClusters] = useState<Set<string>>(new Set()); // key: "groupId::clusterTokens"
-  const [activeTab, setActiveTab] = useState<GroupDataTab>('pages');
+  // Ungrouping: track selected groups and sub-clusters within groups (see useKeywordWorkspace)
   const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
   const [mergeModalTokens, setMergeModalTokens] = useState<string[]>([]);
   const [, startTransition] = useTransition();
-  const switchTab = useCallback((tab: typeof activeTab) => {
-    startTransition(() => {
-      setActiveTab(tab);
-      setCurrentPage(1);
-      // Clear selections when switching tabs to prevent stale selection counts
-      setSelectedClusters(new Set());
-      setSelectedGroups(new Set());
-      setSelectedSubClusters(new Set());
-    });
-  }, []);
-  const [statsExpanded, setStatsExpanded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
-  const setSearchImmediate = useCallback((value: string) => {
-    setSearchQuery(value);
-    startTransition(() => setDebouncedSearchQuery(value));
-  }, []);
-  const [minClusterCount, setMinClusterCount] = useState<string>('');
-  const [maxClusterCount, setMaxClusterCount] = useState<string>('');
-  const [minTokenLen, setMinTokenLen] = useState<string>('');
-  const [maxTokenLen, setMaxTokenLen] = useState<string>('');
-  const [excludedLabels, setExcludedLabels] = useState<Set<string>>(new Set());
-  const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
-  const [isLabelDropdownOpen, setIsLabelDropdownOpen] = useState(false);
-  // Multi-sort: array of sort criteria applied in order (first = primary, second = secondary, etc.)
-  const [sortConfig, setSortConfig] = useState<Array<{key: keyof ClusterSummary, direction: 'asc' | 'desc'}>>([{ key: 'totalVolume', direction: 'desc' }]);
-  const [tokenSortConfig, setTokenSortConfig] = useState<{key: keyof TokenSummary, direction: 'asc' | 'desc'}>({ key: 'frequency', direction: 'desc' });
-  const [groupedSortConfig, setGroupedSortConfig] = useState<Array<{key: string, direction: 'asc' | 'desc'}>>([{ key: 'keywordCount', direction: 'desc' }]);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState(500);
-  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
-
-  // Column-level filters (static - only reset on full refresh)
-  const [filterCity, setFilterCity] = useState<string>('');
-  const [filterState, setFilterState] = useState<string>('');
-  const [minLen, setMinLen] = useState<string>('');
-  const [maxLen, setMaxLen] = useState<string>('');
-  const [minKwInCluster, setMinKwInCluster] = useState<string>('');
-  const [maxKwInCluster, setMaxKwInCluster] = useState<string>('');
-  const [minVolume, setMinVolume] = useState<string>('');
-  const [maxVolume, setMaxVolume] = useState<string>('');
-  const [minKd, setMinKd] = useState<string>('');
-  const [maxKd, setMaxKd] = useState<string>('');
-
-  // Token Management panel state
-  const [tokenMgmtSearch, setTokenMgmtSearch] = useState('');
-  const [tokenMgmtSort, setTokenMgmtSort] = useState<{ key: 'token' | 'totalVolume' | 'frequency' | 'avgKd', direction: 'asc' | 'desc' }>({ key: 'totalVolume', direction: 'desc' });
-  const [selectedMgmtTokens, setSelectedMgmtTokens] = useState<Set<string>>(new Set());
-  const [tokenMgmtPage, setTokenMgmtPage] = useState(1);
-  const tokenMgmtPerPage = 100;
-  const [tokenMgmtSubTab, setTokenMgmtSubTab] = useState<'current' | 'all' | 'merge' | 'blocked'>('current');
-  const [expandedMergeParents, setExpandedMergeParents] = useState<Set<string>>(new Set());
+  const {
+    selectedGroups,
+    setSelectedGroups,
+    selectedSubClusters,
+    setSelectedSubClusters,
+    activeTab,
+    setActiveTab,
+    switchTab,
+    statsExpanded,
+    setStatsExpanded,
+    error,
+    setError,
+    searchQuery,
+    setSearchQuery,
+    debouncedSearchQuery,
+    setDebouncedSearchQuery,
+    setSearchImmediate,
+    minClusterCount,
+    setMinClusterCount,
+    maxClusterCount,
+    setMaxClusterCount,
+    minTokenLen,
+    setMinTokenLen,
+    maxTokenLen,
+    setMaxTokenLen,
+    excludedLabels,
+    setExcludedLabels,
+    selectedTokens,
+    setSelectedTokens,
+    isLabelDropdownOpen,
+    setIsLabelDropdownOpen,
+    sortConfig,
+    setSortConfig,
+    tokenSortConfig,
+    setTokenSortConfig,
+    groupedSortConfig,
+    setGroupedSortConfig,
+    keywordsSortConfig,
+    setKeywordsSortConfig,
+    currentPage,
+    setCurrentPage,
+    itemsPerPage,
+    setItemsPerPage,
+    expandedClusters,
+    setExpandedClusters,
+    filterCity,
+    setFilterCity,
+    filterState,
+    setFilterState,
+    minLen,
+    setMinLen,
+    maxLen,
+    setMaxLen,
+    minKwInCluster,
+    setMinKwInCluster,
+    maxKwInCluster,
+    setMaxKwInCluster,
+    minVolume,
+    setMinVolume,
+    maxVolume,
+    setMaxVolume,
+    minKd,
+    setMinKd,
+    maxKd,
+    setMaxKd,
+    minKwRating,
+    setMinKwRating,
+    maxKwRating,
+    setMaxKwRating,
+    tokenMgmtSearch,
+    setTokenMgmtSearch,
+    tokenMgmtSort,
+    setTokenMgmtSort,
+    selectedMgmtTokens,
+    setSelectedMgmtTokens,
+    tokenMgmtPage,
+    setTokenMgmtPage,
+    tokenMgmtPerPage,
+    tokenMgmtSubTab,
+    setTokenMgmtSubTab,
+    expandedMergeParents,
+    setExpandedMergeParents,
+  } = useKeywordWorkspace({ setSelectedClusters });
 
   // Universal blocked tokens â€" persists across ALL projects (global, not project-specific)
   const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(new Set<string>());
@@ -1203,21 +1251,30 @@ export default function App() {
   useEffect(() => {
     if (universalBlockedInitRef.current) { universalBlockedInitRef.current = false; return; }
     const arr = Array.from(universalBlockedTokens);
-    setDoc(doc(db, 'app_settings', 'universal_blocked'), { tokens: arr, updatedAt: new Date().toISOString() }).catch(() => {});
-  }, [universalBlockedTokens]);
+    setDoc(doc(db, 'app_settings', 'universal_blocked'), { tokens: arr, updatedAt: new Date().toISOString() }).catch((err) =>
+      reportPersistFailure(addToast, 'save universal blocked tokens', err),
+    );
+  }, [universalBlockedTokens, addToast]);
 
   // Load universal blocked from Firestore on mount
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'universal_blocked'), (snap) => {
+      markListenerSnapshot('universal_blocked', snap);
       if (!snap.exists()) {
         setUniversalBlockedTokens(new Set<string>());
         return;
       }
       const data = snap.data();
       setUniversalBlockedTokens(new Set<string>(Array.isArray(data?.tokens) ? data.tokens : []));
-    }, () => {});
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, []);
+    }, (err) => {
+      markListenerError('universal_blocked');
+      reportPersistFailure(addToast, 'universal blocked tokens sync', err);
+    });
+    return () => {
+      clearListenerError('universal_blocked');
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [addToast]);
 
   const [isLabelSidebarOpen, setIsLabelSidebarOpen] = useState(true);
   const [labelSortConfigs, setLabelSortConfigs] = useState<Record<string, { key: 'token' | 'kws' | 'vol' | 'kd'; direction: 'asc' | 'desc' }>>({});
@@ -1228,105 +1285,30 @@ export default function App() {
   const [briefLoading, setBriefLoading] = useState<string | null>(null);
   const [briefs, setBriefs] = useState<Record<string, string>>({});
 
-
-  const getProjectKeyFromUrl = useCallback((): string | null => {
-    try {
-      const pathKey = parseAppPath(window.location.pathname).dataRouteProjectKey;
-      if (pathKey) return pathKey;
-      return new URLSearchParams(window.location.search).get('project');
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const resolveProjectIdFromUrlKey = useCallback((projectKey: string | null, projectList: Project[]): string | null => {
-    if (!projectKey) return null;
-    if (projectList.some(project => project.id === projectKey)) return projectKey;
-    const matched = projectList.find(project => projectUrlKey(project) === projectKey);
-    return matched?.id || null;
-  }, []);
-
-  const mapProjectsSnapshot = useCallback((snapshot: any): Project[] => {
-    const liveProjects: Project[] = [];
-    snapshot.forEach((docSnap: any) => {
-      const data = docSnap.data();
-      liveProjects.push({
-        id: docSnap.id,
-        name: data.name || '',
-        description: data.description || '',
-        createdAt: data.createdAt || new Date().toISOString(),
-        uid: data.uid || 'local',
-        fileName: data.fileName,
-      });
-    });
-    return liveProjects;
-  }, []);
-
-  const syncProjectIdToUrl = useCallback((projectId: string | null, projectList: Project[]) => {
-    try {
-      const u = new URL(window.location.href);
-      u.searchParams.delete('project');
-      if (projectId) {
-        const project = projectList.find((item) => item.id === projectId);
-        const key = project ? projectUrlKey(project) : projectId;
-        u.pathname = buildMainPath('group', 'data', key);
-      } else {
-        u.pathname = buildMainPath('group', 'data');
-      }
-      const next = u.pathname + u.search;
-      if (window.location.pathname + window.location.search !== next) {
-        window.history.replaceState({}, '', next);
-      }
-    } catch {
-      // Ignore URL sync failures and keep project state functional.
-    }
-  }, []);
-
-  // Load projects, saved clusters, and restore active project on mount
-  useEffect(() => {
-    setIsAuthReady(true);
-    let cancelled = false;
-
-    Promise.all([loadProjectsFromFirestore(), loadSavedWorkspacePrefs()])
-      .then(([loadedProjects, prefs]) => {
-        if (cancelled) return;
-        initialProjectsLoadedRef.current = true;
-        initialProjectsLoadedAtRef.current = Date.now();
-        lastAppliedProjectsSnapshotRef.current = loadedProjects;
-        setProjects(loadedProjects);
-        setSavedClusters(prefs.savedClusters || []);
-
-        const requestedProjectKey = getProjectKeyFromUrl();
-        const requestedProjectId = resolveProjectIdFromUrlKey(requestedProjectKey, loadedProjects);
-        const nextProjectId =
-          requestedProjectId && loadedProjects.some(p => p.id === requestedProjectId)
-            ? requestedProjectId
-            : prefs.activeProjectId && loadedProjects.some(p => p.id === prefs.activeProjectId)
-              ? prefs.activeProjectId
-              : null;
-
-        if (nextProjectId) {
-          setActiveProjectId(nextProjectId);
-          setGroupSubTab('data');
-          setIsProjectLoading(true);
-          loadProject(nextProjectId, loadedProjects).finally(() => {
-            if (!cancelled) setIsProjectLoading(false);
-          });
-        }
-      })
-      .catch((error) => {
-        console.warn('[APP INIT] Failed to load initial Firestore workspace state:', error);
-        if (cancelled) return;
-        initialProjectsLoadedRef.current = true;
-        initialProjectsLoadedAtRef.current = Date.now();
-        lastAppliedProjectsSnapshotRef.current = [];
-        setProjects([]);
-        setSavedClusters([]);
-        setIsProjectLoading(false);
-      });
-
-    return () => { cancelled = true; };
-  }, [getProjectKeyFromUrl, loadProject, resolveProjectIdFromUrlKey, syncProjectIdToUrl]);
+  const { createProject, deleteProject, selectProject } = useProjectLifecycle({
+    projects,
+    setProjects,
+    activeProjectId,
+    activeProjectIdRef,
+    setActiveProjectId,
+    loadProject,
+    clearProject,
+    syncFileNameLocal,
+    mainTab,
+    groupSubTab,
+    setMainTab,
+    setGroupSubTab,
+    setSettingsSubTab,
+    setIsProjectLoading,
+    setIsAuthReady,
+    setSavedClusters,
+    newProjectName,
+    newProjectDescription,
+    setNewProjectName,
+    setNewProjectDescription,
+    setProjectError,
+    setIsCreatingProject,
+  });
 
   // Realtime workspace prefs (shared between collaborators).
   // These control *which* project we're focusing on plus the saved cluster list.
@@ -1337,6 +1319,7 @@ export default function App() {
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'user_preferences'), (snap) => {
+      markListenerSnapshot('user_preferences', snap);
       if (!snap.exists()) return;
       const data = snap.data() as any;
       const remoteSavedClusters = Array.isArray(data?.savedClusters) ? data.savedClusters : [];
@@ -1368,9 +1351,15 @@ export default function App() {
           setActiveProjectId(remoteActiveProjectId);
         }
       }
-    }, () => {});
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, [setActiveProjectId, projects, clearProject]);
+    }, (err) => {
+      markListenerError('user_preferences');
+      reportPersistFailure(addToast, 'user preferences sync', err);
+    });
+    return () => {
+      clearListenerError('user_preferences');
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [setActiveProjectId, projects, clearProject, addToast]);
 
   const handleLogin = async () => {};
   const handleLogout = async () => {};
@@ -1388,151 +1377,6 @@ export default function App() {
       // Ignore sync preference-save exceptions; normal writes use project persistence.
     }
   }, [activeProjectId, savedClusters]);
-
-  useEffect(() => {
-    if (mainTab !== 'group' || groupSubTab !== 'data') return;
-    syncProjectIdToUrl(activeProjectId, projects);
-  }, [mainTab, groupSubTab, activeProjectId, projects, syncProjectIdToUrl]);
-
-  useEffect(() => {
-    const handlePopState = async () => {
-      const parsed = parseAppPath(window.location.pathname);
-      setMainTab(parsed.mainTab);
-      if (parsed.groupSubTab !== null) setGroupSubTab(parsed.groupSubTab);
-      if (parsed.settingsSubTab !== null) setSettingsSubTab(parsed.settingsSubTab);
-
-      const searchKey = new URLSearchParams(window.location.search).get('project');
-      const key = parsed.dataRouteProjectKey || searchKey;
-      const projectIdFromUrl = resolveProjectIdFromUrlKey(key, projects);
-
-      if (parsed.mainTab === 'group' && parsed.groupSubTab === 'data' && key && projectIdFromUrl) {
-        if (projectIdFromUrl === activeProjectId) return;
-        setActiveProjectId(projectIdFromUrl);
-        setIsProjectLoading(true);
-        try {
-          await loadProject(projectIdFromUrl, projects);
-        } finally {
-          setIsProjectLoading(false);
-        }
-        return;
-      }
-
-      // Any route other than /group/data: drop legacy ?project= and clear loaded project
-      if (parsed.mainTab !== 'group' || parsed.groupSubTab !== 'data') {
-        try {
-          const u = new URL(window.location.href);
-          if (u.searchParams.has('project')) {
-            u.searchParams.delete('project');
-            window.history.replaceState({}, '', u.pathname + u.search);
-          }
-        } catch {
-          /* ignore */
-        }
-        if (activeProjectId) {
-          setActiveProjectId(null);
-          clearProject();
-        }
-        return;
-      }
-
-      if (!key || !projectIdFromUrl) {
-        if (activeProjectId) {
-          setActiveProjectId(null);
-          clearProject();
-        }
-      }
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, [activeProjectId, clearProject, loadProject, projects, resolveProjectIdFromUrlKey]);
-
-  // Ref for projects so the onSnapshot callback always sees the latest local state
-  const localProjectsRef = useRef(projects);
-  localProjectsRef.current = projects;
-
-  // Grace period after project creation — don't clear if the project was just created
-  // and the Firestore write hasn't landed in the snapshot yet.
-  const recentlyCreatedProjectRef = useRef<{ id: string; until: number } | null>(null);
-
-  // Prevent the projects snapshot from overwriting state until initial load completes.
-  // Without this, onSnapshot fires immediately with potentially empty cache data,
-  // setting projects=[] before loadProjectsFromFirestore() resolves.
-  const initialProjectsLoadedRef = useRef(false);
-  // Timestamp when getDocs finished — used to reject stale empty snapshots that
-  // arrive shortly after the authoritative load.
-  const initialProjectsLoadedAtRef = useRef<number>(0);
-  // Last list applied from getDocs or a non-stale snapshot — avoids a post-load empty
-  // fromCache snapshot wiping the list that getDocs already returned.
-  const lastAppliedProjectsSnapshotRef = useRef<Project[] | null>(null);
-
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'projects'), (snap) => {
-      const liveProjects = mapProjectsSnapshot(snap);
-
-      // Don't overwrite projects with empty snapshot data before initial load completes.
-      // The initial load (loadProjectsFromFirestore) does a getDocs which always returns
-      // authoritative data; the snapshot may fire first with empty local cache.
-      if (!initialProjectsLoadedRef.current) {
-        if (liveProjects.length === 0) return; // Skip empty — wait for initial load
-        initialProjectsLoadedRef.current = true; // Snapshot had data, trust it
-        initialProjectsLoadedAtRef.current = Date.now();
-      } else if (
-        liveProjects.length === 0 &&
-        (lastAppliedProjectsSnapshotRef.current?.length ?? 0) > 0
-      ) {
-        // After initial load, NEVER let an empty snapshot wipe a non-empty list
-        // when it's coming from the local cache. Empty server snapshots should
-        // be trusted immediately (e.g. collaborator deleted the project list).
-        if (snap.metadata?.fromCache === true) {
-          return;
-        }
-        if (snap.metadata?.hasPendingWrites === true) {
-          return;
-        }
-      }
-
-      lastAppliedProjectsSnapshotRef.current = liveProjects;
-      setProjects(liveProjects);
-
-      const pid = activeProjectIdRef.current;
-      if (pid && !liveProjects.some(project => project.id === pid)) {
-        // Check if this project was just created (grace period for Firestore write)
-        const grace = recentlyCreatedProjectRef.current;
-        if (grace && grace.id === pid && Date.now() < grace.until) {
-          return; // Skip — Firestore hasn't caught up yet
-        }
-        setActiveProjectId(null);
-        setMainTab('group');
-        setGroupSubTab('projects');
-        if (typeof window !== 'undefined') {
-          window.history.replaceState({}, '', buildMainPath('group', 'projects'));
-        }
-        clearProject();
-        return;
-      }
-
-      // Clear grace once the project appears in Firestore
-      if (recentlyCreatedProjectRef.current && liveProjects.some(p => p.id === recentlyCreatedProjectRef.current?.id)) {
-        recentlyCreatedProjectRef.current = null;
-      }
-
-      const activeProject = pid
-        ? liveProjects.find(project => project.id === pid)
-        : null;
-      if (activeProject && typeof activeProject.fileName === 'string') {
-        // Only update local display state — don't trigger a full Firestore save
-        // of chunk data. bulkSet calls enqueueSave which suppresses the chunks
-        // snapshot listener, blocking legitimate collaborator updates.
-        persistence.setFileName(activeProject.fileName);
-      }
-    }, (error) => {
-      console.warn('[PROJECTS] Firestore snapshot error (likely quota exceeded):', error?.message || error);
-      // Do NOT clear projects on error — keep whatever we have locally
-    });
-
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, [clearProject, mapProjectsSnapshot]);
-
 
   const saveCluster = async (cluster: ClusterSummary) => {
     const clusterId = `local_${cluster.pageName.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
@@ -1553,80 +1397,6 @@ export default function App() {
     const updated = savedClusters.filter((c: any) => c.id !== clusterId);
     setSavedClusters(updated);
     saveAppPrefsToFirestore(activeProjectId, updated);
-  };
-
-
-
-  const createProject = async () => {
-    if (!newProjectName.trim()) {
-      setProjectError("Project name is required.");
-      return;
-    }
-    setProjectError(null);
-    setIsProjectLoading(true);
-    try {
-      const newProject: Project = {
-        id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        uid: 'local',
-        name: newProjectName,
-        description: newProjectDescription,
-        createdAt: new Date().toISOString()
-      };
-      const updatedProjects = [...projects, newProject];
-      setProjects(updatedProjects);
-      // Grace period: don't clear this project if the Firestore snapshot fires before the write lands
-      recentlyCreatedProjectRef.current = { id: newProject.id, until: Date.now() + 10000 };
-      // Fire-and-forget — project is already in React state, no need to block UI
-      saveProjectToFirestore(newProject).catch(err => console.error('[createProject] Firestore save failed:', err));
-      setNewProjectName('');
-      setNewProjectDescription('');
-      setIsCreatingProject(false);
-      setActiveProjectId(newProject.id);
-      setMainTab('group');
-      setGroupSubTab('data');
-      if (typeof window !== 'undefined') {
-        window.history.pushState({}, '', buildMainPath('group', 'data', projectUrlKey(newProject)));
-      }
-      clearProject();
-    } catch (error) {
-      setProjectError("Failed to create project.");
-    } finally {
-      setIsProjectLoading(false);
-    }
-  };
-
-  const deleteProject = async (projectId: string) => {
-    if (!window.confirm('Are you sure you want to delete this project and all its data?')) return;
-    // Clear active project first if it's the one being deleted
-    if (activeProjectId === projectId) {
-      setActiveProjectId(null);
-      clearProject();
-    }
-    const updatedProjects = projects.filter(p => p.id !== projectId);
-    setProjects(updatedProjects);
-    // Remove from Firestore and clear any stale local cache copies
-    await Promise.all([
-      deleteProjectFromFirestore(projectId),
-      deleteProjectDataFromFirestore(projectId),
-      deleteFromIDB(projectId),
-    ]);
-  };
-
-  const selectProject = async (projectId: string) => {
-    setActiveProjectId(projectId);
-    setIsProjectLoading(true);
-    setMainTab('group');
-    setGroupSubTab('data');
-    const proj = projects.find((p) => p.id === projectId);
-    const key = proj ? projectUrlKey(proj) : projectId;
-    if (typeof window !== 'undefined') {
-      window.history.pushState({}, '', buildMainPath('group', 'data', key));
-    }
-    try {
-      await loadProject(projectId, projects);
-    } finally {
-      setIsProjectLoading(false);
-    }
   };
 
   const generateBrief = async (cluster: ClusterSummary | any) => {
@@ -1673,7 +1443,11 @@ export default function App() {
     setIsProcessing(true);
     setProgress(0);
     setError(null);
-    setFileName(file.name);
+    if (activeProjectId) {
+      syncFileNameLocal(file.name);
+    } else {
+      setFileName(file.name);
+    }
 
     Papa.parse(file, {
       skipEmptyLines: true,
@@ -2014,6 +1788,7 @@ export default function App() {
                     keywordCount: cluster.rows.length,
                     totalVolume: clusterTotalVolume,
                     avgKd: clusterKdCount > 0 ? Math.round(clusterTotalKd / clusterKdCount) : null,
+                    avgKwRating: null,
                     label: clusterLabels.join(', '),
                     labelArr: clusterLabels,
                     locationCity: cluster.locationCity,
@@ -2066,53 +1841,58 @@ export default function App() {
                   .sort((a, b) => b.frequency - a.frequency);
 
     // No auto-grouping â€" all pages start in Pages (Ungrouped). User groups manually.
-    setResults(outputData);
-    setClusterSummary(summaryData);
-    setGroupedClusters([]);
-    setTokenSummary(tokenSummaryData);
-    setBlockedKeywords(blockedRows);
-    setFileName(file.name);
+    const statsObj = {
+      original: originalCount,
+      valid: outputData.length,
+      clusters: sortedClusters.length,
+      tokens: tokenSummaryData.length,
+      totalVolume: totalSearchVolume
+    };
+    const datasetStatsObj = {
+      cities: datasetCities,
+      states: datasetStates,
+      numbers: datasetNumbers,
+      faqs: datasetFaqs,
+      commercial: datasetCommercial,
+      local: datasetLocal,
+      year: datasetYear,
+      informational: datasetInformational,
+      navigational: datasetNavigational
+    };
 
     if (activeProjectId) {
-      const statsObj = {
-        original: originalCount,
-        valid: outputData.length,
-        clusters: sortedClusters.length,
-        tokens: tokenSummaryData.length,
-        totalVolume: totalSearchVolume
-      };
-      const datasetStatsObj = {
-        cities: datasetCities,
-        states: datasetStates,
-        numbers: datasetNumbers,
-        faqs: datasetFaqs,
-        commercial: datasetCommercial,
-        local: datasetLocal,
-        year: datasetYear,
-        informational: datasetInformational,
-        navigational: datasetNavigational
-      };
-      persistence.bulkSet({ results: outputData, clusterSummary: summaryData, tokenSummary: tokenSummaryData, groupedClusters: [], stats: statsObj, datasetStats: datasetStatsObj, fileName: file.name, blockedKeywords: blockedRows, blockedTokens: [], approvedGroups: [], activityLog: [], tokenMergeRules: [], autoGroupSuggestions: [], labelSections: [] });
+      // Single atomic path: bulkSet updates latest ref + React state + persist (REFACTOR_PLAN P0.1)
+      persistence.bulkSet({
+        results: outputData,
+        clusterSummary: summaryData,
+        tokenSummary: tokenSummaryData,
+        groupedClusters: [],
+        stats: statsObj,
+        datasetStats: datasetStatsObj,
+        fileName: file.name,
+        blockedKeywords: blockedRows,
+        blockedTokens: [],
+        approvedGroups: [],
+        activityLog: [],
+        tokenMergeRules: [],
+        autoGroupSuggestions: [],
+        autoMergeRecommendations: [],
+        labelSections: []
+      });
+    } else {
+      setResults(outputData);
+      setClusterSummary(summaryData);
+      setGroupedClusters([]);
+      setTokenSummary(tokenSummaryData);
+      setBlockedKeywords(blockedRows);
+      setTokenMergeRules([]);
+      setAutoGroupSuggestions([]);
+      setAutoMergeRecommendations([]);
+      setFileName(file.name);
+      setStats(statsObj);
+      setDatasetStats(datasetStatsObj);
     }
 
-    setStats({
-                  original: originalCount,
-                  valid: outputData.length,
-                  clusters: sortedClusters.length,
-                  tokens: tokenSummaryData.length,
-                  totalVolume: totalSearchVolume
-                });
-                setDatasetStats({
-                  cities: datasetCities,
-                  states: datasetStates,
-                  numbers: datasetNumbers,
-                  faqs: datasetFaqs,
-                  commercial: datasetCommercial,
-                  local: datasetLocal,
-                  year: datasetYear,
-                  informational: datasetInformational,
-                  navigational: datasetNavigational
-                });
                 setActiveTab('pages');
                 setIsProcessing(false);
               }
@@ -2121,6 +1901,7 @@ export default function App() {
               setResults(null);
               setClusterSummary(null);
               setTokenSummary(null);
+              setAutoMergeRecommendations([]);
               setStats(null);
               setDatasetStats(null);
               setIsProcessing(false);
@@ -2133,6 +1914,7 @@ export default function App() {
           setResults(null);
           setClusterSummary(null);
           setTokenSummary(null);
+          setAutoMergeRecommendations([]);
           setStats(null);
           setDatasetStats(null);
           setIsProcessing(false);
@@ -2144,6 +1926,7 @@ export default function App() {
         setResults(null);
         setClusterSummary(null);
         setTokenSummary(null);
+        setAutoMergeRecommendations([]);
         setStats(null);
       }
     });
@@ -2186,13 +1969,59 @@ export default function App() {
   const exportCSV = () => {
     if (!results || !clusterSummary || !tokenSummary) return;
 
-    let csv = '';
-    let filename = `keyword_clusters_${new Date().getTime()}.csv`;
+    const timestamp = new Date().getTime();
+    const appNamePart = 'seo-magic';
+    const rawProjectName = activeProjectId ? projects.find(p => p.id === activeProjectId)?.name : null;
+    const slugifyFilePart = (s: string) =>
+      s
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    const projectNamePart = slugifyFilePart(rawProjectName || 'project');
+    const iso = new Date(timestamp).toISOString();
+    const datePart = iso.slice(0, 10); // YYYY-MM-DD
+
+    const downloadCSV = (csv: string, filename: string) => {
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
+    const downloadXlsx = (workbook: XLSX.WorkBook, filename: string) => {
+      const out = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([out], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
+    const groupLabelsToString = (group: GroupedCluster) => {
+      const labels = new Set<string>();
+      group.clusters.forEach(c => {
+        if (Array.isArray(c.labelArr) && c.labelArr.length > 0) {
+          c.labelArr.forEach(l => labels.add(l));
+        } else if (c.label) {
+          labels.add(c.label);
+        }
+      });
+      return Array.from(labels).sort((a, b) => a.localeCompare(b)).join('; ');
+    };
 
     if (activeTab === 'pages') {
-      filename = `keyword_clusters_${new Date().getTime()}.csv`;
-      csv = Papa.unparse({
-        fields: ['Page Name', 'Len', 'Tokens', 'KWs', 'Vol.', 'KD', 'Label', 'City', 'State'],
+      const csv = Papa.unparse({
+        fields: ['Page Name', 'Len', 'Tokens', 'KWs', 'Vol.', 'KD', 'Rating', 'Label', 'City', 'State'],
         data: clusterSummary.map(row => [
           row.pageName,
           row.pageNameLen,
@@ -2200,17 +2029,27 @@ export default function App() {
           row.keywordCount,
           row.totalVolume,
           row.avgKd !== null ? row.avgKd : '',
+          row.avgKwRating != null ? row.avgKwRating : '',
           row.label,
           row.locationCity || '',
           row.locationState || ''
         ])
       });
-    } else if (activeTab === 'grouped') {
-      filename = `grouped_clusters_${new Date().getTime()}.csv`;
-      const data: any[] = [];
+
+      downloadCSV(
+        csv,
+        `${appNamePart}_${projectNamePart}_${activeTab}_export_${datePart}_${timestamp}.csv`
+      );
+      return;
+    }
+
+    if (activeTab === 'grouped') {
+      // 1) Per-page rows
+      const rowsHeader = ['Group Name', 'Page Name', 'Len', 'Tokens', 'KWs', 'Vol.', 'KD', 'Rating', 'Label', 'City', 'State'];
+      const rowsData: any[][] = [];
       groupedClusters.forEach(group => {
         group.clusters.forEach(cluster => {
-          data.push([
+          rowsData.push([
             group.groupName,
             cluster.pageName,
             cluster.pageNameLen,
@@ -2218,35 +2057,99 @@ export default function App() {
             cluster.keywordCount,
             cluster.totalVolume,
             cluster.avgKd !== null ? cluster.avgKd : '',
+            cluster.avgKwRating != null ? cluster.avgKwRating : '',
             cluster.label,
             cluster.locationCity || '',
             cluster.locationState || ''
           ]);
         });
       });
-      csv = Papa.unparse({
-        fields: ['Group Name', 'Page Name', 'Len', 'Tokens', 'KWs', 'Vol.', 'KD', 'Label', 'City', 'State'],
-        data
-      });
+      
+      // 2) Unique group summary
+      const groupsHeader = ['Group Name', 'Page #', 'Summed KWs', 'Volume', 'Avg KD', 'Avg Rating', 'Labels'];
+      const groupsData: any[][] = groupedClusters.map(group => ([
+        group.groupName,
+        group.clusters?.length ?? 0,
+        group.keywordCount,
+        group.totalVolume,
+        group.avgKd !== null ? group.avgKd : '',
+        group.avgKwRating != null ? group.avgKwRating : '',
+        groupLabelsToString(group),
+      ]));
+
+      const wb = XLSX.utils.book_new();
+      const ws1 = XLSX.utils.aoa_to_sheet([rowsHeader, ...rowsData]);
+      const ws2 = XLSX.utils.aoa_to_sheet([groupsHeader, ...groupsData]);
+      XLSX.utils.book_append_sheet(wb, ws1, 'Rows');
+      XLSX.utils.book_append_sheet(wb, ws2, 'Unique Groups');
+
+      downloadXlsx(wb, `${appNamePart}_${projectNamePart}_grouped_export_${datePart}_${timestamp}.xlsx`);
+      return;
     }
 
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', filename);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    if (activeTab === 'approved') {
+      // 1) Per-page rows
+      const rowsHeader = ['Group Name', 'Page Name', 'Len', 'Tokens', 'KWs', 'Vol.', 'KD', 'Rating', 'Label', 'City', 'State'];
+      const rowsData: any[][] = [];
+      approvedGroups.forEach(group => {
+        group.clusters.forEach(cluster => {
+          rowsData.push([
+            group.groupName,
+            cluster.pageName,
+            cluster.pageNameLen,
+            cluster.tokens,
+            cluster.keywordCount,
+            cluster.totalVolume,
+            cluster.avgKd !== null ? cluster.avgKd : '',
+            cluster.avgKwRating != null ? cluster.avgKwRating : '',
+            cluster.label,
+            cluster.locationCity || '',
+            cluster.locationState || ''
+          ]);
+        });
+      });
+
+      // 2) Unique group summary
+      const groupsHeader = ['Group Name', 'Page #', 'Summed KWs', 'Volume', 'Avg KD', 'Avg Rating', 'Labels'];
+      const groupsData: any[][] = approvedGroups.map(group => ([
+        group.groupName,
+        group.clusters?.length ?? 0,
+        group.keywordCount,
+        group.totalVolume,
+        group.avgKd !== null ? group.avgKd : '',
+        group.avgKwRating != null ? group.avgKwRating : '',
+        groupLabelsToString(group),
+      ]));
+
+      const wb = XLSX.utils.book_new();
+      const ws1 = XLSX.utils.aoa_to_sheet([rowsHeader, ...rowsData]);
+      const ws2 = XLSX.utils.aoa_to_sheet([groupsHeader, ...groupsData]);
+      XLSX.utils.book_append_sheet(wb, ws1, 'Rows');
+      XLSX.utils.book_append_sheet(wb, ws2, 'Unique Groups');
+
+      downloadXlsx(wb, `${appNamePart}_${projectNamePart}_approved_export_${datePart}_${timestamp}.xlsx`);
+      return;
+    }
   };
 
   const reset = () => {
-    setResults(null);
-    setClusterSummary(null);
-    setTokenSummary(null);
-    setStats(null);
+    if (activeProjectId) {
+      clearProject();
+    } else {
+      setResults(null);
+      setClusterSummary(null);
+      setTokenSummary(null);
+      setAutoMergeRecommendations([]);
+      setStats(null);
+      setFileName(null);
+      setGroupedClusters([]);
+      setApprovedGroups([]);
+      setActivityLog([]);
+      setAutoGroupSuggestions([]);
+      setTokenMergeRules([]);
+      setBlockedTokens(new Set());
+    }
     setError(null);
-    setFileName(null);
     setActiveTab('pages');
     setSearchImmediate('');
     setMinClusterCount('');
@@ -2260,15 +2163,9 @@ export default function App() {
     setExcludedLabels(new Set());
     setSelectedTokens(new Set());
     setIsLabelDropdownOpen(false);
-    setBlockedTokens(new Set());
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('all');
     setGroupedSortConfig({ key: 'keywordCount', direction: 'desc' });
-    setGroupedClusters([]);
-    setApprovedGroups([]);
-    setActivityLog([]);
-    setAutoGroupSuggestions([]);
-    setTokenMergeRules([]);
   };
 
   // Check if a row's tokens contain any blocked token
@@ -2280,6 +2177,85 @@ export default function App() {
     }
     return false;
   }, [blockedTokens, universalBlockedTokens]);
+
+  // Restore rating job UI after refresh: kwRating lives on results; job state is not persisted.
+  useEffect(() => {
+    if (!results?.length) return;
+    setKwRatingJob(prev => {
+      if (prev.phase === 'summary' || prev.phase === 'rating' || prev.phase === 'error') return prev;
+      const ratable = results.filter(r => !hasBlockedToken(r.tokenArr));
+      if (ratable.length === 0) return prev;
+      const done = ratable.filter(r => r.kwRating != null).length;
+      const total = ratable.length;
+      const { n1, n2, n3 } = countKwRatingBucketsForRows(results, ratable);
+      if (done === total) {
+        return {
+          phase: 'done',
+          progress: 100,
+          done,
+          total,
+          n1,
+          n2,
+          n3,
+          error: null,
+          apiErrors: 0,
+          costUsdTotal: 0,
+          costReported: false,
+          promptTokens: 0,
+          completionTokens: 0,
+          apiCalls: 0,
+          elapsedMs: 0,
+        };
+      }
+      if (done > 0) {
+        return {
+          ...prev,
+          phase: 'idle',
+          progress: Math.round((done / total) * 100),
+          done,
+          total,
+          n1,
+          n2,
+          n3,
+          error: null,
+          apiErrors: 0,
+          costUsdTotal: 0,
+          costReported: false,
+          promptTokens: 0,
+          completionTokens: 0,
+          apiCalls: 0,
+          elapsedMs: 0,
+        };
+      }
+      return prev;
+    });
+  }, [results, hasBlockedToken]);
+
+  // Live elapsed timer while keyword rating runs (summary is one long request).
+  useEffect(() => {
+    const ph = kwRatingJob.phase;
+    if (ph !== 'summary' && ph !== 'rating') return;
+    const tick = () => {
+      setKwRatingJob(prev => ({
+        ...prev,
+        elapsedMs: Math.round(performance.now() - kwRatingJobStartRef.current),
+      }));
+    };
+    tick();
+    const id = window.setInterval(tick, 400);
+    return () => window.clearInterval(id);
+  }, [kwRatingJob.phase]);
+
+  useEffect(() => {
+    if (autoMergeJob.phase !== 'running') return;
+    const timer = setInterval(() => {
+      setAutoMergeJob(prev => ({
+        ...prev,
+        elapsedMs: Math.round(performance.now() - autoMergeJobStartRef.current),
+      }));
+    }, 250);
+    return () => clearInterval(timer);
+  }, [autoMergeJob.phase]);
 
   // Effective results: filter out keywords whose tokens contain a blocked token
   const effectiveResults = useMemo(() => {
@@ -2324,7 +2300,8 @@ export default function App() {
         clusters: remaining,
         keywordCount: remaining.reduce((sum, c) => sum + c.keywordCount, 0),
         totalVolume: remaining.reduce((sum, c) => sum + c.totalVolume, 0),
-        avgKd: (() => { let total = 0, count = 0; remaining.forEach(c => { if (c.avgKd !== null) { total += c.avgKd; count++; } }); return count > 0 ? Math.round(total / count) : null; })()
+        avgKd: (() => { let total = 0, count = 0; remaining.forEach(c => { if (c.avgKd !== null) { total += c.avgKd; count++; } }); return count > 0 ? Math.round(total / count) : null; })(),
+        avgKwRating: (() => { let total = 0, count = 0; remaining.forEach(c => { if (c.avgKwRating != null) { total += c.avgKwRating; count++; } }); return count > 0 ? Math.round(total / count) : null; })(),
       };
     }).filter(Boolean) as GroupedCluster[];
   }, [groupedClusters, blockedTokens, hasBlockedToken]);
@@ -2336,7 +2313,14 @@ export default function App() {
     for (const r of results) {
       const matchedTokens = r.tokenArr.filter(t => blockedTokens.has(t));
       if (matchedTokens.length > 0) {
-        blocked.push({ keyword: r.keyword, volume: r.searchVolume, kd: r.kd, reason: `Token: ${matchedTokens.join(', ')}`, tokenArr: r.tokenArr });
+        blocked.push({
+          keyword: r.keyword,
+          volume: r.searchVolume,
+          kd: r.kd,
+          kwRating: r.kwRating ?? undefined,
+          reason: `Token: ${matchedTokens.join(', ')}`,
+          tokenArr: r.tokenArr,
+        });
       }
     }
     blocked.sort((a, b) => b.volume - a.volume);
@@ -2447,6 +2431,8 @@ export default function App() {
     const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
     const kdMin = minKd ? parseInt(minKd, 10) : NaN;
     const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
+    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
+    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
     
     const filtered: ClusterSummary[] = [];
     const len = effectiveClusters.length;
@@ -2465,6 +2451,8 @@ export default function App() {
       if (!isNaN(volMax) && c.totalVolume > volMax) continue;
       if (!isNaN(kdMin) && (c.avgKd === null || c.avgKd < kdMin)) continue;
       if (!isNaN(kdMax) && (c.avgKd === null || c.avgKd > kdMax)) continue;
+      if (!isNaN(ratingMin) && (c.avgKwRating == null || c.avgKwRating < ratingMin)) continue;
+      if (!isNaN(ratingMax) && (c.avgKwRating == null || c.avgKwRating > ratingMax)) continue;
       if (cityLower && !(c.locationCity || '').toLowerCase().includes(cityLower)) continue;
       if (stateLower && !(c.locationState || '').toLowerCase().includes(stateLower)) continue;
       
@@ -2495,7 +2483,7 @@ export default function App() {
     }
     
     return filtered;
-  }, [effectiveClusters, debouncedSearchQuery, min, max, hasMin, hasMax, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd]);
+  }, [effectiveClusters, debouncedSearchQuery, min, max, hasMin, hasMax, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
 
   // Deselect clusters that are no longer visible due to filters
   useEffect(() => {
@@ -2544,6 +2532,8 @@ export default function App() {
     const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
     const kdMinVal = minKd ? parseInt(minKd, 10) : NaN;
     const kdMaxVal = maxKd ? parseInt(maxKd, 10) : NaN;
+    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
+    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
     
     const filtered: ProcessedRow[] = [];
     let totalVolume = 0;
@@ -2566,6 +2556,8 @@ export default function App() {
       if (!isNaN(volMax) && r.searchVolume > volMax) continue;
       if (!isNaN(kdMinVal) && (r.kd === null || r.kd < kdMinVal)) continue;
       if (!isNaN(kdMaxVal) && (r.kd === null || r.kd > kdMaxVal)) continue;
+      if (!isNaN(ratingMin) && (r.kwRating == null || r.kwRating < ratingMin)) continue;
+      if (!isNaN(ratingMax) && (r.kwRating == null || r.kwRating > ratingMax)) continue;
       if (cityLower && !(r.locationCity || '').toLowerCase().includes(cityLower)) continue;
       if (stateLower && !(r.locationState || '').toLowerCase().includes(stateLower)) continue;
       
@@ -2605,9 +2597,43 @@ export default function App() {
     }
     
     return { filtered, totalVolume };
-  }, [effectiveResults, debouncedSearchQuery, min, max, hasMin, hasMax, validClusterCounts, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minVolume, maxVolume, minKd, maxKd]);
+  }, [effectiveResults, debouncedSearchQuery, min, max, hasMin, hasMax, validClusterCounts, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
 
   const filteredResults = filteredResultsData.filtered;
+
+  const sortedKeywordRows = useMemo(() => {
+    if (activeTab !== 'keywords') return filteredResults;
+    const rows = [...filteredResults];
+    const getVal = (row: ProcessedRow, key: string): string | number => {
+      switch (key) {
+        case 'pageName': return row.pageNameLower;
+        case 'tokens': return row.tokens;
+        case 'pageNameLen': return row.pageNameLen;
+        case 'keyword': return row.keywordLower;
+        case 'searchVolume': return row.searchVolume;
+        case 'kd': return row.kd ?? -1;
+        case 'kwRating': return row.kwRating ?? -1;
+        case 'label': return row.label;
+        case 'locationCity': return (row.locationCity || '').toLowerCase();
+        case 'locationState': return (row.locationState || '').toLowerCase();
+        default: return '';
+      }
+    };
+    rows.sort((a, b) => {
+      for (const { key, direction } of keywordsSortConfig) {
+        const av = getVal(a, key);
+        const bv = getVal(b, key);
+        const na = typeof av === 'number';
+        const nb = typeof bv === 'number';
+        let cmp: number;
+        if (na && nb) cmp = (av as number) - (bv as number);
+        else cmp = String(av).localeCompare(String(bv));
+        if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
+      }
+      return 0;
+    });
+    return rows;
+  }, [activeTab, filteredResults, keywordsSortConfig]);
 
   const sortedClusters = useMemo(() => {
     if (sortConfig.length === 0) return filteredClusters;
@@ -2708,17 +2734,492 @@ export default function App() {
     setCurrentPage(1);
   }, []);
 
+  const handleKeywordsSort = useCallback((key: string, additive?: boolean) => {
+    setKeywordsSortConfig(current => {
+      const existingIdx = current.findIndex(s => s.key === key);
+      if (additive) {
+        if (existingIdx >= 0) {
+          const updated = [...current];
+          updated[existingIdx] = { key, direction: updated[existingIdx].direction === 'desc' ? 'asc' : 'desc' };
+          return updated;
+        }
+        return [...current, { key, direction: 'desc' }];
+      }
+      if (existingIdx === 0 && current.length === 1) {
+        return [{ key, direction: current[0].direction === 'desc' ? 'asc' : 'desc' }];
+      }
+      return [{ key, direction: 'desc' }];
+    });
+    setCurrentPage(1);
+  }, []);
+
+  const handleCancelKeywordRating = useCallback(() => {
+    kwRatingAbortRef.current?.abort();
+  }, []);
+
+  const handleCancelAutoMerge = useCallback(() => {
+    autoMergeAbortRef.current?.abort();
+  }, []);
+
+  const runKeywordRating = useCallback(async () => {
+    if (!groupReviewSettingsRef.current) {
+      addToast('Settings are still loading. Try again in a moment.', 'error');
+      return;
+    }
+    const gs = groupReviewSettingsRef.current.getSettings();
+    if (!gs?.apiKey || gs.apiKey.trim().length < 10) {
+      addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
+      return;
+    }
+    const raw = resultsRef.current;
+    if (!raw || raw.length === 0) {
+      addToast('No keywords loaded.', 'error');
+      return;
+    }
+    const rows = raw.filter(r => !hasBlockedToken(r.tokenArr));
+    if (rows.length === 0) {
+      addToast('No keywords to rate after token blocks.', 'error');
+      return;
+    }
+    kwRatingAbortRef.current?.abort();
+    const ac = new AbortController();
+    kwRatingAbortRef.current = ac;
+    kwRatingJobStartRef.current = performance.now();
+    let usageAcc: OpenRouterUsage = { promptTokens: 0, completionTokens: 0, costUsd: null };
+    let costReported = false;
+    let apiCalls = 0;
+    const mergeUsage = (u: OpenRouterUsage) => {
+      usageAcc = addOpenRouterUsage(usageAcc, u);
+      if (u.costUsd != null) costReported = true;
+    };
+    const slice: KeywordRatingSettingsSlice = {
+      apiKey: gs.apiKey,
+      keywordRatingModel: gs.keywordRatingModel,
+      fallbackModel: gs.selectedModel,
+      temperature: gs.keywordRatingTemperature,
+      maxTokens: gs.keywordRatingMaxTokens,
+      reasoningEffort: gs.keywordRatingReasoningEffort,
+      ratingPrompt: gs.keywordRatingPrompt,
+    };
+    setKwRatingJob({
+      phase: 'summary',
+      progress: 0,
+      done: 0,
+      total: rows.length,
+      n1: 0,
+      n2: 0,
+      n3: 0,
+      error: null,
+      apiErrors: 0,
+      costUsdTotal: 0,
+      costReported: false,
+      promptTokens: 0,
+      completionTokens: 0,
+      apiCalls: 0,
+      elapsedMs: 0,
+    });
+    try {
+      const lines = buildKeywordLinesForSummary(rows);
+      const { summary, usage: summaryUsage } = await fetchCoreIntentSummary(slice, lines, ac.signal);
+      mergeUsage(summaryUsage);
+      apiCalls += 1;
+      const nowIso = new Date().toISOString();
+      const gsFresh = groupReviewSettingsRef.current!.getSettings();
+      groupReviewSettingsRef.current!.updateSettings({
+        ...gsFresh,
+        keywordCoreIntentSummary: summary,
+        keywordCoreIntentSummaryUpdatedAt: nowIso,
+      });
+      const ratingMap = new Map<string, 1 | 2 | 3>();
+      const concurrency = Math.max(1, Math.min(50, gs.keywordRatingConcurrency || 5));
+      let done = 0;
+      /** Ref updates one frame after bulkSet; keep last merged snapshot so we never clobber with stale ref. */
+      let lastMerged: ProcessedRow[] | null = null;
+      const elapsedNow = () => Math.round(performance.now() - kwRatingJobStartRef.current);
+      setKwRatingJob({
+        phase: 'rating',
+        progress: 0,
+        done: 0,
+        total: rows.length,
+        n1: 0,
+        n2: 0,
+        n3: 0,
+        error: null,
+        apiErrors: 0,
+        costUsdTotal: usageAcc.costUsd ?? 0,
+        costReported,
+        promptTokens: usageAcc.promptTokens,
+        completionTokens: usageAcc.completionTokens,
+        apiCalls,
+        elapsedMs: elapsedNow(),
+      });
+      for (let i = 0; i < rows.length; i += concurrency) {
+        if (ac.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        const batch = rows.slice(i, i + concurrency);
+        const ratings = await Promise.all(
+          batch.map(row => fetchSingleKeywordRating(slice, summary, row.keyword, ac.signal)),
+        );
+        apiCalls += batch.length;
+        for (let j = 0; j < batch.length; j++) {
+          ratingMap.set(keywordRatingRowKey(batch[j]), ratings[j].rating);
+          mergeUsage(ratings[j].usage);
+        }
+        const base = resultsRef.current ?? lastMerged;
+        if (!base || base.length === 0) {
+          throw new Error('Keyword data was cleared while rating was in progress.');
+        }
+        const merged = applyKeywordRatingsToResults(base, ratingMap);
+        const newClusterSummary = rebuildClustersFromRows(merged);
+        const { groupedClusters: nextGrouped, approvedGroups: nextApproved } = refreshGroupsFromClusterSummaries(
+          groupedClustersRef.current,
+          approvedGroupsRef.current,
+          newClusterSummary,
+        );
+        // Ref-before-save: next batch reads refs immediately
+        resultsRef.current = merged;
+        clusterSummaryRef.current = newClusterSummary;
+        groupedClustersRef.current = nextGrouped;
+        approvedGroupsRef.current = nextApproved;
+        bulkSet({
+          results: merged,
+          clusterSummary: newClusterSummary,
+          groupedClusters: nextGrouped,
+          approvedGroups: nextApproved,
+        });
+        lastMerged = merged;
+        done += batch.length;
+        const batchBuckets = countKwRatingBucketsForRows(merged, rows);
+        setKwRatingJob({
+          phase: 'rating',
+          progress: Math.round((done / rows.length) * 100),
+          done,
+          total: rows.length,
+          n1: batchBuckets.n1,
+          n2: batchBuckets.n2,
+          n3: batchBuckets.n3,
+          error: null,
+          apiErrors: 0,
+          costUsdTotal: usageAcc.costUsd ?? 0,
+          costReported,
+          promptTokens: usageAcc.promptTokens,
+          completionTokens: usageAcc.completionTokens,
+          apiCalls,
+          elapsedMs: elapsedNow(),
+        });
+      }
+      const finalMerged = lastMerged ?? resultsRef.current;
+      const doneBuckets = finalMerged
+        ? countKwRatingBucketsForRows(finalMerged, rows)
+        : { n1: 0, n2: 0, n3: 0 };
+      const finalElapsed = Math.round(performance.now() - kwRatingJobStartRef.current);
+      setKwRatingJob({
+        phase: 'done',
+        progress: 100,
+        done: rows.length,
+        total: rows.length,
+        n1: doneBuckets.n1,
+        n2: doneBuckets.n2,
+        n3: doneBuckets.n3,
+        error: null,
+        apiErrors: 0,
+        costUsdTotal: usageAcc.costUsd ?? 0,
+        costReported,
+        promptTokens: usageAcc.promptTokens,
+        completionTokens: usageAcc.completionTokens,
+        apiCalls,
+        elapsedMs: finalElapsed,
+      });
+      const costToast =
+        costReported && usageAcc.costUsd != null ? ` · $${usageAcc.costUsd.toFixed(4)}` : '';
+      addToast(
+        `Keyword rating complete: ${doneBuckets.n1} relevant (1), ${doneBuckets.n2} unsure (2), ${doneBuckets.n3} not relevant (3) · ${formatKeywordRatingDuration(finalElapsed)}${costToast}`,
+        'success',
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isAbort =
+        (e instanceof DOMException && e.name === 'AbortError') ||
+        (e instanceof Error && e.name === 'AbortError');
+      if (isAbort) {
+        setKwRatingJob({
+          phase: 'idle',
+          progress: 0,
+          done: 0,
+          total: 0,
+          n1: 0,
+          n2: 0,
+          n3: 0,
+          error: null,
+          apiErrors: 0,
+          costUsdTotal: 0,
+          costReported: false,
+          promptTokens: 0,
+          completionTokens: 0,
+          apiCalls: 0,
+          elapsedMs: 0,
+        });
+        addToast('Keyword rating cancelled.', 'info');
+        return;
+      }
+      setKwRatingJob({
+        phase: 'error',
+        progress: 0,
+        done: 0,
+        total: rows.length,
+        n1: 0,
+        n2: 0,
+        n3: 0,
+        error: msg,
+        apiErrors: 0,
+        costUsdTotal: usageAcc.costUsd ?? 0,
+        costReported,
+        promptTokens: usageAcc.promptTokens,
+        completionTokens: usageAcc.completionTokens,
+        apiCalls,
+        elapsedMs: Math.round(performance.now() - kwRatingJobStartRef.current),
+      });
+      addToast(msg, 'error');
+    }
+  }, [addToast, bulkSet, hasBlockedToken]);
+
+  const buildAutoMergeRecommendations = useCallback((
+    tokenRows: TokenSummary[],
+    allRows: ProcessedRow[],
+    responseMap: Map<string, { matches: string[]; confidence: number; reason: string }>,
+  ): AutoMergeRecommendation[] => {
+    if (tokenRows.length === 0) return [];
+    const tokenSet = new Set(tokenRows.map(t => t.token));
+    const statsByToken = new Map(tokenRows.map(t => [t.token, t]));
+    const adj = new Map<string, Set<string>>();
+    tokenRows.forEach(t => adj.set(t.token, new Set()));
+    for (const [source, resp] of responseMap.entries()) {
+      if (!tokenSet.has(source)) continue;
+      for (const match of resp.matches) {
+        if (!tokenSet.has(match) || match === source) continue;
+        adj.get(source)!.add(match);
+        adj.get(match)!.add(source);
+      }
+    }
+
+    const visited = new Set<string>();
+    const recs: AutoMergeRecommendation[] = [];
+    const now = new Date().toISOString();
+    for (const token of tokenSet) {
+      if (visited.has(token)) continue;
+      const stack = [token];
+      const component: string[] = [];
+      visited.add(token);
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        component.push(cur);
+        for (const nxt of adj.get(cur) || []) {
+          if (visited.has(nxt)) continue;
+          visited.add(nxt);
+          stack.push(nxt);
+        }
+      }
+      if (component.length < 2) continue;
+      const sorted = [...component].sort((a, b) => {
+        const av = statsByToken.get(a)?.totalVolume ?? 0;
+        const bv = statsByToken.get(b)?.totalVolume ?? 0;
+        if (av !== bv) return bv - av;
+        const af = statsByToken.get(a)?.frequency ?? 0;
+        const bf = statsByToken.get(b)?.frequency ?? 0;
+        if (af !== bf) return bf - af;
+        return a.localeCompare(b);
+      });
+      const canonicalToken = sorted[0];
+      const mergeTokens = sorted.slice(1);
+      const allInvolved = new Set(component);
+      const affectedRows = allRows.filter(r => r.tokenArr.some(t => allInvolved.has(t)));
+      const affectedKeywords = Array.from(new Set(affectedRows.map(r => r.keyword))).slice(0, 30);
+      const affectedPageCount = new Set(affectedRows.map(r => r.tokens)).size;
+      let confAcc = 0;
+      let confN = 0;
+      const reasonBits = new Set<string>();
+      for (const t of component) {
+        const rr = responseMap.get(t);
+        if (!rr) continue;
+        confAcc += rr.confidence;
+        confN += 1;
+        if (rr.reason) reasonBits.add(rr.reason);
+      }
+      const confidence = confN > 0 ? Math.max(0, Math.min(1, confAcc / confN)) : 0.5;
+      recs.push({
+        id: `auto_merge_${sorted.join('__')}`,
+        sourceToken: token,
+        canonicalToken,
+        mergeTokens,
+        confidence,
+        reason: Array.from(reasonBits).slice(0, 2).join(' | '),
+        affectedKeywordCount: affectedRows.length,
+        affectedPageCount,
+        affectedKeywords,
+        status: 'pending',
+        createdAt: now,
+      });
+    }
+    return recs.sort((a, b) => b.affectedKeywordCount - a.affectedKeywordCount);
+  }, []);
+
+  const runAutoMergeRecommendations = useCallback(async () => {
+    if (!groupReviewSettingsRef.current) {
+      addToast('Settings are still loading. Try again in a moment.', 'error');
+      return;
+    }
+    const gs = groupReviewSettingsRef.current.getSettings();
+    if (!gs?.apiKey || gs.apiKey.trim().length < 10) {
+      addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
+      return;
+    }
+    const tokenRows = (tokenSummaryRef.current || []).filter(t => !blockedTokensRef.current.has(t.token) && !universalBlockedTokens.has(t.token));
+    const rows = resultsRef.current || [];
+    if (tokenRows.length < 2 || rows.length === 0) {
+      addToast('Need at least 2 non-blocked tokens with loaded keywords.', 'error');
+      return;
+    }
+
+    autoMergeAbortRef.current?.abort();
+    const ac = new AbortController();
+    autoMergeAbortRef.current = ac;
+    autoMergeJobStartRef.current = performance.now();
+
+    const slice: AutoMergeSettingsSlice = {
+      apiKey: gs.apiKey,
+      model: gs.keywordRatingModel,
+      fallbackModel: gs.selectedModel,
+      temperature: gs.keywordRatingTemperature,
+      maxTokens: gs.keywordRatingMaxTokens,
+      reasoningEffort: gs.keywordRatingReasoningEffort,
+      prompt: gs.autoMergePrompt,
+    };
+
+    let usageAcc: OpenRouterUsage = { promptTokens: 0, completionTokens: 0, costUsd: null };
+    let costReported = false;
+    let apiCalls = 0;
+    const mergeUsage = (u: OpenRouterUsage) => {
+      usageAcc = addAutoMergeUsage(usageAcc, u);
+      if (u.costUsd != null) costReported = true;
+    };
+    const elapsedNow = () => Math.round(performance.now() - autoMergeJobStartRef.current);
+    setAutoMergeJob({
+      phase: 'running',
+      progress: 0,
+      done: 0,
+      total: tokenRows.length,
+      recommendations: 0,
+      error: null,
+      costUsdTotal: 0,
+      costReported: false,
+      promptTokens: 0,
+      completionTokens: 0,
+      apiCalls: 0,
+      elapsedMs: 0,
+    });
+    try {
+      const responseMap = new Map<string, { matches: string[]; confidence: number; reason: string }>();
+      const concurrency = Math.max(1, Math.min(25, gs.keywordRatingConcurrency || 5));
+      let done = 0;
+      for (let i = 0; i < tokenRows.length; i += concurrency) {
+        if (ac.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        const batch = tokenRows.slice(i, i + concurrency);
+        const batchResults = await Promise.all(batch.map(async (row) => {
+          const candidates = tokenRows.filter(t => t.token !== row.token).map(t => t.token);
+          return fetchAutoMergeMatches(slice, row.token, candidates, ac.signal);
+        }));
+        for (let j = 0; j < batch.length; j++) {
+          const r = batchResults[j];
+          const allowed = new Set(tokenRows.map(t => t.token));
+          responseMap.set(batch[j].token, {
+            matches: r.result.matches.filter(m => m !== batch[j].token && allowed.has(m)),
+            confidence: r.result.confidence,
+            reason: r.result.reason,
+          });
+          mergeUsage(r.usage);
+        }
+        apiCalls += batch.length;
+        done += batch.length;
+        const recsPreview = buildAutoMergeRecommendations(tokenRows, rows, responseMap);
+        setAutoMergeJob(prev => ({
+          ...prev,
+          progress: Math.round((done / tokenRows.length) * 100),
+          done,
+          recommendations: recsPreview.length,
+          costUsdTotal: usageAcc.costUsd ?? 0,
+          costReported,
+          promptTokens: usageAcc.promptTokens,
+          completionTokens: usageAcc.completionTokens,
+          apiCalls,
+          elapsedMs: elapsedNow(),
+        }));
+      }
+      const recs = buildAutoMergeRecommendations(tokenRows, rows, responseMap);
+      const nextRecs = mergeRecommendationsAfterRerun(autoMergeRecommendationsRef.current, recs);
+      autoMergeRecommendationsRef.current = nextRecs;
+      persistence.updateAutoMergeRecommendations(nextRecs);
+      setAutoMergeJob({
+        phase: 'done',
+        progress: 100,
+        done: tokenRows.length,
+        total: tokenRows.length,
+        recommendations: nextRecs.filter(r => r.status !== 'declined').length,
+        error: null,
+        costUsdTotal: usageAcc.costUsd ?? 0,
+        costReported,
+        promptTokens: usageAcc.promptTokens,
+        completionTokens: usageAcc.completionTokens,
+        apiCalls,
+        elapsedMs: elapsedNow(),
+      });
+      setTokenMgmtSubTab('auto-merge');
+      setTokenMgmtPage(1);
+      const visible = nextRecs.filter(r => r.status !== 'declined').length;
+      addToast(`Auto Merge complete: ${visible} recommendation${visible === 1 ? '' : 's'}.`, 'success');
+    } catch (e) {
+      const isAbort =
+        (e instanceof DOMException && e.name === 'AbortError') ||
+        (e instanceof Error && e.name === 'AbortError');
+      if (isAbort) {
+        setAutoMergeJob({
+          phase: 'idle',
+          progress: 0,
+          done: 0,
+          total: 0,
+          recommendations: 0,
+          error: null,
+          costUsdTotal: 0,
+          costReported: false,
+          promptTokens: 0,
+          completionTokens: 0,
+          apiCalls: 0,
+          elapsedMs: 0,
+        });
+        addToast('Auto Merge cancelled.', 'info');
+        return;
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      setAutoMergeJob(prev => ({
+        ...prev,
+        phase: 'error',
+        error: msg,
+        elapsedMs: elapsedNow(),
+      }));
+      addToast(msg, 'error');
+    }
+  }, [addToast, buildAutoMergeRecommendations, persistence, setTokenMgmtPage, setTokenMgmtSubTab, universalBlockedTokens]);
+
   // Shared filter bag for TableHeader â€" single object passed to all tabs
   const filterBag = useMemo((): FilterBag => ({
     minLen, setMinLen, maxLen, setMaxLen,
     minKwInCluster, setMinKwInCluster, maxKwInCluster, setMaxKwInCluster,
     minVolume, setMinVolume, maxVolume, setMaxVolume,
     minKd, setMinKd, maxKd, setMaxKd,
+    minKwRating, setMinKwRating, maxKwRating, setMaxKwRating,
     filterCity, setFilterCity, filterState, setFilterState,
     excludedLabels, setExcludedLabels,
     isLabelDropdownOpen, setIsLabelDropdownOpen,
     labelCounts,
-  }), [minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, isLabelDropdownOpen, labelCounts]);
+  }), [minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating, filterCity, filterState, excludedLabels, isLabelDropdownOpen, labelCounts]);
 
   const TokenSortIcon = ({ columnKey }: { columnKey: keyof TokenSummary }) => {
     if (tokenSortConfig.key !== columnKey) return <ArrowUpDown className="w-4 h-4 text-zinc-400" />;
@@ -2837,7 +3338,10 @@ export default function App() {
     return counts;
   }, [filteredResults]);
 
-  const paginatedResults = useMemo(() => filteredResults.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [filteredResults, currentPage, itemsPerPage]);
+  const paginatedResults = useMemo(
+    () => sortedKeywordRows.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage),
+    [sortedKeywordRows, currentPage, itemsPerPage],
+  );
   const paginatedClusters = useMemo(() => sortedClusters.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [sortedClusters, currentPage, itemsPerPage]);
   const paginatedTokens = useMemo(() => sortedTokens.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [sortedTokens, currentPage, itemsPerPage]);
   // Filtered + sorted grouped clusters
@@ -2858,12 +3362,14 @@ export default function App() {
     const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
     const kdMin = minKd ? parseInt(minKd, 10) : NaN;
     const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
+    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
+    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
     const cityLower = filterCity.toLowerCase();
     const stateLower = filterState.toLowerCase();
     const hasExcluded = excludedLabels.size > 0;
     const tokensArr = Array.from(selectedTokens) as string[];
     const hasTokenFilter = tokensArr.length > 0;
-    const hasColumnFilters = !isNaN(kwMin) || !isNaN(kwMax) || !isNaN(volMin) || !isNaN(volMax) || !isNaN(kdMin) || !isNaN(kdMax) || cityLower || stateLower || hasExcluded || hasTokenFilter;
+    const hasColumnFilters = !isNaN(kwMin) || !isNaN(kwMax) || !isNaN(volMin) || !isNaN(volMax) || !isNaN(kdMin) || !isNaN(kdMax) || !isNaN(ratingMin) || !isNaN(ratingMax) || cityLower || stateLower || hasExcluded || hasTokenFilter;
     if (hasColumnFilters) {
       groups = groups.filter(g => {
         if (!isNaN(kwMin) && g.keywordCount < kwMin) return false;
@@ -2872,6 +3378,8 @@ export default function App() {
         if (!isNaN(volMax) && g.totalVolume > volMax) return false;
         if (!isNaN(kdMin) && (g.avgKd === null || g.avgKd < kdMin)) return false;
         if (!isNaN(kdMax) && (g.avgKd === null || g.avgKd > kdMax)) return false;
+        if (!isNaN(ratingMin) && (g.avgKwRating == null || g.avgKwRating < ratingMin)) return false;
+        if (!isNaN(ratingMax) && (g.avgKwRating == null || g.avgKwRating > ratingMax)) return false;
         if (cityLower) {
           const hasCityMatch = g.clusters.some(c => (c.locationCity || '').toLowerCase().includes(cityLower));
           if (!hasCityMatch) return false;
@@ -2899,7 +3407,7 @@ export default function App() {
       if (b.keywordCount !== a.keywordCount) return b.keywordCount - a.keywordCount;
       return a.groupName.localeCompare(b.groupName);
     });
-  }, [effectiveGrouped, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, selectedTokens]);
+  }, [effectiveGrouped, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating, filterCity, filterState, excludedLabels, selectedTokens]);
 
   const paginatedGroupedClusters = useMemo(() => filteredSortedGrouped.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [filteredSortedGrouped, currentPage, itemsPerPage]);
 
@@ -2919,12 +3427,14 @@ export default function App() {
     const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
     const kdMin = minKd ? parseInt(minKd, 10) : NaN;
     const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
+    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
+    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
     const cityLower = filterCity.toLowerCase();
     const stateLower = filterState.toLowerCase();
     const hasExcluded = excludedLabels.size > 0;
     const tokensArr = Array.from(selectedTokens) as string[];
     const hasTokenFilter = tokensArr.length > 0;
-    const hasColumnFilters = !isNaN(kwMin) || !isNaN(kwMax) || !isNaN(volMin) || !isNaN(volMax) || !isNaN(kdMin) || !isNaN(kdMax) || cityLower || stateLower || hasExcluded || hasTokenFilter;
+    const hasColumnFilters = !isNaN(kwMin) || !isNaN(kwMax) || !isNaN(volMin) || !isNaN(volMax) || !isNaN(kdMin) || !isNaN(kdMax) || !isNaN(ratingMin) || !isNaN(ratingMax) || cityLower || stateLower || hasExcluded || hasTokenFilter;
     if (hasColumnFilters) {
       groups = groups.filter(g => {
         if (!isNaN(kwMin) && g.keywordCount < kwMin) return false;
@@ -2933,6 +3443,8 @@ export default function App() {
         if (!isNaN(volMax) && g.totalVolume > volMax) return false;
         if (!isNaN(kdMin) && (g.avgKd === null || g.avgKd < kdMin)) return false;
         if (!isNaN(kdMax) && (g.avgKd === null || g.avgKd > kdMax)) return false;
+        if (!isNaN(ratingMin) && (g.avgKwRating == null || g.avgKwRating < ratingMin)) return false;
+        if (!isNaN(ratingMax) && (g.avgKwRating == null || g.avgKwRating > ratingMax)) return false;
         if (cityLower && !g.clusters.some(c => (c.locationCity || '').toLowerCase().includes(cityLower))) return false;
         if (stateLower && !g.clusters.some(c => (c.locationState || '').toLowerCase().includes(stateLower))) return false;
         if (hasExcluded) {
@@ -2949,14 +3461,53 @@ export default function App() {
       });
     }
     return groups;
-  }, [approvedGroups, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, filterCity, filterState, excludedLabels, selectedTokens]);
+  }, [approvedGroups, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating, filterCity, filterState, excludedLabels, selectedTokens]);
 
-  // Filtered blocked keywords (unified search)
+  // Filtered blocked keywords (search + column filters)
   const filteredBlocked = useMemo(() => {
-    if (!debouncedSearchQuery) return allBlockedKeywords;
     const q = debouncedSearchQuery.toLowerCase();
-    return allBlockedKeywords.filter(b => b.keyword.toLowerCase().includes(q));
-  }, [allBlockedKeywords, debouncedSearchQuery]);
+    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
+    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
+    const kdMin = minKd ? parseInt(minKd, 10) : NaN;
+    const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
+    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
+    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
+    return allBlockedKeywords.filter(b => {
+      if (q && !b.keyword.toLowerCase().includes(q)) return false;
+      if (!isNaN(volMin) && b.volume < volMin) return false;
+      if (!isNaN(volMax) && b.volume > volMax) return false;
+      if (!isNaN(kdMin) && (b.kd === null || b.kd < kdMin)) return false;
+      if (!isNaN(kdMax) && (b.kd === null || b.kd > kdMax)) return false;
+      if (!isNaN(ratingMin) && (b.kwRating == null || b.kwRating < ratingMin)) return false;
+      if (!isNaN(ratingMax) && (b.kwRating == null || b.kwRating > ratingMax)) return false;
+      return true;
+    });
+  }, [allBlockedKeywords, debouncedSearchQuery, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
+
+  const sortedBlocked = useMemo(() => {
+    const { key, direction } = blockedSortConfig;
+    const arr = [...filteredBlocked];
+    const mul = direction === 'asc' ? 1 : -1;
+    const cmpNum = (a: number | null | undefined, b: number | null | undefined) => {
+      const av = a ?? -1e9;
+      const bv = b ?? -1e9;
+      return (av - bv) * mul;
+    };
+    arr.sort((a, b) => {
+      if (key === 'keyword') return a.keyword.localeCompare(b.keyword) * mul;
+      if (key === 'tokens') {
+        const as = (a.tokenArr || []).join(' ');
+        const bs = (b.tokenArr || []).join(' ');
+        return as.localeCompare(bs) * mul;
+      }
+      if (key === 'volume') return cmpNum(a.volume, b.volume);
+      if (key === 'kd') return cmpNum(a.kd, b.kd);
+      if (key === 'kwRating') return cmpNum(a.kwRating, b.kwRating);
+      if (key === 'reason') return a.reason.localeCompare(b.reason) * mul;
+      return 0;
+    });
+    return arr;
+  }, [filteredBlocked, blockedSortConfig]);
 
   type MergeTokenStats = { frequency: number; totalVolume: number; avgKd: number | null };
   type MergeRuleRow = {
@@ -3103,9 +3654,26 @@ export default function App() {
     [sortedMergeRuleRows, safeMergeMgmtPage]
   );
 
+  const autoMergeRows = useMemo(() => {
+    if (tokenMgmtSubTab !== 'auto-merge') return [];
+    return (autoMergeRecommendations || [])
+      .filter(r => r.status !== 'declined')
+      .sort((a, b) => {
+        if (a.status !== b.status) return a.status === 'pending' ? -1 : 1;
+        if (a.affectedKeywordCount !== b.affectedKeywordCount) return b.affectedKeywordCount - a.affectedKeywordCount;
+        return b.confidence - a.confidence;
+      });
+  }, [tokenMgmtSubTab, autoMergeRecommendations]);
+  const autoMergeTotalPages = Math.max(1, Math.ceil(autoMergeRows.length / tokenMgmtPerPage));
+  const safeAutoMergePage = Math.min(tokenMgmtPage, autoMergeTotalPages);
+  const paginatedAutoMergeRows = useMemo(
+    () => autoMergeRows.slice((safeAutoMergePage - 1) * tokenMgmtPerPage, safeAutoMergePage * tokenMgmtPerPage),
+    [autoMergeRows, safeAutoMergePage],
+  );
+
   // Token Management panel: filtered, sorted, paginated with subtab support
   const filteredMgmtTokens = useMemo(() => {
-    if (tokenMgmtSubTab === 'merge') return [];
+    if (tokenMgmtSubTab === 'merge' || tokenMgmtSubTab === 'auto-merge') return [];
     if (!tokenSummary) return [];
     let base: TokenSummary[];
     if (tokenMgmtSubTab === 'blocked') {
@@ -3145,6 +3713,28 @@ export default function App() {
         }
       }
 
+      if (activeTab === 'keywords') {
+        for (const r of filteredResults) {
+          for (const t of r.tokenArr) {
+            if (blockedTokens.has(t)) continue;
+            const existing = tokenStatsMap.get(t);
+            if (existing) {
+              existing.totalVolume += r.searchVolume;
+              existing.frequency += 1;
+              if (r.kd !== null) { existing.kdSum += r.kd; existing.kdCount++; }
+            } else {
+              tokenStatsMap.set(t, {
+                token: t,
+                totalVolume: r.searchVolume,
+                frequency: 1,
+                kdSum: r.kd ?? 0,
+                kdCount: r.kd !== null ? 1 : 0,
+              });
+            }
+          }
+        }
+      }
+
       // Convert to TokenSummary format â€" pull extra fields from global tokenSummary if available
       const globalMap = new Map<string, TokenSummary>((tokenSummary || []).map(t => [t.token, t]));
       base = Array.from(tokenStatsMap.values()).map(s => {
@@ -3178,13 +3768,13 @@ export default function App() {
       return direction === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
     });
     return tokens;
-  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups]);
+  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults]);
 
   const tokenMgmtTotalPages = Math.max(1, Math.ceil(filteredMgmtTokens.length / tokenMgmtPerPage));
   const safeMgmtPage = Math.min(tokenMgmtPage, tokenMgmtTotalPages);
   const paginatedMgmtTokens = useMemo(() => filteredMgmtTokens.slice((safeMgmtPage - 1) * tokenMgmtPerPage, safeMgmtPage * tokenMgmtPerPage), [filteredMgmtTokens, safeMgmtPage]);
 
-  // Activity log + toast helper â€" creates a log entry and fires a toast notification
+  // Activity log + toast — persists via addActivityEntry (IDB + Firestore for active project)
   const logAndToast = useCallback((action: ActivityAction, details: string, count: number, toastMsg: string, toastType: 'success' | 'info' | 'warning' | 'error' = 'info') => {
     const entry: ActivityLogEntry = {
       id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -3193,13 +3783,9 @@ export default function App() {
       details,
       count,
     };
-    const next = [entry, ...activityLogRef.current];
-    const capped = next.length > 500 ? next.slice(0, 500) : next;
-    activityLogRef.current = capped;
-    setActivityLog(capped);
-    // logAndToast only logs + toasts. Persistence is handled by hook mutations.
+    addActivityEntry(entry);
     addToast(toastMsg, toastType);
-  }, [addToast]);
+  }, [addActivityEntry, addToast]);
 
   const exportTokensCSV = useCallback(() => {
     if (!tokenSummary || tokenSummary.length === 0) return;
@@ -3446,29 +4032,73 @@ export default function App() {
     });
   }, [results, tokenMergeRules, groupedClusters, approvedGroups, logAndToast]);
 
-  // Block a single token (used by Ctrl+click on token buttons)
-  const handleBlockSingleToken = useCallback((token: string) => {
-    persistence.blockTokens([token]);
-    logAndToast('block', `Blocked: ${token}`, 1, `Blocked token: ${token}`, 'error');
-  }, [logAndToast]);
+  const applyAutoMergeRecommendation = useCallback((recommendationId: string) => {
+    const recs = autoMergeRecommendationsRef.current;
+    const rec = recs.find(r => r.id === recommendationId && r.status === 'pending');
+    const currentResults = resultsRef.current;
+    if (!rec || !currentResults) return;
+    const childTokens = rec.mergeTokens.filter(t => t !== rec.canonicalToken);
+    if (childTokens.length === 0) return;
+    const cascade = executeMergeCascade(
+      currentResults,
+      groupedClustersRef.current,
+      approvedGroupsRef.current,
+      rec.canonicalToken,
+      childTokens,
+    );
+    const newRule: TokenMergeRule = {
+      id: `merge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      parentToken: rec.canonicalToken,
+      childTokens,
+      createdAt: new Date().toISOString(),
+      source: 'auto-merge',
+      recommendationId: rec.id,
+    };
+    resultsRef.current = cascade.results;
+    clusterSummaryRef.current = cascade.clusterSummary;
+    tokenSummaryRef.current = cascade.tokenSummary;
+    groupedClustersRef.current = cascade.groupedClusters;
+    approvedGroupsRef.current = cascade.approvedGroups;
+    persistence.applyMergeCascade(cascade, newRule);
+    const nextRecs = markRecommendationApproved(recs, rec.id, new Date().toISOString());
+    autoMergeRecommendationsRef.current = nextRecs;
+    persistence.updateAutoMergeRecommendations(nextRecs);
+    logAndToast('merge', `Auto-merged ${childTokens.join(', ')} → ${rec.canonicalToken}`, childTokens.length, `Auto-merged into '${rec.canonicalToken}'`, 'success');
+  }, [logAndToast, persistence]);
 
-  // Block/unblock token handlers
-  const handleBlockTokens = useCallback((tokens: string[]) => {
-    if (tokens.length === 0) return;
-    persistence.blockTokens(tokens);
-    setSelectedMgmtTokens(new Set());
-    setTokenMgmtSubTab('blocked');
-    setTokenMgmtPage(1);
-    logAndToast('block', `Blocked: ${tokens.join(', ')}`, tokens.length, `Blocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}${tokens.length > 3 ? '...' : ''}`, 'error');
-  }, [logAndToast]);
+  const declineAutoMergeRecommendation = useCallback((recommendationId: string) => {
+    const recs = autoMergeRecommendationsRef.current;
+    const next = recs.map(r => r.id === recommendationId ? { ...r, status: 'declined' as const, reviewedAt: new Date().toISOString() } : r);
+    autoMergeRecommendationsRef.current = next;
+    persistence.updateAutoMergeRecommendations(next);
+  }, [persistence]);
 
-  const handleUnblockTokens = useCallback((tokens: string[]) => {
-    if (tokens.length === 0) return;
-    persistence.unblockTokens(tokens);
-    setSelectedMgmtTokens(new Set());
-    setTokenMgmtPage(1);
-    logAndToast('unblock', `Unblocked: ${tokens.join(', ')}`, tokens.length, `Unblocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}`, 'success');
-  }, [logAndToast]);
+  const applyAllAutoMergeRecommendations = useCallback(() => {
+    const pending = autoMergeRecommendationsRef.current.filter(r => r.status === 'pending');
+    pending.forEach(r => applyAutoMergeRecommendation(r.id));
+  }, [applyAutoMergeRecommendation]);
+
+  const undoAutoMergeRecommendation = useCallback((recommendationId: string) => {
+    const rule = tokenMergeRules.find(r => r.recommendationId === recommendationId);
+    if (!rule) return;
+    handleUndoMergeParent(rule.id);
+    const next = markRecommendationPendingAfterUndo(autoMergeRecommendationsRef.current, recommendationId);
+    autoMergeRecommendationsRef.current = next;
+    persistence.updateAutoMergeRecommendations(next);
+  }, [handleUndoMergeParent, tokenMergeRules, persistence]);
+
+  const {
+    handleBlockSingleToken,
+    handleBlockTokens,
+    handleUnblockTokens,
+  } = useTokenActions({
+    logAndToast,
+    setSelectedMgmtTokens,
+    setTokenMgmtSubTab,
+    setTokenMgmtPage,
+    blockTokens: persistence.blockTokens,
+    unblockTokens: persistence.unblockTokens,
+  });
 
   // Memoize grouped stats to avoid 5 reduce() calls on every render
   const groupedStats = useMemo(() => {
@@ -3500,98 +4130,13 @@ export default function App() {
     };
   }, [effectiveGrouped, approvedPageCount, effectiveClusters]);
 
-  // Approve a group â€" move from grouped to approved
-  const handleApproveGroup = useCallback((groupName: string) => {
-    const group = persistence.approveGroup(groupName);
-    if (group) {
-      logAndToast('approve', `Approved '${groupName}'`, group.clusters.length, `Approved '${groupName}' (${group.clusters.length} pages)`, 'success');
-    }
-  }, [logAndToast]);
-
-  // Unapprove a group â€" move from approved back to grouped
-  // Recalculate group aggregate stats from its clusters â€" used after removing individual pages
-  const recalcGroupStats = useCallback((group: GroupedCluster, remainingClusters: ClusterSummary[]): GroupedCluster => {
-    const totalVolume = remainingClusters.reduce((sum, c) => sum + c.totalVolume, 0);
-    const keywordCount = remainingClusters.reduce((sum, c) => sum + c.keywordCount, 0);
-    let totalKd = 0, kdCount = 0;
-    remainingClusters.forEach(c => { if (c.avgKd !== null) { totalKd += c.avgKd * c.keywordCount; kdCount += c.keywordCount; } });
-    return { ...group, clusters: remainingClusters, totalVolume, keywordCount, avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null };
-  }, []);
-
-  const handleUnapproveGroup = useCallback((groupName: string) => {
-    const group = persistence.unapproveGroup(groupName);
-    if (group) {
-      logAndToast('unapprove', `Unapproved '${groupName}'`, group.clusters.length, `Unapproved '${groupName}'`, 'warning');
-    }
-  }, [logAndToast]);
-
-  // Remove individual sub-clusters from approved groups (unapprove specific pages)
-  const handleRemoveFromApproved = useCallback(() => {
-    if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
-    const currentClusters = persistence.refs.clusterSummary.current;
-    const currentResults = persistence.refs.results.current;
-    if (!currentClusters) return;
-
-    const clustersToReturn: ClusterSummary[] = [];
-    const groupsToReturn: GroupedCluster[] = [];
-    let newApproved = [...persistence.refs.approvedGroups.current];
-
-    for (const groupId of selectedGroups) {
-      const group = newApproved.find(g => g.id === groupId);
-      if (group) {
-        groupsToReturn.push(group);
-      }
-    }
-    newApproved = newApproved.filter(g => !selectedGroups.has(g.id));
-
-    for (const subKey of selectedSubClusters) {
-      const [groupId, clusterTokens] = subKey.split('::');
-      if (selectedGroups.has(groupId)) continue;
-      const groupIdx = newApproved.findIndex(g => g.id === groupId);
-      if (groupIdx === -1) continue;
-      const group = newApproved[groupIdx];
-      const clusterToReturn = group.clusters.find(c => c.tokens === clusterTokens);
-      if (clusterToReturn) {
-        clustersToReturn.push(clusterToReturn);
-        const remaining = group.clusters.filter(c => c.tokens !== clusterTokens);
-        if (remaining.length === 0) {
-          newApproved.splice(groupIdx, 1);
-        } else {
-          newApproved[groupIdx] = recalcGroupStats(group, remaining);
-        }
-      }
-    }
-
-    const currentGrouped = persistence.refs.groupedClusters.current;
-    const updatedGrouped = groupsToReturn.length > 0 ? [...currentGrouped, ...groupsToReturn] : currentGrouped;
-    const nextClusters = clustersToReturn.length > 0
-      ? [...currentClusters, ...clustersToReturn] : currentClusters;
-
-    // Restore result rows for returned clusters
-    let nextResults = currentResults;
-    if (currentResults && clustersToReturn.length > 0) {
-      const newRows: ProcessedRow[] = [];
-      for (const cluster of clustersToReturn) {
-        for (const kw of cluster.keywords) {
-          newRows.push({ keyword: kw.keyword, keywordLower: kw.keyword.toLowerCase(), searchVolume: kw.volume, kd: kw.kd, pageName: cluster.pageName, tokens: cluster.tokens, tokenArr: cluster.tokenArr, labelArr: cluster.labelArr || [], label: cluster.label, locationCity: cluster.locationCity || '', locationState: cluster.locationState || '', pageNameLen: cluster.pageNameLen, pageNameLower: cluster.pageNameLower || cluster.pageName.toLowerCase() });
-        }
-      }
-      nextResults = [...currentResults, ...newRows];
-    }
-
-    setSelectedGroups(new Set());
-    setSelectedSubClusters(new Set());
-
-    const totalRemoved = selectedGroups.size + clustersToReturn.length;
-    persistence.bulkSet({ groupedClusters: updatedGrouped, approvedGroups: newApproved, clusterSummary: nextClusters, results: nextResults });
-    logAndToast('remove-approved', `Removed ${totalRemoved} items from approved`, totalRemoved, `Removed ${totalRemoved} items from approved`, 'warning');
-  }, [selectedGroups, selectedSubClusters, recalcGroupStats, logAndToast]);
-
   // AI Group Review â€" process pending groups automatically
   useEffect(() => {
     if (reviewProcessingRef.current) return;
-    const pendingGroups = groupedClusters.filter(g => g.reviewStatus === 'pending');
-    if (pendingGroups.length === 0) return;
+    const groupsToReview = groupedClusters.filter(g =>
+      g.reviewStatus === 'pending' || (!!g.mergeAffected && g.clusters.length > 0)
+    );
+    if (groupsToReview.length === 0) return;
     const settingsData = groupReviewSettingsRef.current?.getSettings();
     const modelObj = groupReviewSettingsRef.current?.getSelectedModelObj();
     if (!settingsData || !settingsData.apiKey.trim() || !settingsData.selectedModel) return;
@@ -3607,7 +4152,7 @@ export default function App() {
     );
 
     // Build queue
-    const queue: ReviewRequest[] = pendingGroups.map(g => ({
+    const queue: ReviewRequest[] = groupsToReview.map(g => ({
       groupId: g.id,
       groupName: g.groupName,
       pages: g.clusters.map(c => ({ pageName: c.pageName, tokens: c.tokenArr || c.tokens.split(' ') })),
@@ -3641,6 +4186,7 @@ export default function App() {
                   reviewReason: result.reason,
                   reviewCost: result.cost,
                   reviewedAt: result.reviewedAt,
+                  mergeAffected: false,
                 } : g
               )
             );
@@ -3656,9 +4202,16 @@ export default function App() {
               groups.map(g =>
                 g.id === error.groupId ? {
                   ...g,
-                  reviewStatus: 'error' as const,
-                  reviewReason: error.error,
-                  reviewedAt: new Date().toISOString(),
+                  // For merge-driven re-reviews, keep the last known approve/mismatch
+                  // so the badge does not flicker down on transient failures.
+                  ...(g.mergeAffected
+                    ? { mergeAffected: false }
+                    : {
+                      reviewStatus: 'error' as const,
+                      reviewReason: error.error,
+                      reviewedAt: new Date().toISOString(),
+                      mergeAffected: false,
+                    }),
                 } : g
               )
             );
@@ -3699,7 +4252,7 @@ export default function App() {
       });
     };
 
-    runReviewBatch(queue, pendingGroups);
+    runReviewBatch(queue, groupsToReview);
   }, [groupedClusters, logAndToast, persistence.updateGroups]);
 
   // One-time heal after load: reset stuck 'reviewing' to 'pending' (uses latest state in updater)
@@ -3724,6 +4277,37 @@ export default function App() {
     const cutoff = now - 15000;
     groupingTimestamps.current = groupingTimestamps.current.filter(t => t.time >= cutoff);
   }, []);
+
+  const {
+    handleApproveGroup,
+    handleUnapproveGroup,
+    handleRemoveFromApproved,
+    handleGroupClusters,
+    handleAutoGroupApprove,
+    handleUngroupClusters,
+    approveSelectedGrouped,
+  } = useGroupingActions({
+    selectedClusters,
+    setSelectedClusters,
+    groupNameInput,
+    setGroupNameInput,
+    clusterSummary,
+    selectedGroups,
+    setSelectedGroups,
+    selectedSubClusters,
+    setSelectedSubClusters,
+    groupedClusters,
+    setCurrentPage,
+    logAndToast,
+    recordGroupingEvent,
+    scheduleReReview,
+    hasReviewApi: () => groupReviewSettingsRef.current?.hasApiKey() ?? false,
+    addGroupsAndRemovePages: persistence.addGroupsAndRemovePages,
+    approveGroup: persistence.approveGroup,
+    unapproveGroup: persistence.unapproveGroup,
+    removeFromApproved,
+    ungroupPages,
+  });
 
   // Update ETA every 10 seconds based on rolling average
   useEffect(() => {
@@ -3762,6 +4346,8 @@ export default function App() {
     if (maxVolume.trim()) active.push(`max_volume=${maxVolume.trim()}`);
     if (minKd.trim()) active.push(`min_kd=${minKd.trim()}`);
     if (maxKd.trim()) active.push(`max_kd=${maxKd.trim()}`);
+    if (minKwRating.trim()) active.push(`min_kw_rating=${minKwRating.trim()}`);
+    if (maxKwRating.trim()) active.push(`max_kw_rating=${maxKwRating.trim()}`);
     if (minLen.trim()) active.push(`min_len=${minLen.trim()}`);
     if (maxLen.trim()) active.push(`max_len=${maxLen.trim()}`);
     return active.length > 0 ? active.join(' | ') : 'No additional filters active';
@@ -3777,6 +4363,8 @@ export default function App() {
     maxVolume,
     minKd,
     maxKd,
+    minKwRating,
+    maxKwRating,
     minLen,
     maxLen,
   ]);
@@ -4109,50 +4697,6 @@ FAILURE CONDITIONS TO AVOID:
     void runFilteredAutoGroupJob(nextJob);
   }, [filteredAutoGroupQueue, isRunningFilteredAutoGroup, runFilteredAutoGroupJob]);
 
-  const handleGroupClusters = useCallback(() => {
-    if (selectedClusters.size === 0 || !groupNameInput.trim() || !clusterSummary) return;
-
-    const clustersToGroup = clusterSummary.filter(c => selectedClusters.has(c.tokens));
-    const remainingClusters = clusterSummary.filter(c => !selectedClusters.has(c.tokens));
-
-    const totalVolume = clustersToGroup.reduce((sum, c) => sum + c.totalVolume, 0);
-    const keywordCount = clustersToGroup.reduce((sum, c) => sum + c.keywordCount, 0);
-    
-    let totalKd = 0;
-    let kdCount = 0;
-    clustersToGroup.forEach(c => {
-      if (c.avgKd !== null) {
-        totalKd += c.avgKd * c.keywordCount;
-        kdCount += c.keywordCount;
-      }
-    });
-
-    // Check if review API is configured â€" if so, auto-review this group
-    const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
-
-    const newGroup: GroupedCluster = {
-      id: `${groupNameInput}-${Date.now()}`,
-      groupName: groupNameInput.trim(),
-      clusters: clustersToGroup,
-      totalVolume,
-      keywordCount,
-      avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
-      reviewStatus: hasReviewApi ? 'pending' : undefined,
-    };
-
-    const removedTokens = new Set(clustersToGroup.map(c => c.tokens));
-    persistence.addGroupsAndRemovePages([newGroup], removedTokens);
-    startTransition(() => {
-      setSelectedClusters(new Set());
-      setGroupNameInput('');
-    });
-
-    // Track grouping rate for ETA estimation
-    recordGroupingEvent(clustersToGroup.length);
-
-    logAndToast('group', `Grouped into '${groupNameInput.trim()}'`, clustersToGroup.length, `Grouped ${clustersToGroup.length} pages into '${groupNameInput.trim()}'`, 'info');
-  }, [selectedClusters, groupNameInput, clusterSummary, groupedClusters, results, activeProjectId, recordGroupingEvent, logAndToast]);
-
   // Global Tab key shortcut: press Tab anywhere to group selected pages
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -4185,111 +4729,21 @@ FAILURE CONDITIONS TO AVOID:
         if (activeTab === 'grouped' && selectedGroups.size > 0) {
           e.preventDefault();
           e.stopPropagation();
-          const groupsToApprove = groupedClusters.filter(g => selectedGroups.has(g.id));
-          groupsToApprove.forEach(g => handleApproveGroup(g.groupName));
-          setSelectedGroups(new Set());
-          setSelectedSubClusters(new Set());
+          approveSelectedGrouped();
           return;
         }
       }
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, groupedClusters, handleApproveGroup, handleRunFilteredAutoGroup, filteredClusters.length, isFilteredAutoGroupFilterActive]);
-
-  // Auto-group approve handler â€" adds LLM-suggested groups to groupedClusters
-  const handleAutoGroupApprove = useCallback((newGroups: GroupedCluster[]) => {
-    const removedTokens = new Set<string>();
-    for (const g of newGroups) {
-      for (const c of g.clusters) removedTokens.add(c.tokens);
-    }
-    persistence.addGroupsAndRemovePages(newGroups, removedTokens);
-  }, []);
-
-  // Ungroup: send selected groups or individual sub-clusters back to Pages (Clusters) tab
-  const handleUngroupClusters = () => {
-    if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
-    const currentClusters = persistence.refs.clusterSummary.current;
-    const currentResults = persistence.refs.results.current;
-    if (!currentClusters) return;
-
-    const clustersToReturn: ClusterSummary[] = [];
-    let newGrouped = [...persistence.refs.groupedClusters.current];
-
-    // First, handle entire groups being ungrouped
-    for (const groupId of selectedGroups) {
-      const group = newGrouped.find(g => g.id === groupId);
-      if (group) {
-        clustersToReturn.push(...group.clusters);
-      }
-    }
-    newGrouped = newGrouped.filter(g => !selectedGroups.has(g.id));
-
-    // Then, handle individual sub-clusters being ungrouped (from groups NOT fully selected)
-    const groupsWithPagesRemoved: string[] = [];
-    for (const subKey of selectedSubClusters) {
-      const [groupId, clusterTokens] = subKey.split('::');
-      if (selectedGroups.has(groupId)) continue;
-      const groupIdx = newGrouped.findIndex(g => g.id === groupId);
-      if (groupIdx === -1) continue;
-      const group = newGrouped[groupIdx];
-      const clusterToReturn = group.clusters.find(c => c.tokens === clusterTokens);
-      if (clusterToReturn) {
-        clustersToReturn.push(clusterToReturn);
-        const remainingInGroup = group.clusters.filter(c => c.tokens !== clusterTokens);
-        if (remainingInGroup.length === 0) {
-          newGrouped.splice(groupIdx, 1);
-        } else {
-          newGrouped[groupIdx] = recalcGroupStats(group, remainingInGroup);
-          groupsWithPagesRemoved.push(group.id);
-        }
-      }
-    }
-
-    const newClusters = [...currentClusters, ...clustersToReturn];
-
-    // Reconstruct result rows from cluster keywords to restore to results
-    const newRows: ProcessedRow[] = [];
-    if (currentResults) {
-      for (const cluster of clustersToReturn) {
-        for (const kw of cluster.keywords) {
-          newRows.push({
-            pageName: cluster.pageName,
-            pageNameLower: cluster.pageNameLower,
-            pageNameLen: cluster.pageNameLen,
-            tokens: cluster.tokens,
-            tokenArr: cluster.tokenArr,
-            keyword: kw.keyword,
-            keywordLower: kw.keyword.toLowerCase(),
-            searchVolume: kw.volume,
-            kd: kw.kd,
-            label: cluster.label,
-            labelArr: cluster.labelArr,
-            locationCity: kw.locationCity,
-            locationState: kw.locationState,
-          });
-        }
-      }
-    }
-    const newResults = currentResults ? [...currentResults, ...newRows] : currentResults;
-
-    setSelectedGroups(new Set());
-    setSelectedSubClusters(new Set());
-
-    logAndToast('ungroup', `Ungrouped ${clustersToReturn.length} pages`, clustersToReturn.length, `Ungrouped ${clustersToReturn.length} pages back to ungrouped`, 'warning');
-
-    if (groupsWithPagesRemoved.length > 0) {
-      scheduleReReview(groupsWithPagesRemoved);
-    }
-
-    persistence.bulkSet({ groupedClusters: newGrouped, clusterSummary: newClusters, results: newResults });
-  };
+  }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, approveSelectedGrouped, handleRunFilteredAutoGroup, filteredClusters.length, isFilteredAutoGroupFilterActive]);
 
   const totalPages = Math.max(1, Math.ceil(
     (activeTab === 'pages' ? sortedClusters.length :
+     activeTab === 'keywords' ? sortedKeywordRows.length :
      activeTab === 'grouped' ? filteredSortedGrouped.length :
      activeTab === 'approved' ? approvedGroups.length :
-     filteredBlocked.length) / itemsPerPage
+     sortedBlocked.length) / itemsPerPage
   ));
 
   // Auto-correct page if it exceeds total (e.g. after filtering reduces results)
@@ -4298,11 +4752,13 @@ FAILURE CONDITIONS TO AVOID:
   }, [totalPages]);
 
   const filteredCount = activeTab === 'pages' ? sortedClusters.length :
+                       activeTab === 'keywords' ? sortedKeywordRows.length :
                        activeTab === 'grouped' ? filteredSortedGrouped.length :
                        activeTab === 'approved' ? filteredApprovedGroups.length :
-                       filteredBlocked.length;
+                       sortedBlocked.length;
 
   const totalCount = activeTab === 'pages' ? (effectiveClusters?.length || 0) :
+                    activeTab === 'keywords' ? (effectiveResults?.length || 0) :
                     activeTab === 'grouped' ? effectiveGrouped.length :
                     activeTab === 'approved' ? approvedGroups.length :
                     allBlockedKeywords.length;
@@ -4310,153 +4766,165 @@ FAILURE CONDITIONS TO AVOID:
   // Approved stats
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-zinc-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
-      <div className="max-w-[1600px] mx-auto px-6 py-6">
-        
-        <header className="mb-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight text-zinc-900 flex items-center gap-2"><Globe className="w-5 h-5 text-indigo-600" />SEO Magic</h1>
-              <p className="text-xs text-zinc-400 mt-0.5">Keyword clustering, page grouping, approval workflows & AI content generation</p>
+      <div className="max-w-[1600px] mx-auto px-4 py-3">
+        <AppStatusBar activeProjectId={activeProjectId} />
+
+        <header className="mb-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+            <div className="flex min-w-0 flex-1 flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+              <div className="flex shrink-0 items-center gap-1.5">
+                <h1 className="text-lg font-semibold tracking-tight text-zinc-900 flex items-center gap-1.5">
+                  <Globe className="w-4 h-4 text-indigo-600 shrink-0" aria-hidden />
+                  SEO Magic
+                </h1>
+              </div>
+              <nav
+                className="flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-zinc-400 leading-tight"
+                aria-label="Breadcrumb"
+              >
+                <span className="text-zinc-600 font-medium">
+                  {mainTab === 'group'
+                    ? 'Group'
+                    : mainTab === 'generate'
+                      ? 'Generate'
+                      : mainTab === 'feedback'
+                        ? 'Feedback'
+                        : 'Feature ideas'}
+                </span>
+                {mainTab === 'group' && (
+                  <>
+                    <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                    <span className="text-zinc-600 font-medium capitalize">
+                      {groupSubTab === 'data' ? (activeProjectId ? 'Data' : 'Projects') : groupSubTab === 'settings' ? 'Settings' : groupSubTab === 'log' ? 'Log' : groupSubTab}
+                    </span>
+                    {groupSubTab === 'settings' && (
+                      <>
+                        <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                        <span className="text-zinc-600 font-medium">
+                          {settingsSubTab === 'general'
+                            ? 'General'
+                            : settingsSubTab === 'how-it-works'
+                              ? 'How it works'
+                              : settingsSubTab === 'dictionaries'
+                                ? 'Dictionaries'
+                                : 'Blocked'}
+                        </span>
+                      </>
+                    )}
+                    {groupSubTab === 'data' && activeProjectId && (
+                      <>
+                        <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                        {editingProjectName ? (
+                          <input
+                            autoFocus
+                            type="text"
+                            defaultValue={projects.find(p => p.id === activeProjectId)?.name || ''}
+                            className="px-1 py-0.5 text-[10px] border border-indigo-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-indigo-400 w-40 max-w-[min(100%,10rem)]"
+                            onBlur={(e) => {
+                              const newName = e.target.value.trim();
+                              if (newName && newName !== projects.find(p => p.id === activeProjectId)?.name) {
+                                const updated = projects.map(p => p.id === activeProjectId ? { ...p, name: newName } : p);
+                                setProjects(updated);
+                                setDoc(doc(db, 'projects', activeProjectId), { name: newName }, { merge: true }).catch((err) =>
+                                  reportPersistFailure(addToast, 'rename project', err),
+                                );
+                              }
+                              setEditingProjectName(false);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                              if (e.key === 'Escape') setEditingProjectName(false);
+                            }}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setEditingProjectName(true)}
+                            className="hover:text-zinc-700 transition-colors text-zinc-600 font-medium hover:underline text-left max-w-[10rem] truncate"
+                            title="Click to rename project"
+                          >
+                            {projects.find(p => p.id === activeProjectId)?.name || '...'}
+                          </button>
+                        )}
+                        <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                        <span className="text-zinc-600 font-medium capitalize">
+                          {activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'keywords' ? 'All Keywords' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
+                {mainTab === 'generate' && (
+                  <>
+                    <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                    <span className="text-zinc-600 font-medium">Generate 1</span>
+                  </>
+                )}
+                {mainTab === 'feedback' && (
+                  <>
+                    <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                    <span className="text-zinc-600 font-medium">Queue</span>
+                  </>
+                )}
+                {mainTab === 'feature-ideas' && (
+                  <>
+                    <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
+                    <span className="text-zinc-600 font-medium">Backlog</span>
+                  </>
+                )}
+              </nav>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-1.5">
               <FeedbackModalHost authorEmail={user?.email ?? null} />
-              <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
+              <div className="flex space-x-0.5 bg-zinc-100/60 p-px rounded-md">
                 <button
                   type="button"
                   onClick={() => navigateMainTab('group')}
-                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'group' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                 >
-                  <Layers className="w-3.5 h-3.5" />
+                  <Layers className="w-3 h-3 shrink-0" aria-hidden />
                   Group
                 </button>
                 <button
                   type="button"
                   onClick={() => navigateMainTab('generate')}
-                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'generate' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
+                  <Sparkles className="w-3 h-3 shrink-0" aria-hidden />
                   Generate
                 </button>
                 <button
                   type="button"
                   onClick={() => navigateMainTab('feedback')}
-                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'feedback' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'feedback' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                 >
-                  <ClipboardList className="w-3.5 h-3.5" />
+                  <ClipboardList className="w-3 h-3 shrink-0" aria-hidden />
                   Feedback
                 </button>
                 <button
                   type="button"
                   onClick={() => navigateMainTab('feature-ideas')}
-                  className={`px-4 py-2 text-sm font-medium rounded-md transition-all flex items-center gap-1.5 ${mainTab === 'feature-ideas' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                  className={`px-2.5 py-1 text-xs font-medium rounded transition-all flex items-center gap-1 ${mainTab === 'feature-ideas' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
                 >
-                  <Lightbulb className="w-3.5 h-3.5" />
+                  <Lightbulb className="w-3 h-3 shrink-0" aria-hidden />
                   Feature ideas
                 </button>
               </div>
             </div>
           </div>
+          <p className="text-[10px] text-zinc-400 mt-1 leading-snug max-w-3xl">
+            Keyword clustering, page grouping, approval workflows & AI content generation
+          </p>
         </header>
-
-        {/* Breadcrumb navigation */}
-        <div className="flex items-center gap-1 text-xs text-zinc-400 mb-2 min-h-[24px]">
-          <span className="text-zinc-600 font-medium">
-            {mainTab === 'group'
-              ? 'Group'
-              : mainTab === 'generate'
-                ? 'Generate'
-                : mainTab === 'feedback'
-                  ? 'Feedback'
-                  : 'Feature ideas'}
-          </span>
-          {mainTab === 'group' && (
-            <>
-              <ChevronRight className="w-3 h-3" />
-              <span className="text-zinc-600 font-medium capitalize">
-                {groupSubTab === 'data' ? (activeProjectId ? 'Data' : 'Projects') : groupSubTab === 'settings' ? 'Settings' : groupSubTab === 'log' ? 'Log' : groupSubTab}
-              </span>
-              {groupSubTab === 'settings' && (
-                <>
-                  <ChevronRight className="w-3 h-3" />
-                  <span className="text-zinc-600 font-medium">
-                    {settingsSubTab === 'general'
-                      ? 'General'
-                      : settingsSubTab === 'how-it-works'
-                        ? 'How it works'
-                        : settingsSubTab === 'dictionaries'
-                          ? 'Dictionaries'
-                          : 'Blocked'}
-                  </span>
-                </>
-              )}
-              {groupSubTab === 'data' && activeProjectId && (
-                <>
-                  <ChevronRight className="w-3 h-3" />
-                  {editingProjectName ? (
-                    <input
-                      autoFocus
-                      type="text"
-                      defaultValue={projects.find(p => p.id === activeProjectId)?.name || ''}
-                      className="px-1.5 py-0.5 text-xs border border-indigo-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-indigo-400 w-48"
-                      onBlur={(e) => {
-                        const newName = e.target.value.trim();
-                        if (newName && newName !== projects.find(p => p.id === activeProjectId)?.name) {
-                          const updated = projects.map(p => p.id === activeProjectId ? { ...p, name: newName } : p);
-                          setProjects(updated);
-                          setDoc(doc(db, 'projects', activeProjectId), { name: newName }, { merge: true }).catch(() => {});
-                        }
-                        setEditingProjectName(false);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                        if (e.key === 'Escape') setEditingProjectName(false);
-                      }}
-                    />
-                  ) : (
-                    <button
-                      onClick={() => setEditingProjectName(true)}
-                      className="hover:text-zinc-700 transition-colors text-zinc-600 font-medium hover:underline"
-                      title="Click to rename project"
-                    >
-                      {projects.find(p => p.id === activeProjectId)?.name || '...'}
-                    </button>
-                  )}
-                  <ChevronRight className="w-3 h-3" />
-                  <span className="text-zinc-600 font-medium capitalize">
-                    {activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
-                  </span>
-                </>
-              )}
-            </>
-          )}
-          {mainTab === 'generate' && (
-            <>
-              <ChevronRight className="w-3 h-3" />
-              <span className="text-zinc-600 font-medium">Generate 1</span>
-            </>
-          )}
-          {mainTab === 'feedback' && (
-            <>
-              <ChevronRight className="w-3 h-3" />
-              <span className="text-zinc-600 font-medium">Queue</span>
-            </>
-          )}
-          {mainTab === 'feature-ideas' && (
-            <>
-              <ChevronRight className="w-3 h-3" />
-              <span className="text-zinc-600 font-medium">Backlog</span>
-            </>
-          )}
-        </div>
 
         {mainTab === 'group' && (
           <>
             {/* Compact project + import bar + group sub-tabs */}
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex flex-wrap items-center justify-between gap-y-1.5 mb-1.5">
               {/* Left: Project badge + Import */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 {activeProjectId ? (
-                  <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-zinc-200 rounded-md shadow-sm text-xs">
+                  <div className="flex items-center gap-1 px-1.5 py-0.5 bg-white border border-zinc-200 rounded-md shadow-sm text-[10px]">
                     <Folder className="w-3 h-3 text-indigo-500 shrink-0" />
                     <span className="font-semibold text-zinc-800 truncate max-w-[150px]">
                       {projects.find(p => p.id === activeProjectId)?.name || '...'}
@@ -4469,13 +4937,13 @@ FAILURE CONDITIONS TO AVOID:
                     <AlertCircle className="w-3 h-3" /> Select Project
                   </button>
                 )}
-                {activeProjectId && !results && !isProcessing && (
+                {activeProjectId && !results && !isProcessing && !isProjectLoading && (
                   <label className="flex items-center gap-1.5 px-2 py-1 bg-zinc-900 text-white rounded-md text-xs font-medium cursor-pointer hover:bg-zinc-800 transition-colors">
                     <UploadCloud className="w-3 h-3" /> Upload CSV
                     <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={!activeProjectId} />
                   </label>
                 )}
-                {/* File info + actions â€" inline when data is loaded */}
+                {/* File info + actions — inline when data is loaded */}
                 {results && fileName && (
                   <>
                     <span className="text-zinc-300 mx-1">|</span>
@@ -4491,25 +4959,25 @@ FAILURE CONDITIONS TO AVOID:
                 )}
               </div>
               {/* Right: Group sub-tabs */}
-              <div className="flex space-x-0.5 bg-zinc-100/60 p-0.5 rounded-lg">
-                <button type="button" onClick={() => navigateGroupSub('data')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'data' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
-                  <Database className="w-3 h-3" />Data
+              <div className="flex space-x-0.5 bg-zinc-100/60 p-px rounded-md">
+                <button type="button" onClick={() => navigateGroupSub('data')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'data' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <Database className="w-2.5 h-2.5 shrink-0" aria-hidden />Data
                 </button>
-                <button type="button" onClick={() => navigateGroupSub('projects')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'projects' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
-                  <Folder className="w-3 h-3" />Projects
+                <button type="button" onClick={() => navigateGroupSub('projects')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'projects' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <Folder className="w-2.5 h-2.5 shrink-0" aria-hidden />Projects
                 </button>
-                <button type="button" onClick={() => navigateGroupSub('settings')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'settings' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
-                  <Settings className="w-3 h-3" />Settings
+                <button type="button" onClick={() => navigateGroupSub('settings')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'settings' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <Settings className="w-2.5 h-2.5 shrink-0" aria-hidden />Settings
                 </button>
-                <button type="button" onClick={() => navigateGroupSub('log')} className={`px-3 py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center gap-1 ${groupSubTab === 'log' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
-                  <ClipboardList className="w-3 h-3" />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
+                <button type="button" onClick={() => navigateGroupSub('log')} className={`px-2 py-0.5 text-[10px] font-medium rounded transition-all flex items-center gap-0.5 ${groupSubTab === 'log' ? 'bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-zinc-900 border border-zinc-200/60' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100/50'}`}>
+                  <ClipboardList className="w-2.5 h-2.5 shrink-0" aria-hidden />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
                 </button>
               </div>
             </div>
 
             {groupSubTab === 'data' && (
             <>
-            {!results && !isProcessing && (
+            {!results && !isProcessing && !isProjectLoading && (
           <div
             className={`
               relative border-2 border-dashed rounded-2xl p-12 transition-all duration-200 ease-in-out
@@ -4550,6 +5018,14 @@ FAILURE CONDITIONS TO AVOID:
                 disabled={!activeProjectId}
               />
             </label>
+          </div>
+        )}
+
+        {isProjectLoading && groupSubTab === 'data' && !isProcessing && (
+          <div className="bg-white border border-zinc-200 rounded-2xl p-12 flex flex-col items-center justify-center text-center shadow-sm">
+            <Loader2 className="w-10 h-10 text-indigo-600 animate-spin mb-4" />
+            <h3 className="text-lg font-medium text-zinc-900 mb-1">Loading project...</h3>
+            <p className="text-sm text-zinc-500 mb-0">Restoring your uploaded CSV and clustering state.</p>
           </div>
         )}
 
@@ -4891,6 +5367,12 @@ FAILURE CONDITIONS TO AVOID:
                       <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
+                      onClick={() => switchTab('keywords')}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${activeTab === 'keywords' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50'}`}
+                    >
+                      <List className="w-3 h-3" />All Keywords {(effectiveResults?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
+                    </button>
+                    <button
                       onClick={() => {
                         if (activeTab === 'pages' && selectedClusters.size > 0 && groupNameInput.trim()) {
                           handleGroupClusters();
@@ -4915,8 +5397,8 @@ FAILURE CONDITIONS TO AVOID:
                       <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
                     </button>
                   </div>
-                  <div className="ml-auto">
-                    {(activeTab === 'pages' || activeTab === 'grouped') && (
+                  <div className="ml-auto flex items-center gap-1.5">
+                    {(activeTab === 'pages' || activeTab === 'grouped' || activeTab === 'keywords') && (
                       <button
                         onClick={() => setShowGroupReviewSettings(!showGroupReviewSettings)}
                         className={`p-1.5 rounded-lg border transition-colors ${showGroupReviewSettings ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'border-zinc-200 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-50'}`}
@@ -4927,6 +5409,133 @@ FAILURE CONDITIONS TO AVOID:
                     )}
                   </div>
                 </div>
+
+                {results && results.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
+                    <button
+                      type="button"
+                      onClick={() => void runKeywordRating()}
+                      disabled={kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating'}
+                      className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                      title="Generate core-intent summary then rate every keyword (1–3)"
+                    >
+                      Rate KWs
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runAutoMergeRecommendations()}
+                      disabled={autoMergeJob.phase === 'running'}
+                      className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                      title="Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations"
+                    >
+                      Auto Merge KWs
+                    </button>
+                    {(kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating') && (
+                      <button type="button" onClick={handleCancelKeywordRating} className="text-zinc-500 hover:text-zinc-800 underline">
+                        Cancel
+                      </button>
+                    )}
+                    {autoMergeJob.phase === 'running' && (
+                      <button type="button" onClick={handleCancelAutoMerge} className="text-zinc-500 hover:text-zinc-800 underline">
+                        Cancel Auto Merge
+                      </button>
+                    )}
+                    {kwRatingJob.phase !== 'idle' && (
+                      <div className="flex flex-wrap items-center gap-2 min-w-[200px] flex-1">
+                        <div className="flex-1 min-w-[120px] max-w-[280px] h-1.5 rounded-full bg-zinc-100 overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${kwRatingJob.phase === 'summary' ? 'bg-sky-500' : kwRatingJob.phase === 'done' ? 'bg-emerald-500' : kwRatingJob.phase === 'error' ? 'bg-red-400' : 'bg-indigo-500'}`}
+                            style={{ width: `${kwRatingJob.progress}%` }}
+                          />
+                        </div>
+                        <span className="tabular-nums text-zinc-700">
+                          {kwRatingJob.phase === 'summary' ? 'Summary…' : `${kwRatingJob.progress}%`}
+                        </span>
+                        <span className="text-zinc-500 tabular-nums">
+                          {kwRatingJob.phase === 'rating' || kwRatingJob.phase === 'done' ? `${kwRatingJob.done} / ${kwRatingJob.total} rated` : kwRatingJob.total > 0 ? `${kwRatingJob.total} keywords` : ''}
+                        </span>
+                        {(kwRatingJob.phase === 'rating' || kwRatingJob.phase === 'done') && kwRatingJob.total > 0 && (
+                          <span
+                            className="flex items-center gap-0.5 tabular-nums"
+                            title="Count per rating: 1 = relevant, 2 = unsure, 3 = not relevant"
+                          >
+                            <span className="px-1 py-px rounded text-[9px] font-semibold bg-emerald-100 text-emerald-900 border border-emerald-200/80">
+                              1:{kwRatingJob.n1}
+                            </span>
+                            <span className="px-1 py-px rounded text-[9px] font-semibold bg-amber-100 text-amber-950 border border-amber-200/70">
+                              2:{kwRatingJob.n2}
+                            </span>
+                            <span className="px-1 py-px rounded text-[9px] font-semibold bg-rose-100 text-rose-900 border border-rose-200/70">
+                              3:{kwRatingJob.n3}
+                            </span>
+                          </span>
+                        )}
+                        {(kwRatingJob.phase === 'summary' ||
+                          kwRatingJob.phase === 'rating' ||
+                          kwRatingJob.phase === 'done' ||
+                          (kwRatingJob.phase === 'error' && kwRatingJob.apiCalls > 0)) &&
+                          kwRatingJob.total > 0 && (
+                          <span
+                            className="text-zinc-500 tabular-nums max-w-[min(100%,320px)]"
+                            title="Elapsed wall time; OpenRouter usage (tokens + usage.cost when returned); API calls = 1 summary + one per keyword"
+                          >
+                            {formatKeywordRatingDuration(kwRatingJob.elapsedMs)}
+                            {kwRatingJob.costReported ? (
+                              <span> · ${kwRatingJob.costUsdTotal.toFixed(4)}</span>
+                            ) : (
+                              <span> · —</span>
+                            )}
+                            <span>
+                              {' '}
+                              · {kwRatingJob.promptTokens.toLocaleString()} in / {kwRatingJob.completionTokens.toLocaleString()} out · {kwRatingJob.apiCalls} API
+                            </span>
+                          </span>
+                        )}
+                        {kwRatingJob.phase === 'done' && <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden />}
+                        {kwRatingJob.phase === 'error' && kwRatingJob.error && (
+                          <span className="text-red-600 truncate max-w-[200px]" title={kwRatingJob.error}>{kwRatingJob.error}</span>
+                        )}
+                      </div>
+                    )}
+                    {autoMergeJob.phase !== 'idle' && (
+                      <div className="flex flex-wrap items-center gap-2 min-w-[200px] flex-1">
+                        <div className="flex-1 min-w-[120px] max-w-[280px] h-1.5 rounded-full bg-zinc-100 overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${autoMergeJob.phase === 'done' ? 'bg-emerald-500' : autoMergeJob.phase === 'error' ? 'bg-red-400' : 'bg-violet-500'}`}
+                            style={{ width: `${autoMergeJob.progress}%` }}
+                          />
+                        </div>
+                        <span className="tabular-nums text-zinc-700">
+                          {autoMergeJob.progress}%
+                        </span>
+                        <span className="text-zinc-500 tabular-nums">
+                          {autoMergeJob.done} / {autoMergeJob.total} tokens
+                        </span>
+                        <span className="text-zinc-500 tabular-nums">
+                          {autoMergeJob.recommendations} recommendations
+                        </span>
+                        {autoMergeJob.total > 0 && (
+                          <span className="text-zinc-500 tabular-nums max-w-[min(100%,320px)]">
+                            {formatKeywordRatingDuration(autoMergeJob.elapsedMs)}
+                            {autoMergeJob.costReported ? (
+                              <span> · ${autoMergeJob.costUsdTotal.toFixed(4)}</span>
+                            ) : (
+                              <span> · —</span>
+                            )}
+                            <span>
+                              {' '}
+                              · {autoMergeJob.promptTokens.toLocaleString()} in / {autoMergeJob.completionTokens.toLocaleString()} out · {autoMergeJob.apiCalls} API
+                            </span>
+                          </span>
+                        )}
+                        {autoMergeJob.phase === 'done' && <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden />}
+                        {autoMergeJob.phase === 'error' && autoMergeJob.error && (
+                          <span className="text-red-600 truncate max-w-[200px]" title={autoMergeJob.error}>{autoMergeJob.error}</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="flex items-center gap-2">
                   <div className="flex-1 min-w-[220px] max-w-[480px]">
@@ -4985,7 +5594,8 @@ FAILURE CONDITIONS TO AVOID:
                 <div className="flex items-center gap-2">
                   {/* Active results count â€" fixed position, never shifts */}
                   <span className="text-[11px] text-zinc-400 tabular-nums whitespace-nowrap shrink-0 min-w-[100px]">
-                    {filteredCount.toLocaleString()} / {totalCount.toLocaleString()} {activeTab === 'pages' ? 'pages' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'items'}
+                    {filteredCount.toLocaleString()} / {totalCount.toLocaleString()}{' '}
+                    {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'items'}
                   </span>
 
                   {/* Selection count â€" fixed min-width so it doesn't shift other elements */}
@@ -5086,18 +5696,36 @@ FAILURE CONDITIONS TO AVOID:
                         >
                           Ungroup ({selectedGroups.size + selectedSubClusters.size})
                         </button>
+                        <button
+                          onClick={exportCSV}
+                          disabled={effectiveGrouped.length === 0}
+                          className="px-4 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
+                          title="Export grouped clusters to CSV"
+                        >
+                          <Download className="w-3.5 h-3.5 mr-1 inline" /> Export
+                        </button>
                       </>
                     )}
 
                     {/* Pages (Approved): Unapprove â€" handles both entire groups AND individual pages */}
                     {activeTab === 'approved' && (
-                      <button
-                        onClick={handleRemoveFromApproved}
-                        disabled={selectedGroups.size === 0 && selectedSubClusters.size === 0}
-                        className="px-4 py-1.5 text-xs font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
-                      >
-                        Unapprove ({selectedGroups.size + selectedSubClusters.size})
-                      </button>
+                      <>
+                        <button
+                          onClick={handleRemoveFromApproved}
+                          disabled={selectedGroups.size === 0 && selectedSubClusters.size === 0}
+                          className="px-4 py-1.5 text-xs font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
+                        >
+                          Unapprove ({selectedGroups.size + selectedSubClusters.size})
+                        </button>
+                        <button
+                          onClick={exportCSV}
+                          disabled={approvedGroups.length === 0}
+                          className="px-4 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
+                          title="Export approved clusters to CSV"
+                        >
+                          <Download className="w-3.5 h-3.5 mr-1 inline" /> Export
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
@@ -5148,7 +5776,7 @@ FAILURE CONDITIONS TO AVOID:
               </div>
 
               {/* AI Group Review Settings Panel â€" mounted for both Pages and Grouped because Pages Auto Group uses the same settings */}
-              <div className={activeTab === 'grouped' || activeTab === 'pages' ? 'px-4' : 'hidden'}>
+              <div className={activeTab === 'grouped' || activeTab === 'pages' || activeTab === 'keywords' ? 'px-4' : 'hidden'}>
                 <GroupReviewSettings
                   ref={groupReviewSettingsRef}
                   isOpen={showGroupReviewSettings}
@@ -5157,6 +5785,7 @@ FAILURE CONDITIONS TO AVOID:
                   onToggleStar={toggleStarModel}
                   onSettingsChange={setGroupReviewSettingsSnapshot}
                   onHydratedChange={setGroupReviewSettingsHydrated}
+                  addToast={addToast}
                 />
               </div>
 
@@ -5241,6 +5870,17 @@ FAILURE CONDITIONS TO AVOID:
                       filters={filterBag}
                       setCurrentPage={setCurrentPage}
                     />
+                  ) : activeTab === 'keywords' ? (
+                    <TableHeader
+                      columns={KEYWORDS_COLUMNS}
+                      showCheckbox={false}
+                      sortKey={keywordsSortConfig[0]?.key ?? null}
+                      sortDirection={keywordsSortConfig[0]?.direction ?? 'desc'}
+                      sortStack={keywordsSortConfig}
+                      onSort={handleKeywordsSort}
+                      filters={filterBag}
+                      setCurrentPage={setCurrentPage}
+                    />
                   ) : activeTab === 'blocked' ? (
                     <TableHeader
                       columns={BLOCKED_COLUMNS}
@@ -5301,6 +5941,40 @@ FAILURE CONDITIONS TO AVOID:
                         onBlockToken={handleBlockSingleToken}
                       />
                     ))}
+
+                    {activeTab === 'keywords' && paginatedResults.map((row) => (
+                      <tr
+                        key={`${row.pageName}\u0000${row.keywordLower}`}
+                        className="hover:bg-zinc-50/50 transition-colors"
+                      >
+                        <td className={`${CELL.dataNormal} truncate max-w-0`} title={row.pageName}>{row.pageName}</td>
+                        <td className={`${CELL.dataNormal} truncate max-w-0`} title={row.tokens}>{row.tokens}</td>
+                        <td className={CELL.dataCompact}>{row.pageNameLen}</td>
+                        <td className={`${CELL.dataNormal} truncate max-w-0`} title={row.keyword}>{row.keyword}</td>
+                        <td className={CELL.dataCompact}>{row.searchVolume.toLocaleString()}</td>
+                        <td className={CELL.dataCompact}>{row.kd !== null ? row.kd : '—'}</td>
+                        <td className={CELL.dataCompact}>
+                          {row.kwRating != null ? (
+                            <span
+                              className={`inline-flex min-w-[1.5rem] justify-center px-1 py-0.5 rounded text-[11px] font-semibold tabular-nums border ${
+                                row.kwRating === 1
+                                  ? 'bg-emerald-100/90 text-emerald-900 border-emerald-200/80'
+                                  : row.kwRating === 2
+                                    ? 'bg-amber-100/90 text-amber-950 border-amber-200/70'
+                                    : 'bg-rose-100/90 text-rose-900 border-rose-200/70'
+                              }`}
+                            >
+                              {row.kwRating}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-300">—</span>
+                          )}
+                        </td>
+                        <td className={`${CELL.dataNormal} truncate max-w-0`} title={row.label}>{row.label || '—'}</td>
+                        <td className={`${CELL.dataNormal} truncate max-w-0`}>{row.locationCity || '—'}</td>
+                        <td className={`${CELL.dataNormal} truncate max-w-0`}>{row.locationState || '—'}</td>
+                      </tr>
+                    ))}
                     
                     {activeTab === 'grouped' && paginatedGroupedClusters.map((row, idx) => (
                       <GroupedClusterRow 
@@ -5349,7 +6023,8 @@ FAILURE CONDITIONS TO AVOID:
                           }
                           setSelectedSubClusters(newSubs);
                           // If all sub-clusters of a group are selected, auto-select the group
-                          const groupId = subKey.split('::')[0];
+                          const groupId = parseSubClusterKey(subKey)?.groupId;
+                          if (!groupId) return;
                           const group = groupedClusters.find(g => g.id === groupId);
                           if (group) {
                             const allSelected = group.clusters.every(c => newSubs.has(`${groupId}::${c.tokens}`));
@@ -5385,6 +6060,7 @@ FAILURE CONDITIONS TO AVOID:
                           else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
                           else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
                           else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
+                          else if (key === 'avgKwRating') { aVal = a.avgKwRating ?? -1; bVal = b.avgKwRating ?? -1; }
                           else { aVal = 0; bVal = 0; }
                           if (typeof aVal === 'string') {
                             const cmp = aVal.localeCompare(bVal);
@@ -5439,7 +6115,8 @@ FAILURE CONDITIONS TO AVOID:
                           if (checked) newSubs.add(subKey);
                           else newSubs.delete(subKey);
                           setSelectedSubClusters(newSubs);
-                          const groupId = subKey.split('::')[0];
+                          const groupId = parseSubClusterKey(subKey)?.groupId;
+                          if (!groupId) return;
                           const g = approvedGroups.find(ag => ag.id === groupId);
                           if (g) {
                             const allSelected = g.clusters.every(c => newSubs.has(`${groupId}::${c.tokens}`));
@@ -5463,7 +6140,7 @@ FAILURE CONDITIONS TO AVOID:
                       />
                     ))}
 
-                    {activeTab === 'blocked' && filteredBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row, idx) => (
+                    {activeTab === 'blocked' && sortedBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row, idx) => (
                       <tr key={idx} className="hover:bg-red-50/50 transition-colors">
                         <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 break-words">{row.keyword}</td>
                         <td className="px-3 py-0.5 overflow-hidden">
@@ -5477,6 +6154,7 @@ FAILURE CONDITIONS TO AVOID:
                         </td>
                         <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{row.volume.toLocaleString()}</td>
                         <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{row.kd !== null ? row.kd : '-'}</td>
+                        <KwRatingCell value={row.kwRating} />
                         <td className="px-3 py-0.5 text-[12px]">
                           <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded-full text-[10px] font-medium">{row.reason}</span>
                         </td>
@@ -5525,7 +6203,8 @@ FAILURE CONDITIONS TO AVOID:
                       <span className="text-sm text-zinc-600 font-medium">
                         Page {currentPage} of {Math.max(1, totalPages)}
                         <span className="ml-2 px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold border border-indigo-100 shadow-sm">
-                          {filteredCount.toLocaleString()} / {totalCount.toLocaleString()} {activeTab}
+                          {filteredCount.toLocaleString()} / {totalCount.toLocaleString()}{' '}
+                          {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : activeTab}
                         </span>
                       </span>
                       <button 
@@ -5563,7 +6242,7 @@ FAILURE CONDITIONS TO AVOID:
                   </div>
                   {/* Subtabs */}
                   <div className="flex space-x-0.5 bg-zinc-200/50 p-0.5 rounded-md">
-                    {(['current', 'all', 'merge', 'blocked'] as const).map(tab => (
+                    {(['current', 'all', 'merge', 'auto-merge', 'blocked'] as const).map(tab => (
                       <button
                         key={tab}
                         onClick={() => {
@@ -5594,7 +6273,7 @@ FAILURE CONDITIONS TO AVOID:
                         className="w-full pl-7 pr-2 py-1.5 text-xs border border-zinc-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                       />
                     </div>
-                    {selectedMgmtTokens.size > 0 && tokenMgmtSubTab !== 'blocked' && tokenMgmtSubTab !== 'merge' && (
+                    {selectedMgmtTokens.size > 0 && tokenMgmtSubTab !== 'blocked' && tokenMgmtSubTab !== 'merge' && tokenMgmtSubTab !== 'auto-merge' && (
                       <button
                         onClick={() => handleBlockTokens(Array.from(selectedMgmtTokens))}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-red-500 text-white hover:bg-red-600 transition-colors whitespace-nowrap"
@@ -5602,7 +6281,7 @@ FAILURE CONDITIONS TO AVOID:
                         Block ({selectedMgmtTokens.size})
                       </button>
                     )}
-                    {selectedMgmtTokens.size >= 2 && tokenMgmtSubTab !== 'blocked' && tokenMgmtSubTab !== 'merge' && (
+                    {selectedMgmtTokens.size >= 2 && tokenMgmtSubTab !== 'blocked' && tokenMgmtSubTab !== 'merge' && tokenMgmtSubTab !== 'auto-merge' && (
                       <button
                         onClick={handleOpenMergeModal}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-indigo-500 text-white hover:bg-indigo-600 transition-colors whitespace-nowrap"
@@ -5616,6 +6295,14 @@ FAILURE CONDITIONS TO AVOID:
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-emerald-500 text-white hover:bg-emerald-600 transition-colors whitespace-nowrap"
                       >
                         Unblock ({selectedMgmtTokens.size})
+                      </button>
+                    )}
+                    {tokenMgmtSubTab === 'auto-merge' && autoMergeRecommendations.some(r => r.status === 'pending') && (
+                      <button
+                        onClick={applyAllAutoMergeRecommendations}
+                        className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors whitespace-nowrap"
+                      >
+                        Merge All
                       </button>
                     )}
                   </div>
@@ -5803,7 +6490,77 @@ FAILURE CONDITIONS TO AVOID:
                     </table>
                   ) : null}
 
-                  {tokenMgmtSubTab !== 'merge' && (
+                  {tokenMgmtSubTab === 'auto-merge' ? (
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#f0f0f0]">
+                        <tr>
+                          <th className="px-2 py-1.5">Canonical</th>
+                          <th className="px-2 py-1.5">Merge Tokens</th>
+                          <th className="px-2 py-1.5 text-right">Impact</th>
+                          <th className="px-2 py-1.5 text-right">Conf.</th>
+                          <th className="px-2 py-1.5 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
+                        {paginatedAutoMergeRows.map((rec) => {
+                          const mergeRule = tokenMergeRules.find(r => r.recommendationId === rec.id);
+                          return (
+                            <tr key={rec.id} className="hover:bg-zinc-50/50 transition-colors">
+                              <td className="px-2 py-1.5 font-mono text-zinc-800">{rec.canonicalToken}</td>
+                              <td className="px-2 py-1.5 text-zinc-700">
+                                <div className="flex flex-wrap gap-1">
+                                  {rec.mergeTokens.map(t => (
+                                    <span key={t} className="px-1.5 py-px rounded bg-zinc-100 text-zinc-700 font-mono">{t}</span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">
+                                {rec.affectedKeywordCount.toLocaleString()} kws · {rec.affectedPageCount.toLocaleString()} pages
+                              </td>
+                              <td className="px-2 py-1.5 text-right tabular-nums text-zinc-600">{Math.round(rec.confidence * 100)}%</td>
+                              <td className="px-2 py-1.5 text-right">
+                                <div className="flex items-center justify-end gap-1">
+                                  {rec.status === 'pending' ? (
+                                    <>
+                                      <button
+                                        onClick={() => applyAutoMergeRecommendation(rec.id)}
+                                        className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                                      >
+                                        Merge
+                                      </button>
+                                      <button
+                                        onClick={() => declineAutoMergeRecommendation(rec.id)}
+                                        className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-zinc-300 text-zinc-600 hover:bg-zinc-50"
+                                      >
+                                        Decline
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <button
+                                      onClick={() => undoAutoMergeRecommendation(rec.id)}
+                                      disabled={!mergeRule}
+                                      className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                      Undo
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {paginatedAutoMergeRows.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="px-4 py-8 text-center text-xs text-zinc-400">
+                              No auto-merge recommendations
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  ) : null}
+
+                  {tokenMgmtSubTab !== 'merge' && tokenMgmtSubTab !== 'auto-merge' && (
                     <table className="w-full text-left text-xs">
                     <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#f0f0f0]">
                       <tr>
@@ -5956,12 +6713,14 @@ FAILURE CONDITIONS TO AVOID:
                   <span className="text-[10px] text-zinc-500">
                     {tokenMgmtSubTab === 'merge'
                       ? `${filteredMergeRuleRows.length.toLocaleString()} parents`
+                      : tokenMgmtSubTab === 'auto-merge'
+                        ? `${autoMergeRows.length.toLocaleString()} recommendations`
                       : `${filteredMgmtTokens.length.toLocaleString()} tokens`}
                   </span>
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => setTokenMgmtPage(p => Math.max(1, p - 1))}
-                      disabled={tokenMgmtSubTab === 'merge' ? safeMergeMgmtPage <= 1 : safeMgmtPage <= 1}
+                      disabled={tokenMgmtSubTab === 'merge' ? safeMergeMgmtPage <= 1 : tokenMgmtSubTab === 'auto-merge' ? safeAutoMergePage <= 1 : safeMgmtPage <= 1}
                       className="px-2 py-0.5 text-[10px] font-medium rounded border border-zinc-300 bg-white text-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-50 transition-colors"
                     >
                       Prev
@@ -5969,16 +6728,22 @@ FAILURE CONDITIONS TO AVOID:
                     <span className="text-[10px] text-zinc-600">
                       {tokenMgmtSubTab === 'merge'
                         ? `${safeMergeMgmtPage}/${mergeMgmtTotalPages}`
+                        : tokenMgmtSubTab === 'auto-merge'
+                          ? `${safeAutoMergePage}/${autoMergeTotalPages}`
                         : `${safeMgmtPage}/${tokenMgmtTotalPages}`}
                     </span>
                     <button
                       onClick={() =>
                         setTokenMgmtPage(p => {
-                          const max = tokenMgmtSubTab === 'merge' ? mergeMgmtTotalPages : tokenMgmtTotalPages;
+                          const max = tokenMgmtSubTab === 'merge'
+                            ? mergeMgmtTotalPages
+                            : tokenMgmtSubTab === 'auto-merge'
+                              ? autoMergeTotalPages
+                              : tokenMgmtTotalPages;
                           return Math.min(max, p + 1);
                         })
                       }
-                      disabled={tokenMgmtSubTab === 'merge' ? safeMergeMgmtPage >= mergeMgmtTotalPages : safeMgmtPage >= tokenMgmtTotalPages}
+                      disabled={tokenMgmtSubTab === 'merge' ? safeMergeMgmtPage >= mergeMgmtTotalPages : tokenMgmtSubTab === 'auto-merge' ? safeAutoMergePage >= autoMergeTotalPages : safeMgmtPage >= tokenMgmtTotalPages}
                       className="px-2 py-0.5 text-[10px] font-medium rounded border border-zinc-300 bg-white text-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-zinc-50 transition-colors"
                     >
                       Next
@@ -6114,7 +6879,9 @@ FAILURE CONDITIONS TO AVOID:
                                           return updated;
                                         });
                                         // Persist to Firestore
-                                        setDoc(doc(db, 'projects', project.id), { name: newName }, { merge: true }).catch(() => {});
+                                        setDoc(doc(db, 'projects', project.id), { name: newName }, { merge: true }).catch((err) =>
+                                        reportPersistFailure(addToast, 'rename project', err),
+                                      );
                                       } else {
                                         el.textContent = project.name;
                                       }
@@ -6296,7 +7063,15 @@ FAILURE CONDITIONS TO AVOID:
                   <h3 className="text-sm font-semibold text-zinc-900 mb-3">Label Detection Rules</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
-                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5"><HelpCircle className="w-3.5 h-3.5 text-purple-500" />FAQ / Question</h4>
+                      <h4 className="text-xs font-semibold text-zinc-700 mb-1.5 flex items-center gap-1.5">
+                        <InlineHelpHint
+                          text="Question intent / FAQ keyword matches (examples: who, what, where, when, why, how, can, vs., compare, which, etc.)."
+                          className="inline-flex items-center cursor-help"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5 text-purple-500" />
+                        </InlineHelpHint>
+                        FAQ / Question
+                      </h4>
                       <code className="text-[10px] bg-white border border-zinc-100 text-zinc-600 p-1.5 rounded block break-all">\b(who|what|where|when|why|how|can|vs\.?|compare|is|are|do|does|will|would|should|could|which)\b/i</code>
                     </div>
                     <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-4">
@@ -6416,10 +7191,15 @@ FAILURE CONDITIONS TO AVOID:
               <h2 className="text-xl font-semibold text-zinc-900 mb-6">Label Detection Rules (OLD - REMOVED)</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4">
-                  <h4 className="font-medium text-zinc-800 mb-2 flex items-center gap-2">
-                    <HelpCircle className="w-4 h-4 text-purple-500" />
-                    FAQ / Question
-                  </h4>
+                    <h4 className="font-medium text-zinc-800 mb-2 flex items-center gap-2">
+                      <InlineHelpHint
+                        text="Question intent / FAQ keyword matches (examples: who, what, where, when, why, how, can, vs., compare, which, etc.)."
+                        className="inline-flex items-center cursor-help"
+                      >
+                        <HelpCircle className="w-4 h-4 text-purple-500" />
+                      </InlineHelpHint>
+                      FAQ / Question
+                    </h4>
                   <code className="text-xs bg-white border border-zinc-200 text-zinc-700 p-2 rounded block break-all">
                     \b(who|what|where|when|why|how|can|vs\.?|compare|is|are|do|does|will|would|should|could|which)\b/i
                   </code>

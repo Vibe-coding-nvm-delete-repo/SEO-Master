@@ -5,6 +5,7 @@ import { CELL } from './tableConstants';
 import LabelFilterDropdown from './LabelFilterDropdown';
 import { db } from './firebase';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
 
 export interface FilterBag {
   minLen: string; setMinLen: (v: string) => void;
@@ -15,6 +16,8 @@ export interface FilterBag {
   maxVolume: string; setMaxVolume: (v: string) => void;
   minKd: string; setMinKd: (v: string) => void;
   maxKd: string; setMaxKd: (v: string) => void;
+  minKwRating: string; setMinKwRating: (v: string) => void;
+  maxKwRating: string; setMaxKwRating: (v: string) => void;
   filterCity: string; setFilterCity: (v: string) => void;
   filterState: string; setFilterState: (v: string) => void;
   excludedLabels: Set<string>; setExcludedLabels: (s: Set<string>) => void;
@@ -44,6 +47,7 @@ const getFilterPair = (filters: FilterBag, filterKey: string): { min: string; se
     case 'kws': case 'pages': return { min: filters.minKwInCluster, setMin: filters.setMinKwInCluster, max: filters.maxKwInCluster, setMax: filters.setMaxKwInCluster };
     case 'vol': return { min: filters.minVolume, setMin: filters.setMinVolume, max: filters.maxVolume, setMax: filters.setMaxVolume };
     case 'kd': return { min: filters.minKd, setMin: filters.setMinKd, max: filters.maxKd, setMax: filters.setMaxKd };
+    case 'kwRating': return { min: filters.minKwRating, setMin: filters.setMinKwRating, max: filters.maxKwRating, setMax: filters.setMaxKwRating };
     default: return null;
   }
 };
@@ -88,11 +92,18 @@ const TableHeader = React.memo(({
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', WIDTHS_DOC), (snap) => {
+      markListenerSnapshot('table_column_widths', snap);
       if (!snap.exists()) return;
       const widths = snap.data()?.widths;
       if (widths && typeof widths === 'object') setColWidths(widths as Record<string, number>);
+    }, (err) => {
+      markListenerError('table_column_widths');
+      console.warn('[TableHeader] column widths sync:', err);
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError('table_column_widths');
+      if (typeof unsub === 'function') unsub();
+    };
   }, []);
 
   // Persist on change

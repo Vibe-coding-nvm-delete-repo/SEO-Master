@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ClusterSummary, GroupedCluster, ProcessedRow } from './types';
+import { parseSubClusterKey } from './subClusterKeys';
 
 // ──────────────────────────────────────────────────────────────────────
 // Pure logic functions extracted from App.tsx
@@ -63,7 +64,9 @@ function ungroupSubClusters(
   const newGrouped = [...groupedClusters];
 
   for (const subKey of selectedSubKeys) {
-    const [groupId, clusterTokens] = subKey.split('::');
+    const parsed = parseSubClusterKey(subKey);
+    if (!parsed) continue;
+    const { groupId, clusterTokens } = parsed;
     const groupIdx = newGrouped.findIndex(g => g.id === groupId);
     if (groupIdx === -1) continue;
     const group = newGrouped[groupIdx];

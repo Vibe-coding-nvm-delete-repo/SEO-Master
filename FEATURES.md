@@ -4,6 +4,17 @@
 
 ---
 
+## Auto Merge KWs (Token Management)
+
+- New `Auto Merge KWs` action runs an OpenRouter job that compares each non-blocked token against all other non-blocked tokens and returns only lexically/semantically identical matches (including very minor spelling variants).
+- Added a dedicated shared prompt (`Auto Merge Prompt`) in Group Review settings to control strict exact-identity matching behavior.
+- Job UI mirrors `Rate KWs`: progress bar, processed/total counts, recommendation count, elapsed time, token usage, API calls, and cancel support.
+- Token Management now includes an `auto-merge` sub-tab for review workflow:
+  - Review recommendation rows with canonical token, merge tokens, confidence, and impacted keyword/page counts.
+  - Apply one merge, decline one recommendation, or bulk `Merge All` pending recommendations.
+  - Approved recommendations remain visible with `Undo`, which reverses the applied merge via the existing merge undo cascade.
+- Auto-merge recommendations persist to IndexedDB + Firestore and sync across users/projects.
+
 ## 1. Project Management
 
 ### Create Project
@@ -233,8 +244,9 @@
 ### Layout
 - Two-panel layout: Keyword Management (left), Token Management (right)
 - Both panels at same vertical level
+- **Compact chrome:** main shell uses reduced padding (`px-4 py-3`); **status bar** (sync + clocks + weather) is denser; **SEO Magic** title + **breadcrumb** + **main tabs** (Group / Generate / Feedback / Feature ideas) share one header row on larger screens with a single subtitle line below; **Group** sub-tabs (Data / Projects / Settings / Log) use a thinner pill row
 - Compact project header
-- **Top status bar:** today’s date; two clocks with explicit prefixes — **Local:** (this device’s timezone, e.g. `America/Los_Angeles`) and **US Eastern (EST/EDT):** (`America/New_York`); **Status** badge (bordered pill, `Status` + line such as Cloud: synced) with **hover / focus / tap** (portal tooltip — structured panel with icons, sections, light gradient header, status-tinted accents; tight **4px** gap to anchor; not the slow browser `title` attribute) showing diagnostics (network, `first-db`, server snapshot, project id, flush queue, last save, listener channel errors) — not driven by one listener: **aggregated Firestore listener error callbacks** (projects list, project chunks, app_settings docs, Generate/AutoGroup/feedback/table width/group-review listeners, etc.), **any snapshot with server metadata** (`metadata.fromCache === false`) for “connected”, **project coalesced flush depth** (“Syncing…”), and **last project Firestore save success vs failure** from the persist queue. Copy: **Cloud: synced** / **Syncing…** / **Offline — saved locally** / **Sync problem — retry** / **Connecting…**
+- **Top status bar:** today’s date (**calendar** icon); **Local** clock line (**clock** icon); **US Eastern** line (**globe** icon); **local weather** from Open-Meteo (**thermometer** + condition icon; while loading: **Finding your location…** then **Loading forecast…** in a light sky-tint dashed pill; if location is **blocked**: amber **Location blocked — hover for help** with portal steps for Chrome/Edge/Safari/Firefox on Windows & Mac (+ OS location notes); **unavailable** uses cloud-off; **°F** when the device timezone is a known US zone, otherwise **°C** for Canada, EU, and the rest of the world; temperature tint follows cold→hot hues; **manual Refresh/Retry buttons** let users force an immediate weather re-fetch instead of waiting for cadence; **hover / focus / tap** opens a portal tooltip with a **7-day** min/max forecast, per-day icons, and per-day tint **plus short nowcast insight lines**: update cadence (**every 15 minutes**), **next refresh countdown**, likely hold duration for current conditions, estimated next weather-change time, and likely rain windows in the next 24h; day rows reserve a dedicated temperature column and truncate long condition labels to prevent overlap in narrow widths; graceful fallback if location is blocked/unavailable); **Status** badge (small **cloud** icon + `Status` + line such as Cloud: synced; colored dot) with **hover / focus / tap** (portal tooltip — structured panel with icons, sections, light gradient header, status-tinted accents; tight **4px** gap to anchor; not the slow browser `title` attribute) showing diagnostics (network, `first-db`, server snapshot, project id, flush queue, last save, listener channel errors) — not driven by one listener: **aggregated Firestore listener error callbacks** (projects list, project chunks, app_settings docs, Generate/AutoGroup/feedback/table width/group-review listeners, etc.), **any snapshot with server metadata** (`metadata.fromCache === false`) for “connected”, **project coalesced flush depth** (“Syncing…”), and **last project Firestore save success vs failure** from the persist queue. Copy: **Cloud: synced** / **Syncing…** / **Offline — saved locally** / **Sync problem — retry** / **Connecting…**
 
 ### Visual Design
 - Consistent font color hierarchy
@@ -344,6 +356,7 @@
 | 2026-03-25 | Feedback modal: `FeedbackModalHost` (local state + portal to `document.body` so `App` does not re-render on open); overlay without blur; no transition animations on modal chrome |
 | 2026-03-26 | Realtime collaboration correctness: project saveId marker, conditional chunk cleanup, and realtime shared `user_preferences` syncing |
 | 2026-03-27 | Generate tab: lowered default concurrency to 5 and expanded slider to 1-100 to reduce 429 backoff stalls on slower/rate-limited models |
+| 2026-03-27 | Generate tab refresh durability: guarded against cached-empty Firestore snapshots; added immediate local cache fallback for Generate 1/2 rows, settings, logs, and active sub-tab; persisted per-tab Generate view state (Table/Log + status filter); and made unload flush use chunked row writes so large in-progress tables are not lost on refresh/close |
 | 2026-03-26 | Auto-Group: `Shift+1` now requires active filters and supports 1 matching page |
 | 2026-03-25 | Feedback modal ARIA (dialog, fieldsets, labels, radiogroup); queue: legacy rating “—” + sort/filter; firebase.ts module note |
 | 2026-03-25 | Feedback modal: mandatory area dropdown, severity/impact with color ramp, structured Q&A body; queue shows Area column |

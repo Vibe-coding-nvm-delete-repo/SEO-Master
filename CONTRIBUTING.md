@@ -1,5 +1,7 @@
 # Contributing Guide
 
+**AI agents / automation:** start with [`AGENTS.md`](./AGENTS.md) (persistence, testing, and technical-debt rules), then this file.
+
 ## Development Workflow
 
 ### Branch Strategy
@@ -74,11 +76,22 @@ All keyword management tabs share a single `TableHeader` component:
 - **CSS:** Tailwind utility classes only — no custom CSS unless absolutely necessary
 
 ### Testing
-- Every new feature must include tests
+- Every new feature must include tests appropriate to the change (see [`AGENTS.md`](./AGENTS.md))
 - Every bug fix must include a regression test
 - Test files: `src/<name>.test.ts` or `src/<name>.test.tsx`
 - Use Vitest (`describe`, `it`, `expect`)
 - Run tests: `npm test` or `npm run test:watch`
+
+**Minimum expectations by change type:**
+- **New pure logic** (parsers, validators, prompt/response helpers, rating extraction): unit tests covering happy path, invalid input, and at least one edge case (empty, boundary, duplicate).
+- **New persisted fields** (rows, settings, chunks): exercise save/load or serialization in tests so round-trips do not drop data; follow existing `projectStorage` / storage tests.
+- **New LLM integration:** isolate HTTP + parsing in a dedicated module; unit-test parsing without live API calls; mirror retry/`response_format` patterns from existing engines.
+
+### Technical debt prevention (mandatory)
+- **Do not** add user-facing state that only lives in React memory — it must follow the 3-tier persistence rules in this document and in [`AGENTS.md`](./AGENTS.md).
+- **Do not** grow monolith files when the change can be a hook (`src/hooks/`) or engine module; respect the file-size guidelines above.
+- **Do not** duplicate `TableHeader`, label dropdowns, or column definitions — extend `tableConstants.ts` and shared components.
+- **Do not** skip tests for new logic “because it’s simple”; trivial helpers still regress when others edit them.
 
 ### State & Persistence (Critical Rule)
 **ALL user-facing state MUST be persisted.** Follow the 3-tier pattern:

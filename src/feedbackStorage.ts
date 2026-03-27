@@ -11,6 +11,7 @@ import {
 import { signInAnonymously } from 'firebase/auth';
 import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { auth, db, storage } from './firebase';
+import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
 import { FEEDBACK_MAX_ATTACHMENTS } from './feedbackConstants';
 import type { FeedbackEntry } from './types';
 import { loadFromIDB, saveToIDB, saveToLS } from './projectStorage';
@@ -93,15 +94,20 @@ export function subscribeFeedback(onItems: (items: FeedbackEntry[]) => void): ()
   const unsub = onSnapshot(
     q,
     (snap) => {
+      markListenerSnapshot('feedback', snap);
       const items: FeedbackEntry[] = snap.docs.map((d) => mapDoc(d.id, d.data() as Record<string, unknown>));
       void persistFeedbackCache(items);
       onItems(items);
     },
     (err) => {
+      markListenerError('feedback');
       console.warn('Feedback snapshot error:', err);
     },
   );
-  return unsub;
+  return () => {
+    clearListenerError('feedback');
+    unsub();
+  };
 }
 
 function extForImage(file: File): string {

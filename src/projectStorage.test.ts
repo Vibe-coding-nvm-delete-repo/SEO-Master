@@ -3,6 +3,7 @@ import {
   buildProjectDataPayloadFromChunkDocs,
   countGroupedPages,
   pickNewerProjectPayload,
+  sanitizeJsonForFirestore,
   type ProjectDataPayload,
 } from './projectStorage';
 
@@ -25,6 +26,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
         }),
       },
     ]);
@@ -55,6 +57,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
           updatedAt: new Date().toISOString(),
         }),
       },
@@ -101,6 +104,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
           updatedAt: new Date().toISOString(),
         }),
       },
@@ -142,6 +146,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
           updatedAt: new Date().toISOString(),
         }),
       },
@@ -175,6 +180,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
           saveId: 123,
           updatedAt: new Date().toISOString(),
         }),
@@ -210,6 +216,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
           saveId: 123,
           updatedAt: new Date().toISOString(),
         }),
@@ -245,6 +252,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           clusterChunkCount: 0,
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
           saveId: 42,
           updatedAt: '2025-01-01T00:00:00.000Z',
         }),
@@ -253,6 +261,185 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
 
     expect(payload).not.toBeNull();
     expect(payload?.lastSaveId).toBe(42);
+  });
+
+  it('reconstructs auto-merge recommendations from auto_merge chunks', () => {
+    const payload = buildProjectDataPayloadFromChunkDocs([
+      {
+        data: () => ({
+          type: 'meta',
+          stats: null,
+          datasetStats: null,
+          tokenSummary: [],
+          groupedClusterCount: 0,
+          approvedGroupCount: 0,
+          blockedTokens: [],
+          labelSections: [],
+          activityLog: [],
+          tokenMergeRules: [],
+          resultChunkCount: 0,
+          clusterChunkCount: 0,
+          blockedChunkCount: 0,
+          suggestionChunkCount: 0,
+          autoMergeChunkCount: 1,
+          updatedAt: new Date().toISOString(),
+        }),
+      },
+      {
+        data: () => ({
+          type: 'auto_merge',
+          index: 0,
+          data: [{
+            id: 'auto_merge_a',
+            sourceToken: 'a',
+            canonicalToken: 'a',
+            mergeTokens: ['aa'],
+            confidence: 0.95,
+            reason: 'variant',
+            affectedKeywordCount: 5,
+            affectedPageCount: 2,
+            affectedKeywords: ['a one'],
+            status: 'pending',
+            createdAt: '2026-01-01T00:00:00.000Z',
+          }],
+        }),
+      },
+    ]);
+
+    expect(payload).not.toBeNull();
+    expect(payload?.autoMergeRecommendations).toHaveLength(1);
+    expect(payload?.autoMergeRecommendations?.[0].canonicalToken).toBe('a');
+  });
+
+  it('returns null when meta expects auto_merge chunks but none are visible yet', () => {
+    const payload = buildProjectDataPayloadFromChunkDocs([
+      {
+        data: () => ({
+          type: 'meta',
+          stats: null,
+          datasetStats: null,
+          tokenSummary: [],
+          groupedClusterCount: 0,
+          approvedGroupCount: 0,
+          blockedTokens: [],
+          labelSections: [],
+          activityLog: [],
+          tokenMergeRules: [],
+          resultChunkCount: 0,
+          clusterChunkCount: 0,
+          blockedChunkCount: 0,
+          suggestionChunkCount: 0,
+          autoMergeChunkCount: 2,
+          updatedAt: new Date().toISOString(),
+        }),
+      },
+    ]);
+    expect(payload).toBeNull();
+  });
+
+  it('returns null when visible auto_merge chunk span is smaller than meta count', () => {
+    const payload = buildProjectDataPayloadFromChunkDocs([
+      {
+        data: () => ({
+          type: 'meta',
+          stats: null,
+          datasetStats: null,
+          tokenSummary: [],
+          groupedClusterCount: 0,
+          approvedGroupCount: 0,
+          blockedTokens: [],
+          labelSections: [],
+          activityLog: [],
+          tokenMergeRules: [],
+          resultChunkCount: 0,
+          clusterChunkCount: 0,
+          blockedChunkCount: 0,
+          suggestionChunkCount: 0,
+          autoMergeChunkCount: 3,
+          updatedAt: new Date().toISOString(),
+        }),
+      },
+      {
+        data: () => ({
+          type: 'auto_merge',
+          index: 0,
+          data: [],
+        }),
+      },
+      {
+        data: () => ({
+          type: 'auto_merge',
+          index: 1,
+          data: [],
+        }),
+      },
+    ]);
+    expect(payload).toBeNull();
+  });
+
+  it('includes all visible auto_merge chunks when meta chunk count is stale lower', () => {
+    const payload = buildProjectDataPayloadFromChunkDocs([
+      {
+        data: () => ({
+          type: 'meta',
+          stats: null,
+          datasetStats: null,
+          tokenSummary: [],
+          groupedClusterCount: 0,
+          approvedGroupCount: 0,
+          blockedTokens: [],
+          labelSections: [],
+          activityLog: [],
+          tokenMergeRules: [],
+          resultChunkCount: 0,
+          clusterChunkCount: 0,
+          blockedChunkCount: 0,
+          suggestionChunkCount: 0,
+          autoMergeChunkCount: 1,
+          updatedAt: new Date().toISOString(),
+        }),
+      },
+      {
+        data: () => ({
+          type: 'auto_merge',
+          index: 0,
+          data: [{
+            id: 'in',
+            sourceToken: 'a',
+            canonicalToken: 'a',
+            mergeTokens: ['aa'],
+            confidence: 1,
+            reason: '',
+            affectedKeywordCount: 1,
+            affectedPageCount: 1,
+            affectedKeywords: [],
+            status: 'pending',
+            createdAt: '2026-01-01T00:00:00.000Z',
+          }],
+        }),
+      },
+      {
+        data: () => ({
+          type: 'auto_merge',
+          index: 5,
+          data: [{
+            id: 'out',
+            sourceToken: 'b',
+            canonicalToken: 'b',
+            mergeTokens: ['bb'],
+            confidence: 1,
+            reason: '',
+            affectedKeywordCount: 1,
+            affectedPageCount: 1,
+            affectedKeywords: [],
+            status: 'pending',
+            createdAt: '2026-01-01T00:00:00.000Z',
+          }],
+        }),
+      },
+    ]);
+    expect(payload).not.toBeNull();
+    expect(payload?.autoMergeRecommendations?.map(r => r.id)).toEqual(['in', 'out']);
   });
 });
 
@@ -271,6 +458,7 @@ describe('pickNewerProjectPayload', () => {
     activityLog: [],
     tokenMergeRules: [],
     autoGroupSuggestions: [],
+    autoMergeRecommendations: [],
     updatedAt: '2025-01-01T00:00:00.000Z',
   });
 
@@ -337,6 +525,22 @@ describe('pickNewerProjectPayload', () => {
       approvedGroups: [],
     };
     expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+});
+
+describe('sanitizeJsonForFirestore', () => {
+  it('drops nested undefined so Firestore batch.set accepts the payload', () => {
+    const dirty = {
+      a: 1,
+      nested: { keep: 'x', drop: undefined },
+      arr: [{ ok: true, bad: undefined }],
+    };
+    const clean = sanitizeJsonForFirestore(dirty);
+    expect(clean).toEqual({
+      a: 1,
+      nested: { keep: 'x' },
+      arr: [{ ok: true }],
+    });
   });
 });
 

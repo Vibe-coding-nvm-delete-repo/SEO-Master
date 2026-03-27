@@ -37,11 +37,13 @@ import {
   setReconciliationPrompt,
   getReconciliationPrompt,
 } from './AutoGroupEngine';
-import { runCosineSimilarity, DEFAULT_EMBEDDING_MODEL } from './CosineEngine';
+import { runCosineSimilarity, trimCosineClusterMismatchPages, DEFAULT_EMBEDDING_MODEL } from './CosineEngine';
 import type { SimilarityPair, CosineCluster, CosineProgress } from './CosineEngine';
-import { processReviewQueue, type ReviewRequest } from './GroupReviewEngine';
+import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest } from './GroupReviewEngine';
 import { db } from './firebase';
 import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
+import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import InlineHelpHint from './InlineHelpHint';
 
 interface AutoGroupPanelProps {
   effectiveClusters: ClusterSummary[] | null;
@@ -359,6 +361,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   // Load settings from Firestore and keep them live-synced
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'autogroup_settings'), (snap) => {
+      markListenerSnapshot('autogroup_settings', snap);
       const d = snap.exists() ? snap.data() : null;
       if (typeof d?.apiKey === 'string') setAgApiKey(d.apiKey);
       if (d?.model) setAgModel(d.model);
@@ -373,10 +376,15 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       if (typeof d?.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
       if (typeof d?.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
       setAgSettingsHydrated(true);
-    }, () => {
+    }, (err) => {
+      markListenerError('autogroup_settings');
+      console.warn('[AutoGroup] autogroup_settings sync:', err);
       setAgSettingsHydrated(true);
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError('autogroup_settings');
+      if (typeof unsub === 'function') unsub();
+    };
   }, []);
 
   // Fetch models when API key changes
@@ -493,12 +501,12 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   });
 
   const SettingHint = ({ title }: { title: string }) => (
-    <span
+    <InlineHelpHint
+      text={title}
       className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-zinc-300 text-[9px] font-semibold text-zinc-500 cursor-help bg-white"
-      title={title}
     >
       ?
-    </span>
+    </InlineHelpHint>
   );
 
   const COSINE_OUTLIER_DIFF = 0.15;
@@ -635,6 +643,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   const [cosineSummariesHydrated, setCosineSummariesHydrated] = useState(false);
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', cosineSummaryCacheKey), (snap) => {
+      markListenerSnapshot(`cosine_${cosineSummaryCacheKey}`, snap);
       if (!snap.exists()) {
         setCosinePageSummaries(new Map());
         setCosineSummariesHydrated(true);
@@ -643,11 +652,16 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       const data = snap.data();
       setCosinePageSummaries(deserializeSummaryMap(typeof data?.summaries === 'string' ? data.summaries : null));
       setCosineSummariesHydrated(true);
-    }, () => {
+    }, (err) => {
+      markListenerError(`cosine_${cosineSummaryCacheKey}`);
+      console.warn('[AutoGroup] cosine summary cache sync:', err);
       setCosinePageSummaries(new Map());
       setCosineSummariesHydrated(true);
     });
-    return () => { if (typeof unsub === 'function') unsub(); };
+    return () => {
+      clearListenerError(`cosine_${cosineSummaryCacheKey}`);
+      if (typeof unsub === 'function') unsub();
+    };
   }, [cosineSummaryCacheKey]);
 
   useEffect(() => {
@@ -2256,6 +2270,44 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     logAndToast('qa-review', 'Removed mismatches back to ungrouped pool', removedCount, `Removed ${removedCount} mismatched pages back to Ungrouped Pages`, 'info');
   }, [buildSuggestionFromPagesLocal, logAndToast, qaMismatchPages, suggestions]);
 
+  /** Strip QA-mismatched pages out of initial cosine clusters so they only appear under Cosine Ungrouped (singletons / retry pool). */
+  const handleSendCosineMismatchesToUngrouped = useCallback(() => {
+    if (cosineQaMismatchPages.size === 0) return;
+
+    const removedPages = [...cosineQaMismatchPages.values()].reduce((s, p) => s + p.length, 0);
+    const nextClusters: CosineCluster[] = [];
+    const nextQaResults = new Map(cosineQaResults);
+
+    for (const cluster of cosineClusters) {
+      const names = cosineQaMismatchPages.get(cluster.id);
+      if (!names?.length) {
+        nextClusters.push(cluster);
+        continue;
+      }
+      const trimmed = trimCosineClusterMismatchPages(cluster, new Set(names));
+      if (trimmed) {
+        nextClusters.push(trimmed);
+        nextQaResults.set(cluster.id, 'approve');
+      } else {
+        nextQaResults.delete(cluster.id);
+      }
+    }
+
+    nextClusters.sort((a, b) => b.totalVolume - a.totalVolume);
+    setCosineClusters(nextClusters);
+    setCosineQaMismatchPages(new Map());
+    setCosineQaResults(nextQaResults);
+    setCosineStageTab('initial');
+    setCosineViewTab('ungrouped');
+    logAndToast(
+      'qa-review',
+      'Cosine QA mismatches moved to Ungrouped',
+      removedPages,
+      `Removed ${removedPages} mismatched page${removedPages === 1 ? '' : 's'} from clusters — see Cosine Ungrouped`,
+      'info'
+    );
+  }, [cosineClusters, cosineQaMismatchPages, cosineQaResults, logAndToast]);
+
   // Approve selected suggestions
   const handleApprove = useCallback((ids: Set<string>) => {
     const toApprove = suggestions.filter(s => ids.has(s.id));
@@ -2970,7 +3022,13 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                       </thead>
                       <tbody className="divide-y divide-zinc-100">
                         {sortedSuggestions.map(suggestion => {
-                          const mismatchSet = new Set(suggestion.qaMismatchedPages || qaMismatchPages.get(suggestion.id) || []);
+                          const rawMismatch = suggestion.qaMismatchedPages || qaMismatchPages.get(suggestion.id) || [];
+                          const mismatchSet = new Set(
+                            normalizeMismatchedPageNames(
+                              suggestion.pages.map(p => p.pageName),
+                              rawMismatch
+                            )
+                          );
                           const qaStatus = suggestion.qaStatus || qaResults.get(suggestion.id) || 'pending';
                           return (
                             <React.Fragment key={suggestion.id}>
@@ -3435,8 +3493,15 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                           {!suggestion.qaStatus && <span className="text-zinc-300">-</span>}
                         </td>
                       </tr>
-                      {expandedSuggestions.has(suggestion.id) && suggestion.pages.map(page => {
-                        const isMismatched = suggestion.qaMismatchedPages?.includes(page.pageName);
+                      {expandedSuggestions.has(suggestion.id) && (() => {
+                        const qaMismatchNorm = new Set(
+                          normalizeMismatchedPageNames(
+                            suggestion.pages.map(p => p.pageName),
+                            suggestion.qaMismatchedPages || []
+                          )
+                        );
+                        return suggestion.pages.map(page => {
+                        const isMismatched = qaMismatchNorm.has(page.pageName);
                         return (
                           <tr key={page.tokens} className={`${isMismatched ? 'bg-red-50/50' : 'bg-violet-50/30'}`}>
                             <td></td>
@@ -3454,7 +3519,8 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                             <td></td>
                           </tr>
                         );
-                      })}
+                      });
+                      })()}
                     </React.Fragment>
                   ))}
                 </tbody>
@@ -3497,6 +3563,18 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                 >
                   <CheckCircle2 className="w-3 h-3" />
                   QA ({cosineClusters.length})
+                </button>
+              )}
+
+              {!cosineRunning && cosineClusters.length > 0 && !isRunningCosineQA && (
+                <button
+                  type="button"
+                  onClick={handleSendCosineMismatchesToUngrouped}
+                  disabled={initialQaMismatchPageCount === 0}
+                  className="px-3 py-1.5 text-xs font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
+                  title={initialQaMismatchPageCount === 0 ? 'Run Cosine QA first and have at least one mismatched page' : 'Remove QA-mismatched pages from clusters; they appear under Cosine Ungrouped'}
+                >
+                  Send mismatches to Ungrouped ({initialQaMismatchPageCount})
                 </button>
               )}
 

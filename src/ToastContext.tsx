@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useCallback, useState, useRef } from 'react';
+import React, { createContext, useContext, useCallback, useState, useRef, useEffect } from 'react';
 
 export type ToastType = 'success' | 'info' | 'warning' | 'error';
 
@@ -6,7 +6,7 @@ export interface Toast {
   id: string;
   message: string;
   type: ToastType;
-  exiting?: boolean;
+  exiting?: boolean; // kept for backwards compatibility; no longer drives animations
 }
 
 interface ToastContextValue {
@@ -24,20 +24,24 @@ const ToastContext = createContext<ToastContextValue>({
 export const useToast = () => useContext(ToastContext);
 
 const MAX_TOASTS = 5;
-const AUTO_DISMISS_MS = 4000;
-const EXIT_ANIMATION_MS = 300;
+// Keep short and deterministic per user request.
+const AUTO_DISMISS_MS = 2500;
 
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
+  useEffect(() => {
+    return () => {
+      // Prevent pending timers from attempting state updates after unmount.
+      timersRef.current.forEach(timer => clearTimeout(timer));
+      timersRef.current.clear();
+    };
+  }, []);
+
   const removeToast = useCallback((id: string) => {
-    // Start exit animation
-    setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t));
-    // Remove after animation
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, EXIT_ANIMATION_MS);
+    // Remove immediately (no enter/exit animation).
+    setToasts(prev => prev.filter(t => t.id !== id));
     // Clear timer
     const timer = timersRef.current.get(id);
     if (timer) { clearTimeout(timer); timersRef.current.delete(id); }

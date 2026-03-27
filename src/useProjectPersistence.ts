@@ -42,9 +42,77 @@ import type {
   Project,
   Stats,
   ActivityLogEntry,
+  AutoMergeRecommendation,
   TokenMergeRule,
   AutoGroupSuggestion,
 } from './types';
+import { parseSubClusterKey } from './subClusterKeys';
+import { logPersistError, reportPersistFailure } from './persistenceErrors';
+import {
+  clearListenerError,
+  markListenerError,
+  markListenerSnapshot,
+  recordProjectFirestoreSaveError,
+  recordProjectFirestoreSaveOk,
+  recordProjectFlushEnter,
+  recordProjectFlushExit,
+} from './cloudSyncStatus';
+
+/** Matches App.tsx remove-from-approved row shape (cluster-level location). */
+function appendResultRowsRemoveFromApproved(
+  currentResults: ProcessedRow[],
+  clusters: ClusterSummary[],
+): ProcessedRow[] {
+  const newRows: ProcessedRow[] = [];
+  for (const cluster of clusters) {
+    for (const kw of cluster.keywords) {
+      newRows.push({
+        keyword: kw.keyword,
+        keywordLower: kw.keyword.toLowerCase(),
+        searchVolume: kw.volume,
+        kd: kw.kd,
+        pageName: cluster.pageName,
+        tokens: cluster.tokens,
+        tokenArr: cluster.tokenArr,
+        labelArr: cluster.labelArr || [],
+        label: cluster.label,
+        locationCity: cluster.locationCity || '',
+        locationState: cluster.locationState || '',
+        pageNameLen: cluster.pageNameLen,
+        pageNameLower: cluster.pageNameLower || cluster.pageName.toLowerCase(),
+      });
+    }
+  }
+  return [...currentResults, ...newRows];
+}
+
+/** Matches App.tsx ungroup row shape (keyword-level location). */
+function appendResultRowsUngroup(
+  currentResults: ProcessedRow[],
+  clusters: ClusterSummary[],
+): ProcessedRow[] {
+  const newRows: ProcessedRow[] = [];
+  for (const cluster of clusters) {
+    for (const kw of cluster.keywords) {
+      newRows.push({
+        pageName: cluster.pageName,
+        pageNameLower: cluster.pageNameLower,
+        pageNameLen: cluster.pageNameLen,
+        tokens: cluster.tokens,
+        tokenArr: cluster.tokenArr,
+        keyword: kw.keyword,
+        keywordLower: kw.keyword.toLowerCase(),
+        searchVolume: kw.volume,
+        kd: kw.kd,
+        label: cluster.label,
+        labelArr: cluster.labelArr,
+        locationCity: kw.locationCity,
+        locationState: kw.locationState,
+      });
+    }
+  }
+  return [...currentResults, ...newRows];
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +129,7 @@ export interface PersistedState {
   stats: Stats | null;
   datasetStats: any | null;
   autoGroupSuggestions: AutoGroupSuggestion[];
+  autoMergeRecommendations: AutoMergeRecommendation[];
   tokenMergeRules: TokenMergeRule[];
   blockedTokens: Set<string>;
   labelSections: LabelSection[];
@@ -82,6 +151,8 @@ export interface ProjectPersistence extends PersistedState {
   setActiveProjectId: (id: string | null) => void;
   loadProject: (projectId: string, projects: Project[]) => Promise<void>;
   clearProject: () => void;
+  /** Sync `latest` + fileName state without persisting (metadata / CSV processing UI). */
+  syncFileNameLocal: (name: string | null) => void;
 
   // Atomic mutations
   addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => void;
@@ -98,7 +169,7 @@ export interface ProjectPersistence extends PersistedState {
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => ClusterSummary[];
+  ) => { clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
   blockTokens: (tokens: string[]) => void;
   unblockTokens: (tokens: string[]) => void;
   applyMergeCascade: (cascade: {
@@ -118,6 +189,7 @@ export interface ProjectPersistence extends PersistedState {
   }) => void;
   updateLabelSections: (sections: LabelSection[]) => void;
   updateSuggestions: (suggestions: AutoGroupSuggestion[]) => void;
+  updateAutoMergeRecommendations: (recommendations: AutoMergeRecommendation[]) => void;
   addActivityEntry: (entry: ActivityLogEntry) => void;
   clearActivityLog: () => void;
   bulkSet: (data: Partial<ProjectViewState>) => void;
@@ -133,6 +205,7 @@ export interface ProjectPersistence extends PersistedState {
   setStats: React.Dispatch<React.SetStateAction<Stats | null>>;
   setDatasetStats: React.Dispatch<React.SetStateAction<any | null>>;
   setAutoGroupSuggestions: React.Dispatch<React.SetStateAction<AutoGroupSuggestion[]>>;
+  setAutoMergeRecommendations: React.Dispatch<React.SetStateAction<AutoMergeRecommendation[]>>;
   setTokenMergeRules: React.Dispatch<React.SetStateAction<TokenMergeRule[]>>;
   setBlockedTokens: React.Dispatch<React.SetStateAction<Set<string>>>;
   setLabelSections: React.Dispatch<React.SetStateAction<LabelSection[]>>;
@@ -150,6 +223,7 @@ export interface ProjectPersistence extends PersistedState {
     stats: React.MutableRefObject<Stats | null>;
     datasetStats: React.MutableRefObject<any | null>;
     autoGroupSuggestions: React.MutableRefObject<AutoGroupSuggestion[]>;
+    autoMergeRecommendations: React.MutableRefObject<AutoMergeRecommendation[]>;
     tokenMergeRules: React.MutableRefObject<TokenMergeRule[]>;
     blockedTokens: React.MutableRefObject<Set<string>>;
     labelSections: React.MutableRefObject<LabelSection[]>;
@@ -173,6 +247,7 @@ const EMPTY: PersistedState = {
   stats: null,
   datasetStats: null,
   autoGroupSuggestions: [],
+  autoMergeRecommendations: [],
   tokenMergeRules: [],
   blockedTokens: new Set<string>(),
   labelSections: [],
@@ -203,6 +278,7 @@ export function useProjectPersistence(options: {
   const [stats, setStats] = useState<Stats | null>(null);
   const [datasetStats, setDatasetStats] = useState<any | null>(null);
   const [autoGroupSuggestions, setAutoGroupSuggestions] = useState<AutoGroupSuggestion[]>([]);
+  const [autoMergeRecommendations, setAutoMergeRecommendations] = useState<AutoMergeRecommendation[]>([]);
   const [tokenMergeRules, setTokenMergeRules] = useState<TokenMergeRule[]>([]);
   const [blockedTokens, setBlockedTokens] = useState<Set<string>>(new Set());
   const [labelSections, setLabelSections] = useState<LabelSection[]>([]);
@@ -223,7 +299,7 @@ export function useProjectPersistence(options: {
     latest.current = {
       results, clusterSummary, tokenSummary, groupedClusters,
       approvedGroups, blockedKeywords, activityLog, stats,
-      datasetStats, autoGroupSuggestions, tokenMergeRules,
+      datasetStats, autoGroupSuggestions, autoMergeRecommendations, tokenMergeRules,
       blockedTokens, labelSections, fileName,
     };
   });
@@ -239,6 +315,7 @@ export function useProjectPersistence(options: {
   const statsRef = useRef(stats);
   const datasetStatsRef = useRef(datasetStats);
   const autoGroupSuggestionsRef = useRef(autoGroupSuggestions);
+  const autoMergeRecommendationsRef = useRef(autoMergeRecommendations);
   const tokenMergeRulesRef = useRef(tokenMergeRules);
   const blockedTokensRef = useRef(blockedTokens);
   const labelSectionsRef = useRef(labelSections);
@@ -255,6 +332,7 @@ export function useProjectPersistence(options: {
   useEffect(() => { statsRef.current = stats; }, [stats]);
   useEffect(() => { datasetStatsRef.current = datasetStats; }, [datasetStats]);
   useEffect(() => { autoGroupSuggestionsRef.current = autoGroupSuggestions; }, [autoGroupSuggestions]);
+  useEffect(() => { autoMergeRecommendationsRef.current = autoMergeRecommendations; }, [autoMergeRecommendations]);
   useEffect(() => { tokenMergeRulesRef.current = tokenMergeRules; }, [tokenMergeRules]);
   useEffect(() => { blockedTokensRef.current = blockedTokens; }, [blockedTokens]);
   useEffect(() => { labelSectionsRef.current = labelSections; }, [labelSections]);
@@ -266,6 +344,8 @@ export function useProjectPersistence(options: {
   const clientIdRef = useRef(SESSION_CLIENT_ID);
   const projectLoadingRef = useRef(false);
   const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
+  /** Coalesce rapid saves (e.g. keyword rating batches) — Firestore flushes after quiet period */
+  const firestoreFlushDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveCounterRef = useRef(0);
   /** True if a mutation happened since we started the current persist iteration (coalesced saves). */
   const needsPersistFlushRef = useRef(false);
@@ -291,6 +371,7 @@ export function useProjectPersistence(options: {
       activityLog: s.activityLog.slice(0, 500),
       tokenMergeRules: s.tokenMergeRules,
       autoGroupSuggestions: s.autoGroupSuggestions,
+      autoMergeRecommendations: s.autoMergeRecommendations,
       updatedAt: new Date().toISOString(),
       lastSaveId: saveCounterRef.current,
     };
@@ -306,42 +387,67 @@ export function useProjectPersistence(options: {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
 
-    while (needsPersistFlushRef.current) {
-      needsPersistFlushRef.current = false;
+    recordProjectFlushEnter();
+    try {
+      while (needsPersistFlushRef.current) {
+        needsPersistFlushRef.current = false;
 
-      const saveId = ++saveCounterRef.current;
-      const payload = buildPayload();
-      payload.lastSaveId = saveId;
-      const clientId = clientIdRef.current;
+        const saveId = ++saveCounterRef.current;
+        const payload = buildPayload();
+        payload.lastSaveId = saveId;
+        const clientId = clientIdRef.current;
 
-      loadFenceRef.current = 0;
+        loadFenceRef.current = 0;
 
-      try {
-        await saveToIDB(projectId, payload);
-      } catch (err) {
-        console.error('[PERSIST] IDB save FAILED:', err);
+        try {
+          await saveToIDB(projectId, payload);
+        } catch (err) {
+          logPersistError('IDB save (flush)', err);
+        }
+        try {
+          await saveProjectDataToFirestore(projectId, payload, { saveId, clientId });
+          recordProjectFirestoreSaveOk();
+          console.log(
+            '[PERSIST] Firestore save OK - grouped:',
+            (payload.groupedClusters || []).length,
+            'groups, saveId:',
+            saveId,
+          );
+        } catch (err) {
+          recordProjectFirestoreSaveError();
+          reportPersistFailure(addToast, 'project data save', err);
+        }
+        // If mutateAndSave ran during the awaits above, needsPersistFlushRef is true → loop
       }
-      try {
-        await saveProjectDataToFirestore(projectId, payload, { saveId, clientId });
-        console.log(
-          '[PERSIST] Firestore save OK - grouped:',
-          (payload.groupedClusters || []).length,
-          'groups, saveId:',
-          saveId,
-        );
-      } catch (err) {
-        console.error('[PERSIST] Firestore save FAILED:', err);
-        addToast('Save failed - changes may not persist. Check console.', 'error');
-      }
-      // If mutateAndSave ran during the awaits above, needsPersistFlushRef is true → loop
+    } finally {
+      recordProjectFlushExit();
     }
   }, [buildPayload, addToast]);
 
-  /** Request a persist flush. Bursts collapse: latest.current is always authoritative. */
+  /** Queue Firestore sync (debounced). `latest.current` is always read at flush time. */
   const enqueueSave = useCallback(() => {
     if (!activeProjectIdRef.current) return;
     needsPersistFlushRef.current = true;
-    pendingSaveRef.current = pendingSaveRef.current.then(flushPersistQueue).catch(() => {});
+    if (firestoreFlushDebounceRef.current) clearTimeout(firestoreFlushDebounceRef.current);
+    firestoreFlushDebounceRef.current = setTimeout(() => {
+      firestoreFlushDebounceRef.current = null;
+      pendingSaveRef.current = pendingSaveRef.current
+        .then(flushPersistQueue)
+        .catch((err) => logPersistError('persist queue flush', err));
+    }, 500);
+  }, [flushPersistQueue]);
+
+  /** Flush cloud sync immediately (e.g. tab hidden) — skip debounce */
+  const enqueueSaveImmediate = useCallback(() => {
+    if (!activeProjectIdRef.current) return;
+    needsPersistFlushRef.current = true;
+    if (firestoreFlushDebounceRef.current) {
+      clearTimeout(firestoreFlushDebounceRef.current);
+      firestoreFlushDebounceRef.current = null;
+    }
+    pendingSaveRef.current = pendingSaveRef.current
+      .then(flushPersistQueue)
+      .catch((err) => logPersistError('persist queue flush', err));
   }, [flushPersistQueue]);
 
   /**
@@ -353,18 +459,20 @@ export function useProjectPersistence(options: {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     const payload = buildPayload(overrides);
-    saveToIDB(projectId, payload).catch(() => {});
+    saveToIDB(projectId, payload).catch((err) =>
+      logPersistError('IDB checkpoint', err),
+    );
   }, [buildPayload]);
 
   // Best-effort: queue a flush when the tab hides so refresh/navigation is less likely
   // to hit the server before the coalesced queue finishes writing.
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === 'hidden') enqueueSave();
+      if (document.visibilityState === 'hidden') enqueueSaveImmediate();
     };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [enqueueSave]);
+  }, [enqueueSaveImmediate]);
 
   // ── Helper: update latest + state + save atomically ───────────────────
   const mutateAndSave = useCallback((
@@ -384,6 +492,7 @@ export function useProjectPersistence(options: {
     if ('stats' in changes) setStats(changes.stats!);
     if ('datasetStats' in changes) setDatasetStats(changes.datasetStats!);
     if ('autoGroupSuggestions' in changes) setAutoGroupSuggestions(changes.autoGroupSuggestions!);
+    if ('autoMergeRecommendations' in changes) setAutoMergeRecommendations(changes.autoMergeRecommendations!);
     if ('tokenMergeRules' in changes) setTokenMergeRules(changes.tokenMergeRules!);
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
@@ -405,6 +514,7 @@ export function useProjectPersistence(options: {
       activityLog: vs.activityLog,
       tokenMergeRules: vs.tokenMergeRules,
       autoGroupSuggestions: vs.autoGroupSuggestions,
+      autoMergeRecommendations: vs.autoMergeRecommendations,
       stats: vs.stats,
       datasetStats: vs.datasetStats as any,
       blockedTokens: new Set<string>(vs.blockedTokens),
@@ -421,6 +531,7 @@ export function useProjectPersistence(options: {
     setActivityLog(next.activityLog);
     setTokenMergeRules(next.tokenMergeRules);
     setAutoGroupSuggestions(next.autoGroupSuggestions);
+    setAutoMergeRecommendations(next.autoMergeRecommendations);
     setStats(next.stats);
     setDatasetStats(next.datasetStats);
     setBlockedTokens(next.blockedTokens);
@@ -465,6 +576,11 @@ export function useProjectPersistence(options: {
     applyViewState(createEmptyProjectViewState());
   }, [applyViewState]);
 
+  const syncFileNameLocal = useCallback((name: string | null) => {
+    latest.current = { ...latest.current, fileName: name };
+    setFileName(name);
+  }, []);
+
   // ── onSnapshot listener for project chunks ────────────────────────────
   // projectsRef defined above (with other refs) so the listener isn't torn down/recreated
   // when projects changes — recreating it fires immediately with potentially stale Firestore
@@ -480,6 +596,7 @@ export function useProjectPersistence(options: {
     const unsub = onSnapshot(
       collection(db, 'projects', pid, 'chunks'),
       (snap) => {
+        markListenerSnapshot('project_chunks', snap);
         const metaDoc = snap.docs.find((d) => (d.data() as any)?.type === 'meta');
         const meta = metaDoc ? (metaDoc.data() as any) : null;
 
@@ -588,12 +705,22 @@ export function useProjectPersistence(options: {
         applyViewState(
           data ? toProjectViewState(data, project) : createEmptyProjectViewState()
         );
-        if (data && pid) saveToIDB(pid, data).catch(() => {});
+        if (data && pid) {
+          saveToIDB(pid, data).catch((err) =>
+            logPersistError('IDB cache after remote snapshot', err),
+          );
+        }
       },
-      () => {},
+      (err) => {
+        markListenerError('project_chunks');
+        reportPersistFailure(addToast, 'project chunks listener', err);
+      },
     );
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, [activeProjectId, applyViewState]);
+    return () => {
+      clearListenerError('project_chunks');
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [activeProjectId, applyViewState, addToast]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
@@ -656,19 +783,20 @@ export function useProjectPersistence(options: {
     const clustersToReturn: ClusterSummary[] = [];
     const groupsToReturn: GroupedCluster[] = [];
 
-    // Entire groups being removed
+    // Entire groups being removed — restore whole groups to Grouped tab only (not clusterSummary)
     for (const gId of groupIds) {
       const group = newApproved.find(g => g.id === gId);
       if (group) {
         groupsToReturn.push(group);
-        clustersToReturn.push(...group.clusters);
       }
     }
     newApproved = newApproved.filter(g => !groupIds.has(g.id));
 
-    // Individual sub-clusters being removed
+    // Individual sub-clusters being removed — return those pages to clusterSummary + results
     for (const subKey of subKeys) {
-      const [groupId, clusterTokens] = subKey.split('::');
+      const parsed = parseSubClusterKey(subKey);
+      if (!parsed) continue;
+      const { groupId, clusterTokens } = parsed;
       if (groupIds.has(groupId)) continue;
       const groupIdx = newApproved.findIndex(g => g.id === groupId);
       if (groupIdx === -1) continue;
@@ -693,10 +821,16 @@ export function useProjectPersistence(options: {
       ? [...s.clusterSummary, ...clustersToReturn]
       : s.clusterSummary;
 
+    let nextResults = s.results;
+    if (s.results && clustersToReturn.length > 0) {
+      nextResults = appendResultRowsRemoveFromApproved(s.results, clustersToReturn);
+    }
+
     mutateAndSave(() => ({
       approvedGroups: newApproved,
       groupedClusters: nextGrouped,
       clusterSummary: nextClusters,
+      results: nextResults,
     }));
 
     return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
@@ -706,10 +840,11 @@ export function useProjectPersistence(options: {
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ): ClusterSummary[] => {
+  ) => {
     const s = latest.current;
     let newGrouped = [...s.groupedClusters];
     const clustersToReturn: ClusterSummary[] = [];
+    const groupsWithPartialRemoval: string[] = [];
 
     // Entire groups
     for (const gId of groupIds) {
@@ -720,7 +855,9 @@ export function useProjectPersistence(options: {
 
     // Individual sub-clusters
     for (const subKey of subKeys) {
-      const [groupId, clusterTokens] = subKey.split('::');
+      const parsed = parseSubClusterKey(subKey);
+      if (!parsed) continue;
+      const { groupId, clusterTokens } = parsed;
       if (groupIds.has(groupId)) continue;
       const groupIdx = newGrouped.findIndex(g => g.id === groupId);
       if (groupIdx === -1) continue;
@@ -733,6 +870,7 @@ export function useProjectPersistence(options: {
           newGrouped.splice(groupIdx, 1);
         } else {
           newGrouped[groupIdx] = recalc(group, remaining);
+          groupsWithPartialRemoval.push(group.id);
         }
       }
     }
@@ -741,12 +879,18 @@ export function useProjectPersistence(options: {
       ? [...s.clusterSummary, ...clustersToReturn]
       : null;
 
+    let nextResults = s.results;
+    if (s.results && clustersToReturn.length > 0) {
+      nextResults = appendResultRowsUngroup(s.results, clustersToReturn);
+    }
+
     mutateAndSave(() => ({
       groupedClusters: newGrouped,
       clusterSummary: nextClusters,
+      results: nextResults,
     }));
 
-    return clustersToReturn;
+    return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
   }, [mutateAndSave]);
 
   const blockTokens = useCallback((tokens: string[]) => {
@@ -806,6 +950,10 @@ export function useProjectPersistence(options: {
     mutateAndSave(() => ({ labelSections: sections }));
   }, [mutateAndSave]);
 
+  const updateAutoMergeRecommendations = useCallback((recommendations: AutoMergeRecommendation[]) => {
+    mutateAndSave(() => ({ autoMergeRecommendations: recommendations }));
+  }, [mutateAndSave]);
+
   // Debounced suggestion-only persistence — onSuggestionsChange can still fire very
   // often; main mutations now coalesce in flushPersistQueue. Suggestions alone use
   // a 2s idle timer so we do not schedule redundant flushes on every keystroke.
@@ -846,6 +994,7 @@ export function useProjectPersistence(options: {
     if ('activityLog' in data) changes.activityLog = data.activityLog!;
     if ('tokenMergeRules' in data) changes.tokenMergeRules = data.tokenMergeRules!;
     if ('autoGroupSuggestions' in data) changes.autoGroupSuggestions = data.autoGroupSuggestions!;
+    if ('autoMergeRecommendations' in data) changes.autoMergeRecommendations = data.autoMergeRecommendations!;
     if ('stats' in data) changes.stats = data.stats!;
     if ('datasetStats' in data) changes.datasetStats = data.datasetStats;
     if ('blockedTokens' in data) changes.blockedTokens = new Set<string>(data.blockedTokens!);
@@ -873,6 +1022,7 @@ export function useProjectPersistence(options: {
     results, clusterSummary, tokenSummary, groupedClusters,
     approvedGroups, blockedKeywords, activityLog, stats,
     datasetStats, autoGroupSuggestions, tokenMergeRules,
+    autoMergeRecommendations,
     blockedTokens, labelSections, fileName,
     activeProjectId,
 
@@ -880,6 +1030,7 @@ export function useProjectPersistence(options: {
     setActiveProjectId,
     loadProject,
     clearProject,
+    syncFileNameLocal,
 
     // Atomic mutations
     addGroupsAndRemovePages,
@@ -894,6 +1045,7 @@ export function useProjectPersistence(options: {
     applyMergeCascade,
     undoMerge,
     updateLabelSections,
+    updateAutoMergeRecommendations,
     updateSuggestions,
     addActivityEntry,
     clearActivityLog,
@@ -903,6 +1055,7 @@ export function useProjectPersistence(options: {
     setResults, setClusterSummary, setTokenSummary, setGroupedClusters,
     setApprovedGroups, setBlockedKeywords, setActivityLog, setStats,
     setDatasetStats, setAutoGroupSuggestions, setTokenMergeRules,
+    setAutoMergeRecommendations,
     setBlockedTokens, setLabelSections, setFileName,
 
     // Transitional refs
@@ -917,6 +1070,7 @@ export function useProjectPersistence(options: {
       stats: statsRef,
       datasetStats: datasetStatsRef,
       autoGroupSuggestions: autoGroupSuggestionsRef,
+      autoMergeRecommendations: autoMergeRecommendationsRef,
       tokenMergeRules: tokenMergeRulesRef,
       blockedTokens: blockedTokensRef,
       labelSections: labelSectionsRef,

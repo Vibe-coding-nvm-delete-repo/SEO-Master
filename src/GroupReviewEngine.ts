@@ -52,6 +52,41 @@ Always respond with valid JSON matching this exact schema:
 
 export { DEFAULT_SYSTEM_PROMPT };
 
+/**
+ * Maps LLM-returned mismatched page strings to canonical `pageName` values from the request.
+ * Prevents sub-row QA dots from disappearing when the model uses different spacing/casing.
+ */
+export function normalizeMismatchedPageNames(canonicalPageNames: string[], raw: string[]): string[] {
+  const canon = [...canonicalPageNames];
+  const canonSet = new Set(canon);
+  const out = new Set<string>();
+
+  for (const r of raw) {
+    const t = typeof r === 'string' ? r.trim() : '';
+    if (!t) continue;
+
+    if (canonSet.has(t)) {
+      out.add(t);
+      continue;
+    }
+
+    const lower = t.toLowerCase();
+    const ciHits = canon.filter(c => c.toLowerCase() === lower);
+    if (ciHits.length === 1) {
+      out.add(ciHits[0]);
+      continue;
+    }
+
+    const fuzzy = canon.filter(c => c === t || c.includes(t) || t.includes(c));
+    if (fuzzy.length === 1) {
+      out.add(fuzzy[0]);
+      continue;
+    }
+  }
+
+  return Array.from(out);
+}
+
 function buildUserMessage(groupName: string, pages: { pageName: string; tokens: string[] }[]): string {
   const pageList = pages.map(p => `- "${p.pageName}" [tokens: ${p.tokens.join(', ')}]`).join('\n');
   return `Group Name: "${groupName}"\n\nPages in this group:\n${pageList}\n\nRespond with JSON only.`;
@@ -147,10 +182,17 @@ async function reviewSingleGroup(
       const promptCost = config.modelPricing ? promptTokens * parseFloat(config.modelPricing.prompt) : 0;
       const completionCost = config.modelPricing ? completionTokens * parseFloat(config.modelPricing.completion) : 0;
 
+      const rawMismatch: string[] = Array.isArray(parsed.mismatched_pages) ? parsed.mismatched_pages : [];
+      const canonicalNames = request.pages.map(p => p.pageName);
+      const mismatchedPages =
+        status === 'mismatch'
+          ? normalizeMismatchedPageNames(canonicalNames, rawMismatch)
+          : [];
+
       return {
         groupId: request.groupId,
         status,
-        mismatchedPages: Array.isArray(parsed.mismatched_pages) ? parsed.mismatched_pages : [],
+        mismatchedPages,
         reason: parsed.reason || '',
         cost: promptCost + completionCost,
         promptTokens,

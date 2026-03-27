@@ -370,6 +370,73 @@ function buildClusters(
   return clusters;
 }
 
+/** Matches `buildClusters` default — used when recomputing outlier counts after trimming. */
+const CLUSTER_OUTLIER_FLOOR = 0.85;
+
+/**
+ * Remove QA-flagged pages from a cosine cluster and recompute aggregate metrics.
+ * Returns null if fewer than two pages remain (singletons are no longer clustered).
+ */
+export function trimCosineClusterMismatchPages(
+  cluster: CosineCluster,
+  mismatchedPageNames: Set<string>
+): CosineCluster | null {
+  const remaining = cluster.pages.filter(p => !mismatchedPageNames.has(p.pageName));
+  if (remaining.length < 2) return null;
+  return rebuildCosineClusterAfterTrim(cluster, remaining);
+}
+
+function rebuildCosineClusterAfterTrim(cluster: CosineCluster, pages: CosineClusterPage[]): CosineCluster {
+  const oldRepTokens = cluster.representativeTokens;
+  const rep = pages.reduce((a, b) => (a.totalVolume >= b.totalVolume ? a : b));
+  const repChanged = rep.tokens !== oldRepTokens;
+  const enriched: CosineClusterPage[] = pages.map(page => {
+    let sim = page.representativeSimilarity;
+    if (page.tokens === rep.tokens) sim = 1;
+    else if (repChanged) sim = 0.95;
+    return { ...page, representativeSimilarity: Math.round(sim * 10000) / 10000 };
+  });
+  enriched.sort((a, b) => {
+    if (a.tokens === rep.tokens) return -1;
+    if (b.tokens === rep.tokens) return 1;
+    if (b.representativeSimilarity !== a.representativeSimilarity) return b.representativeSimilarity - a.representativeSimilarity;
+    return b.totalVolume - a.totalVolume;
+  });
+  const memberSims = enriched.filter(p => p.tokens !== rep.tokens).map(p => p.representativeSimilarity);
+  const lowSimilarity = memberSims.length > 0 ? Math.min(...memberSims) : 1;
+  const diffSimilarity = Math.round((1 - lowSimilarity) * 10000) / 10000;
+  const highSimilarity = 1;
+  const outlierCount = enriched.filter(p =>
+    p.tokens !== rep.tokens && p.representativeSimilarity < CLUSTER_OUTLIER_FLOOR
+  ).length;
+  const totalVolume = enriched.reduce((s, p) => s + p.totalVolume, 0);
+  const keywordCount = enriched.reduce((s, p) => s + p.keywordCount, 0);
+  let totalKd = 0;
+  let kdCount = 0;
+  for (const p of enriched) {
+    if (p.avgKd !== null) {
+      totalKd += p.avgKd * p.keywordCount;
+      kdCount += p.keywordCount;
+    }
+  }
+  return {
+    id: cluster.id,
+    pages: enriched,
+    pageCount: enriched.length,
+    totalVolume,
+    keywordCount,
+    avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
+    maxSimilarity: memberSims.length ? Math.max(...memberSims) : 1,
+    minSimilarity: memberSims.length ? Math.min(...memberSims) : 1,
+    representativePageName: rep.pageName,
+    representativeTokens: rep.tokens,
+    highSimilarity,
+    lowSimilarity,
+    diffSimilarity,
+    outlierCount,
+  };
+}
+
 // ============================================================
 // MAIN ENTRY POINT
 // ============================================================
@@ -407,6 +474,29 @@ export async function runCosineSimilarity(
     });
   };
 
+  if (pages.length < 2) {
+    const elapsed = Math.round(performance.now() - startTime);
+    progress({
+      phase: 'complete',
+      progress: 100,
+      message: '✓ Complete',
+      detail: 'Need at least 2 pages to compare similarity',
+      pairsFound: 0,
+      clustersFormed: 0,
+      cost: 0,
+      tokensUsed: 0,
+      elapsedMs: elapsed,
+    });
+    return {
+      pairs: [],
+      clusters: [],
+      cost: 0,
+      tokensUsed: 0,
+      embeddingTimeMs: 0,
+      computeTimeMs: 0,
+    };
+  }
+
   // ── Phase 1: EMBED ──────────────────────────────
   progress({
     phase: 'embedding',
@@ -419,11 +509,13 @@ export async function runCosineSimilarity(
   const embResult = await getEmbeddings(
     pageNames, apiKey, model, signal,
     (done, total) => {
+      const batchPct = total > 0 ? Math.round((done / total) * 100) : 100;
+      const frac = total > 0 ? done / total : 0;
       progress({
         phase: 'embedding',
-        progress: 5 + Math.round((done / total) * 30), // 5-35%
+        progress: 5 + Math.round(frac * 30), // 5-35% (frac=0 if no batches)
         message: `Phase 1/3: Embedding ${pageNames.length} pages`,
-        detail: `Batch ${done}/${total} (${Math.round((done / total) * 100)}%)`,
+        detail: `Batch ${done}/${total} (${batchPct}%)`,
       });
     }
   );
@@ -449,7 +541,7 @@ export async function runCosineSimilarity(
   const pairs = await findSimilarPairs(
     pages, vectors, magnitudes, threshold, signal,
     (computed, total, pairsFound) => {
-      const pct = Math.round((computed / total) * 100);
+      const pct = total > 0 ? Math.round((computed / total) * 100) : 100;
       progress({
         phase: 'computing',
         progress: 38 + Math.round(pct * 0.5), // 38-88%

@@ -69,6 +69,30 @@ const FeatureIdeasTab: React.FC = () => {
       area: 'Data tables, filters, blocklist / dictionaries',
       why: 'Manual cleanup is faster with search/replace and batch tagging.',
     },
+    {
+      rank: 11,
+      title: 'CSV pipeline: keyword relevance check (good / unsure / bad)',
+      area: 'Import / CSV processing, data quality gates',
+      why: 'Automatic checks during CSV processing, on top of the existing initial pass. Each keyword gets a relevance label; anything marked bad is blocked immediately so off-topic rows never enter the workspace.',
+    },
+    {
+      rank: 12,
+      title: 'Token merge pass (lexical + semantic dedupe to higher volume)',
+      area: 'CSV / token management, keyword grouping',
+      why: 'Compare every token against all others; when two or more are lexically or semantically the same, merge them into the single token with the higher volume. Consolidates tokens and keywords so downstream KW management and grouping see fewer duplicates and more keywords can group when they share identical token sets after the merge.',
+    },
+    {
+      rank: 13,
+      title: 'Token tiers (broad / unsure / unique) + one-click merge of all unique',
+      area: 'Token management, Auto-group, Grouped tab',
+      why: 'Flag each token as broad, unsure, or unique—unique means low likelihood of useful synonyms. A button next to token management runs through unique tokens one by one and queues each token’s keywords for auto-merge; resulting groups appear on the Grouped tab.',
+    },
+    {
+      rank: 14,
+      title: 'Unique-token priority score (1–4, custom prompt)',
+      area: 'Token management, LLM / prompts',
+      why: 'For tokens flagged unique, rank how uniquely specific they are on a 1–4 scale using a custom prompt so users can prioritize which edge cases deserve attention first.',
+    },
   ];
 
   return (
@@ -100,7 +124,7 @@ const FeatureIdeasTab: React.FC = () => {
       </div>
 
       <div>
-        <h3 className="text-sm font-semibold text-zinc-800 mb-3">Top 10 (ordered)</h3>
+        <h3 className="text-sm font-semibold text-zinc-800 mb-3">Backlog (ordered)</h3>
         <ul className="space-y-3">
           {ideas.map((item) => (
             <li

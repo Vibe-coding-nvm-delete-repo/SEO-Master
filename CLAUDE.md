@@ -1,5 +1,6 @@
 # CLAUDE.md — AI Agent Instructions
 
+> **Consolidated checklist:** see [`AGENTS.md`](./AGENTS.md) (entry point for agents + debt prevention + testing expectations).
 > For architecture details, see `ARCHITECTURE.md`.
 > For development workflow rules, see `CONTRIBUTING.md`.
 

@@ -2,6 +2,7 @@ import { db } from './firebase';
 import { collection, deleteDoc, doc, getDocFromServer, getDocs, getDocsFromServer, setDoc, writeBatch } from 'firebase/firestore';
 import type {
   ActivityLogEntry,
+  AutoMergeRecommendation,
   AutoGroupSuggestion,
   BlockedKeyword,
   ClusterSummary,
@@ -24,8 +25,17 @@ const IDB_VERSION = 2;
 const FIRESTORE_PROJECTS_COLLECTION = 'projects';
 const APP_SETTINGS_COLLECTION = 'app_settings';
 const APP_PREFS_DOC = 'user_preferences';
-const CHUNK_SIZE = 400;
+/** Rows per chunk — keep under Firestore’s ~1 MiB/doc limit for heavy rows + nested cluster data */
+const CHUNK_SIZE = 200;
 const CHUNKS_SUBCOLLECTION = 'chunks';
+
+/**
+ * Firestore rejects nested `undefined` values; IDB saves already use JSON round-trip.
+ * Apply the same normalization before `batch.set` so cloud sync matches local persistence.
+ */
+export function sanitizeJsonForFirestore<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 interface GroupCollections {
   groupedClusters: GroupedCluster[] | null | undefined;
@@ -46,6 +56,7 @@ export interface ProjectDataPayload {
   activityLog: ActivityLogEntry[];
   tokenMergeRules: TokenMergeRule[];
   autoGroupSuggestions: AutoGroupSuggestion[];
+  autoMergeRecommendations?: AutoMergeRecommendation[];
   updatedAt: string;
   /** Incrementing save counter — persisted so that on reload we can reject stale
    *  Firestore snapshots that predate the IDB data (prevents data loss on refresh). */
@@ -145,6 +156,7 @@ export const buildProjectDataPayloadFromChunkDocs = (
   const clusterChunks: { index: number; data: ClusterSummary[] }[] = [];
   const blockedChunks: { index: number; data: BlockedKeyword[] }[] = [];
   const suggestionChunks: { index: number; data: AutoGroupSuggestion[] }[] = [];
+  const autoMergeChunks: { index: number; data: AutoMergeRecommendation[] }[] = [];
   // grouped/approved chunk docs can briefly lag behind `chunks/meta` updates during
   // multi-batch writes. We include `saveId` so we can detect and ignore those snapshots.
   const groupedChunks: { index: number; data: GroupedCluster[]; saveId: unknown }[] = [];
@@ -157,6 +169,7 @@ export const buildProjectDataPayloadFromChunkDocs = (
     else if (chunk.type === 'clusters') clusterChunks.push({ index: chunk.index, data: chunk.data });
     else if (chunk.type === 'blocked') blockedChunks.push({ index: chunk.index, data: chunk.data });
     else if (chunk.type === 'suggestions') suggestionChunks.push({ index: chunk.index, data: chunk.data });
+    else if (chunk.type === 'auto_merge') autoMergeChunks.push({ index: chunk.index, data: chunk.data });
     else if (chunk.type === 'grouped')
       groupedChunks.push({ index: chunk.index, data: chunk.data, saveId: chunk.saveId ?? null });
     else if (chunk.type === 'approved')
@@ -186,6 +199,7 @@ export const buildProjectDataPayloadFromChunkDocs = (
   const clusterSpan = impliedChunkSpan(clusterChunks);
   const blockedSpan = impliedChunkSpan(blockedChunks);
   const suggestionSpan = impliedChunkSpan(suggestionChunks);
+  const autoMergeSpan = impliedChunkSpan(autoMergeChunks);
   const groupedSpan = impliedChunkSpan(groupedChunks);
   const approvedSpan = impliedChunkSpan(approvedChunks);
 
@@ -193,6 +207,7 @@ export const buildProjectDataPayloadFromChunkDocs = (
   const clusterCountMeta = meta.clusterChunkCount ?? clusterSpan;
   const blockedCountMeta = meta.blockedChunkCount ?? blockedSpan;
   const suggestionCountMeta = meta.suggestionChunkCount ?? suggestionSpan;
+  const autoMergeCountMeta = meta.autoMergeChunkCount ?? autoMergeSpan;
   const groupedCountMeta = meta.groupedClusterCount ?? groupedSpan;
   const approvedCountMeta = meta.approvedGroupCount ?? approvedSpan;
 
@@ -200,8 +215,15 @@ export const buildProjectDataPayloadFromChunkDocs = (
   if (clusterChunks.length > 0 && clusterSpan < clusterCountMeta) return null;
   if (blockedChunks.length > 0 && blockedSpan < blockedCountMeta) return null;
   if (suggestionChunks.length > 0 && suggestionSpan < suggestionCountMeta) return null;
+  if (autoMergeChunks.length > 0 && autoMergeSpan < autoMergeCountMeta) return null;
   if (groupedChunks.length > 0 && groupedSpan < groupedCountMeta) return null;
   if (approvedChunks.length > 0 && approvedSpan < approvedCountMeta) return null;
+
+  // Auto-merge recommendations are chunked as well; if meta expects chunks but none
+  // are visible yet, treat as an incomplete snapshot (same safety pattern as grouped/approved).
+  if (autoMergeChunks.length === 0 && autoMergeCountMeta > 0) {
+    return null;
+  }
 
   // New scheme: grouped/approved live only in chunk docs — if meta expects chunks but none yet, wait.
   if (
@@ -223,6 +245,7 @@ export const buildProjectDataPayloadFromChunkDocs = (
   const clusterCount = Math.max(clusterCountMeta, clusterSpan);
   const blockedCount = Math.max(blockedCountMeta, blockedSpan);
   const suggestionCount = Math.max(suggestionCountMeta, suggestionSpan);
+  const autoMergeCount = Math.max(autoMergeCountMeta, autoMergeSpan);
   const groupedCount = Math.max(groupedCountMeta, groupedSpan);
   const approvedCount = Math.max(approvedCountMeta, approvedSpan);
 
@@ -240,6 +263,10 @@ export const buildProjectDataPayloadFromChunkDocs = (
     .flatMap((chunk) => chunk.data);
   const autoGroupSuggestions = suggestionChunks
     .filter((chunk) => chunk.index < suggestionCount)
+    .sort((a, b) => a.index - b.index)
+    .flatMap((chunk) => chunk.data);
+  const autoMergeRecommendations = autoMergeChunks
+    .filter((chunk) => chunk.index < autoMergeCount)
     .sort((a, b) => a.index - b.index)
     .flatMap((chunk) => chunk.data);
 
@@ -280,6 +307,7 @@ export const buildProjectDataPayloadFromChunkDocs = (
     activityLog: meta.activityLog || [],
     tokenMergeRules: meta.tokenMergeRules || [],
     autoGroupSuggestions,
+    autoMergeRecommendations,
     updatedAt: meta.updatedAt || new Date().toISOString(),
     lastSaveId,
   };
@@ -484,39 +512,46 @@ export const saveProjectDataToFirestore = async (
 ) => {
   options?.onSyncStatus?.('syncing');
   try {
+    const dataClean = sanitizeJsonForFirestore(data);
+
     const chunksRef = collection(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION);
 
     // Fetch existing chunks in background — don't block the write path
     const existingChunksPromise = getDocs(chunksRef).catch(() => null);
 
-    const results = data.results || [];
+    const results = dataClean.results || [];
     const resultChunks: ProcessedRow[][] = [];
     for (let i = 0; i < results.length; i += CHUNK_SIZE) {
       resultChunks.push(results.slice(i, i + CHUNK_SIZE));
     }
 
-    const clusters = data.clusterSummary || [];
+    const clusters = dataClean.clusterSummary || [];
     const clusterChunks: ClusterSummary[][] = [];
     for (let i = 0; i < clusters.length; i += CHUNK_SIZE) {
       clusterChunks.push(clusters.slice(i, i + CHUNK_SIZE));
     }
 
-    const blocked = data.blockedKeywords || [];
+    const blocked = dataClean.blockedKeywords || [];
     const blockedChunks: BlockedKeyword[][] = [];
     for (let i = 0; i < blocked.length; i += CHUNK_SIZE) {
       blockedChunks.push(blocked.slice(i, i + CHUNK_SIZE));
     }
 
-    const suggestions = data.autoGroupSuggestions || [];
+    const suggestions = dataClean.autoGroupSuggestions || [];
     const suggestionChunks: AutoGroupSuggestion[][] = [];
     for (let i = 0; i < suggestions.length; i += CHUNK_SIZE) {
       suggestionChunks.push(suggestions.slice(i, i + CHUNK_SIZE));
     }
+    const autoMergeRecommendations = dataClean.autoMergeRecommendations || [];
+    const autoMergeChunks: AutoMergeRecommendation[][] = [];
+    for (let i = 0; i < autoMergeRecommendations.length; i += CHUNK_SIZE) {
+      autoMergeChunks.push(autoMergeRecommendations.slice(i, i + CHUNK_SIZE));
+    }
 
     // groupedClusters / approvedGroups are stored chunked to avoid Firestore's 1MB doc limit.
     // (Previously they lived inside `chunks/meta`, which breaks for large group sizes.)
-    const groupedClusters = data.groupedClusters || [];
-    const approvedGroups = data.approvedGroups || [];
+    const groupedClusters = dataClean.groupedClusters || [];
+    const approvedGroups = dataClean.approvedGroups || [];
     const GROUPED_CHUNK_SIZE = 50;
     const groupedChunks: GroupedCluster[][] = [];
     const approvedChunks: GroupedCluster[][] = [];
@@ -545,6 +580,7 @@ export const saveProjectDataToFirestore = async (
     clusterChunks.forEach((chunk, idx) => addToBatch(`clusters_${idx}`, { type: 'clusters', index: idx, data: chunk }));
     blockedChunks.forEach((chunk, idx) => addToBatch(`blocked_${idx}`, { type: 'blocked', index: idx, data: chunk }));
     suggestionChunks.forEach((chunk, idx) => addToBatch(`suggestions_${idx}`, { type: 'suggestions', index: idx, data: chunk }));
+    autoMergeChunks.forEach((chunk, idx) => addToBatch(`auto_merge_${idx}`, { type: 'auto_merge', index: idx, data: chunk }));
     approvedChunks.forEach((chunk, idx) =>
       addToBatch(`approved_${idx}`, {
         type: 'approved',
@@ -565,20 +601,21 @@ export const saveProjectDataToFirestore = async (
       type: 'meta',
       saveId: options?.saveId ?? null,
       clientId: options?.clientId ?? null,
-      stats: data.stats || null,
-      datasetStats: data.datasetStats || null,
-      tokenSummary: data.tokenSummary || null,
+      stats: dataClean.stats || null,
+      datasetStats: dataClean.datasetStats || null,
+      tokenSummary: dataClean.tokenSummary || null,
       groupedClusterCount: groupedChunks.length,
       approvedGroupCount: approvedChunks.length,
-      blockedTokens: data.blockedTokens || [],
-      labelSections: data.labelSections || [],
-      activityLog: (data.activityLog || []).slice(0, 500),
-      tokenMergeRules: data.tokenMergeRules || [],
+      blockedTokens: dataClean.blockedTokens || [],
+      labelSections: dataClean.labelSections || [],
+      activityLog: (dataClean.activityLog || []).slice(0, 500),
+      tokenMergeRules: dataClean.tokenMergeRules || [],
       updatedAt: new Date().toISOString(),
       resultChunkCount: resultChunks.length,
       clusterChunkCount: clusterChunks.length,
       blockedChunkCount: blockedChunks.length,
       suggestionChunkCount: suggestionChunks.length,
+      autoMergeChunkCount: autoMergeChunks.length,
     });
 
     if (ops > 0) writeBatches.push(batch.commit());
@@ -613,6 +650,7 @@ export const saveProjectDataToFirestore = async (
         ...clusterChunks.map((_, idx) => `clusters_${idx}`),
         ...blockedChunks.map((_, idx) => `blocked_${idx}`),
         ...suggestionChunks.map((_, idx) => `suggestions_${idx}`),
+        ...autoMergeChunks.map((_, idx) => `auto_merge_${idx}`),
         ...groupedChunks.map((_, idx) => `grouped_${idx}`),
         ...approvedChunks.map((_, idx) => `approved_${idx}`),
       ]);

@@ -1,0 +1,169 @@
+/**
+ * Group Data tab: sub-tab, filters, sort, pagination, search, label/token selection, token management panel.
+ * P1.1 — extracted from App.tsx; behavior must match the previous inline implementation.
+ */
+
+import { useCallback, useState, useTransition, type Dispatch, type SetStateAction } from 'react';
+import type { ClusterSummary, TokenSummary } from '../types';
+
+export type GroupDataTab = 'pages' | 'keywords' | 'grouped' | 'approved' | 'blocked' | 'auto-group';
+
+export interface UseKeywordWorkspaceInput {
+  setSelectedClusters: Dispatch<SetStateAction<Set<string>>>;
+}
+
+export function useKeywordWorkspace({ setSelectedClusters }: UseKeywordWorkspaceInput) {
+  const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
+  const [selectedSubClusters, setSelectedSubClusters] = useState<Set<string>>(new Set()); // key: "groupId::clusterTokens"
+  const [activeTab, setActiveTab] = useState<GroupDataTab>('pages');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(500);
+  const [, startTransition] = useTransition();
+  const switchTab = useCallback((tab: GroupDataTab) => {
+    startTransition(() => {
+      setActiveTab(tab);
+      setCurrentPage(1);
+      setSelectedClusters(new Set());
+      setSelectedGroups(new Set());
+      setSelectedSubClusters(new Set());
+    });
+  }, [setSelectedClusters]);
+  const [statsExpanded, setStatsExpanded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const setSearchImmediate = useCallback((value: string) => {
+    setSearchQuery(value);
+    startTransition(() => setDebouncedSearchQuery(value));
+  }, []);
+  const [minClusterCount, setMinClusterCount] = useState<string>('');
+  const [maxClusterCount, setMaxClusterCount] = useState<string>('');
+  const [minTokenLen, setMinTokenLen] = useState<string>('');
+  const [maxTokenLen, setMaxTokenLen] = useState<string>('');
+  const [excludedLabels, setExcludedLabels] = useState<Set<string>>(new Set());
+  const [selectedTokens, setSelectedTokens] = useState<Set<string>>(new Set());
+  const [isLabelDropdownOpen, setIsLabelDropdownOpen] = useState(false);
+  const [sortConfig, setSortConfig] = useState<Array<{ key: keyof ClusterSummary; direction: 'asc' | 'desc' }>>([
+    { key: 'totalVolume', direction: 'desc' },
+  ]);
+  const [tokenSortConfig, setTokenSortConfig] = useState<{ key: keyof TokenSummary; direction: 'asc' | 'desc' }>({
+    key: 'frequency',
+    direction: 'desc',
+  });
+  const [groupedSortConfig, setGroupedSortConfig] = useState<Array<{ key: string; direction: 'asc' | 'desc' }>>([
+    { key: 'keywordCount', direction: 'desc' },
+  ]);
+  /** All Keywords tab — multi-sort on ProcessedRow fields */
+  const [keywordsSortConfig, setKeywordsSortConfig] = useState<Array<{ key: string; direction: 'asc' | 'desc' }>>([
+    { key: 'searchVolume', direction: 'desc' },
+  ]);
+  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
+
+  const [filterCity, setFilterCity] = useState<string>('');
+  const [filterState, setFilterState] = useState<string>('');
+  const [minLen, setMinLen] = useState<string>('');
+  const [maxLen, setMaxLen] = useState<string>('');
+  const [minKwInCluster, setMinKwInCluster] = useState<string>('');
+  const [maxKwInCluster, setMaxKwInCluster] = useState<string>('');
+  const [minVolume, setMinVolume] = useState<string>('');
+  const [maxVolume, setMaxVolume] = useState<string>('');
+  const [minKd, setMinKd] = useState<string>('');
+  const [maxKd, setMaxKd] = useState<string>('');
+  const [minKwRating, setMinKwRating] = useState<string>('');
+  const [maxKwRating, setMaxKwRating] = useState<string>('');
+
+  const [tokenMgmtSearch, setTokenMgmtSearch] = useState('');
+  const [tokenMgmtSort, setTokenMgmtSort] = useState<{
+    key: 'token' | 'totalVolume' | 'frequency' | 'avgKd';
+    direction: 'asc' | 'desc';
+  }>({ key: 'totalVolume', direction: 'desc' });
+  const [selectedMgmtTokens, setSelectedMgmtTokens] = useState<Set<string>>(new Set());
+  const [tokenMgmtPage, setTokenMgmtPage] = useState(1);
+  const tokenMgmtPerPage = 100;
+  const [tokenMgmtSubTab, setTokenMgmtSubTab] = useState<'current' | 'all' | 'merge' | 'auto-merge' | 'blocked'>('current');
+  const [expandedMergeParents, setExpandedMergeParents] = useState<Set<string>>(new Set());
+
+  return {
+    selectedGroups,
+    setSelectedGroups,
+    selectedSubClusters,
+    setSelectedSubClusters,
+    activeTab,
+    setActiveTab,
+    switchTab,
+    statsExpanded,
+    setStatsExpanded,
+    error,
+    setError,
+    searchQuery,
+    setSearchQuery,
+    debouncedSearchQuery,
+    setDebouncedSearchQuery,
+    setSearchImmediate,
+    minClusterCount,
+    setMinClusterCount,
+    maxClusterCount,
+    setMaxClusterCount,
+    minTokenLen,
+    setMinTokenLen,
+    maxTokenLen,
+    setMaxTokenLen,
+    excludedLabels,
+    setExcludedLabels,
+    selectedTokens,
+    setSelectedTokens,
+    isLabelDropdownOpen,
+    setIsLabelDropdownOpen,
+    sortConfig,
+    setSortConfig,
+    tokenSortConfig,
+    setTokenSortConfig,
+    groupedSortConfig,
+    setGroupedSortConfig,
+    keywordsSortConfig,
+    setKeywordsSortConfig,
+    currentPage,
+    setCurrentPage,
+    itemsPerPage,
+    setItemsPerPage,
+    expandedClusters,
+    setExpandedClusters,
+    filterCity,
+    setFilterCity,
+    filterState,
+    setFilterState,
+    minLen,
+    setMinLen,
+    maxLen,
+    setMaxLen,
+    minKwInCluster,
+    setMinKwInCluster,
+    maxKwInCluster,
+    setMaxKwInCluster,
+    minVolume,
+    setMinVolume,
+    maxVolume,
+    setMaxVolume,
+    minKd,
+    setMinKd,
+    maxKd,
+    setMaxKd,
+    minKwRating,
+    setMinKwRating,
+    maxKwRating,
+    setMaxKwRating,
+    tokenMgmtSearch,
+    setTokenMgmtSearch,
+    tokenMgmtSort,
+    setTokenMgmtSort,
+    selectedMgmtTokens,
+    setSelectedMgmtTokens,
+    tokenMgmtPage,
+    setTokenMgmtPage,
+    tokenMgmtPerPage,
+    tokenMgmtSubTab,
+    setTokenMgmtSubTab,
+    expandedMergeParents,
+    setExpandedMergeParents,
+  };
+}

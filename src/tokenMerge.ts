@@ -98,6 +98,8 @@ export function rebuildClusters(results: ProcessedRow[]): ClusterSummary[] {
     let totalVolume = 0;
     let totalKd = 0;
     let kdCount = 0;
+    let totalKwRating = 0;
+    let kwRatingCount = 0;
     const labels = new Set<string>();
     let locationCity: string | null = null;
     let locationState: string | null = null;
@@ -106,6 +108,10 @@ export function rebuildClusters(results: ProcessedRow[]): ClusterSummary[] {
     for (const row of data.rows) {
       totalVolume += row.searchVolume;
       if (row.kd !== null) { totalKd += row.kd; kdCount++; }
+      if (row.kwRating !== undefined && row.kwRating !== null) {
+        totalKwRating += row.kwRating;
+        kwRatingCount++;
+      }
       if (row.labelArr) row.labelArr.forEach(l => labels.add(l));
       if (row.locationCity) locationCity = row.locationCity;
       if (row.locationState) locationState = row.locationState;
@@ -115,6 +121,7 @@ export function rebuildClusters(results: ProcessedRow[]): ClusterSummary[] {
         kd: row.kd,
         locationCity: row.locationCity,
         locationState: row.locationState,
+        ...(row.kwRating != null ? { kwRating: row.kwRating } : {}),
       });
     }
 
@@ -127,6 +134,7 @@ export function rebuildClusters(results: ProcessedRow[]): ClusterSummary[] {
       keywordCount: data.rows.length,
       totalVolume,
       avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
+      avgKwRating: kwRatingCount > 0 ? Math.round(totalKwRating / kwRatingCount) : null,
       label: Array.from(labels).join(', '),
       labelArr: Array.from(labels),
       locationCity,
@@ -145,8 +153,10 @@ function recalcGroupStats(group: GroupedCluster, clusters: ClusterSummary[]): Gr
   const totalVolume = clusters.reduce((s, c) => s + c.totalVolume, 0);
   const keywordCount = clusters.reduce((s, c) => s + c.keywordCount, 0);
   let totalKd = 0, kdCount = 0;
+  let totalKw = 0, kwCount = 0;
   clusters.forEach(c => {
     if (c.avgKd !== null) { totalKd += c.avgKd * c.keywordCount; kdCount += c.keywordCount; }
+    if (c.avgKwRating != null) { totalKw += c.avgKwRating * c.keywordCount; kwCount += c.keywordCount; }
   });
   return {
     ...group,
@@ -154,6 +164,28 @@ function recalcGroupStats(group: GroupedCluster, clusters: ClusterSummary[]): Gr
     totalVolume,
     keywordCount,
     avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
+    avgKwRating: kwCount > 0 ? Math.round(totalKw / kwCount) : null,
+  };
+}
+
+/**
+ * When `ProcessedRow[]` changes without token signature changes (e.g. kwRating batches),
+ * replace each group's nested `ClusterSummary` with rebuilt rows and recalc group aggregates.
+ */
+export function refreshGroupsFromClusterSummaries(
+  groupedClusters: GroupedCluster[],
+  approvedGroups: GroupedCluster[],
+  newSummaries: ClusterSummary[],
+): { groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[] } {
+  const byTokens = new Map(newSummaries.map(c => [c.tokens, c]));
+  const refresh = (groups: GroupedCluster[]) =>
+    groups.map(g => {
+      const clusters = g.clusters.map(c => byTokens.get(c.tokens) ?? c);
+      return recalcGroupStats({ ...g, clusters }, clusters);
+    });
+  return {
+    groupedClusters: refresh(groupedClusters),
+    approvedGroups: refresh(approvedGroups),
   };
 }
 
