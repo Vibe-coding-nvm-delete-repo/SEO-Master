@@ -3,6 +3,10 @@ import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { Loader2, Play, Square, Settings, ChevronDown, Search, Check, AlertCircle, X, Trash2, RotateCcw, Copy, Clock, Download, Zap, ScrollText, RefreshCw, Globe, HelpCircle, Star } from 'lucide-react';
 import { db } from './firebase';
 import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
+import { useToast } from './ToastContext';
+import { reportPersistFailure } from './persistenceErrors';
+import { markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import InlineHelpHint from './InlineHelpHint';
 
 // ============ Types ============
 interface GenerateRow {
@@ -39,7 +43,7 @@ interface LogEntry {
 interface GenerateSettings {
   apiKey: string;
   selectedModel: string;
-  rateLimit: number; // 10-500 concurrent
+  rateLimit: number; // 1-100 concurrent
   minLen: number; // min output character count (0 = no minimum)
   maxLen: number; // max output character count (0 = no maximum)
   maxRetries: number; // max retries per row for len enforcement
@@ -66,8 +70,14 @@ const makeEmptyRows = (count: number): GenerateRow[] =>
 // ============ Tooltip helper ============
 function Tip({ text }: { text: string }) {
   return (
-    <span className="inline-flex ml-0.5 align-middle" title={text}>
-      <HelpCircle className="w-3 h-3 text-zinc-300 hover:text-zinc-500 transition-colors cursor-help" />
+    <span className="inline-flex ml-0.5 align-middle cursor-help">
+      <InlineHelpHint
+        text={text}
+        className="inline-flex items-center"
+        ariaLabel={text}
+      >
+        <HelpCircle className="w-3 h-3 text-zinc-300 hover:text-zinc-500 transition-colors" />
+      </InlineHelpHint>
     </span>
   );
 }
@@ -259,6 +269,7 @@ interface GenerateTabProps {
 }
 
 const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey = '', starredModels, onToggleStar }: GenerateTabProps) {
+  const { addToast } = useToast();
   const suffix = storageKey; // e.g. '' or '_2'
   // Table state — initialize empty, then load from IDB
   const [rows, setRows] = useState<GenerateRow[]>(makeEmptyRows(20));
@@ -275,6 +286,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   useEffect(() => {
     let alive = true;
     const unsub = onSnapshot(doc(db, 'app_settings', `generate_rows${suffix}`), async (snap) => {
+      markListenerSnapshot(`generate_rows${suffix}`, snap);
       try {
         if (!alive) return;
         if (snap.exists()) {
@@ -312,12 +324,20 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
         lastSavedRowsJsonRef.current = JSON.stringify([]);
         setIsLoaded(true);
       }
+    }, (err) => {
+      markListenerError(`generate_rows${suffix}`);
+      reportPersistFailure(addToast, 'generate rows sync', err);
+      if (alive) {
+        setRows(makeEmptyRows(20));
+        lastSavedRowsJsonRef.current = JSON.stringify([]);
+        setIsLoaded(true);
+      }
     });
     return () => {
       alive = false;
       if (typeof unsub === 'function') unsub();
     };
-  }, [suffix]);
+  }, [suffix, addToast]);
 
   // Debounced save to IDB + Firestore when rows change (skip initial load)
   // During generation: save at most every 5s (interval-based, not debounced) so data isn't lost if tab closes
@@ -352,24 +372,24 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
           setDoc(doc(db, 'app_settings', `generate_rows${suffix}_chunk_${i}`), {
             rows: chunk,
             updatedAt,
-          }).catch(e => console.warn(`Firestore generate rows chunk ${i} save error:`, e));
+          }).catch((e) => reportPersistFailure(addToast, `generate rows chunk ${i}`, e));
         });
         setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
           chunked: true,
           chunkCount: chunks.length,
           totalRows: rowsToSave.length,
           updatedAt,
-        }).catch(e => console.warn('Firestore generate rows meta save error:', e));
+        }).catch((e) => reportPersistFailure(addToast, 'generate rows meta', e));
       } else {
         setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
           rows: rowsToSave,
           updatedAt: new Date().toISOString(),
-        }).catch(e => console.warn('Firestore generate rows save error:', e));
+        }).catch((e) => reportPersistFailure(addToast, 'generate rows', e));
       }
     } catch (e) {
       console.warn('doSave error:', e);
     }
-  }, [suffix]);
+  }, [suffix, addToast]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -394,6 +414,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   // Load logs from Firestore and keep them live-synced
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', `generate_logs${suffix}`), (snap) => {
+      markListenerSnapshot(`generate_logs${suffix}`, snap);
       if (snap.exists()) {
         const logData = snap.data();
         if (logData?.logs && Array.isArray(logData.logs)) {
@@ -404,11 +425,13 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       }
       setLogs([]);
       logsLoadedRef.current = true;
-    }, () => {
+    }, (err) => {
+      markListenerError(`generate_logs${suffix}`);
+      reportPersistFailure(addToast, 'generate logs sync', err);
       logsLoadedRef.current = true;
     });
     return () => { if (typeof unsub === 'function') unsub(); };
-  }, [suffix]);
+  }, [suffix, addToast]);
 
   // Save logs when they change
   const logSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -418,10 +441,12 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     logSaveTimerRef.current = setTimeout(async () => {
       // Keep only last 500 log entries
       const trimmed = logs.slice(-500);
-      setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), { logs: trimmed, updatedAt: new Date().toISOString() }).catch(() => {});
+      setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), { logs: trimmed, updatedAt: new Date().toISOString() }).catch((e) =>
+        reportPersistFailure(addToast, 'generate logs', e),
+      );
     }, 1000);
     return () => { if (logSaveTimerRef.current) clearTimeout(logSaveTimerRef.current); };
-  }, [logs, suffix]);
+  }, [logs, suffix, addToast]);
 
   // Add a log entry with optional structured data
   const addLog = useCallback((action: string, details: string, extra?: Partial<LogEntry>) => {
@@ -432,7 +457,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const [settings, setSettings] = useState<GenerateSettings>({
     apiKey: '',
     selectedModel: '',
-    rateLimit: 10,
+    rateLimit: 5,
     minLen: 0,
     maxLen: 0,
     maxRetries: 3,
@@ -467,6 +492,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeCountRef = useRef(0);
   const [rateLimitCount, setRateLimitCount] = useState(0); // 429 errors in current batch
+  const throttledToastLevelRef = useRef(0); // 0 none, 1 mild, 2 severe
 
   // Throughput tracking — timestamps of completed rows (shared with GenerationTimer)
   const completionTimestamps = useRef<number[]>([]);
@@ -494,6 +520,29 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
     }
     // Scale-down is handled inside processNext — excess workers exit naturally after their current item
   }, [settings.rateLimit, isGenerating]);
+
+  // Surface hard-to-miss warnings when concurrency is too high for the current model/account.
+  useEffect(() => {
+    if (!isGenerating) {
+      throttledToastLevelRef.current = 0;
+      return;
+    }
+    const suggested = Math.max(1, Math.floor(settings.rateLimit / 2));
+    if (rateLimitCount >= 3 && throttledToastLevelRef.current < 1) {
+      throttledToastLevelRef.current = 1;
+      addToast(
+        `OpenRouter is throttling requests (429). Concurrency ${settings.rateLimit} may be too high — try ~${suggested}.`,
+        'warning',
+      );
+    }
+    if (rateLimitCount >= 10 && throttledToastLevelRef.current < 2) {
+      throttledToastLevelRef.current = 2;
+      addToast(
+        `Heavy throttling detected (${rateLimitCount}x 429). Throughput drops due to retry backoff — lower concurrency now.`,
+        'error',
+      );
+    }
+  }, [rateLimitCount, isGenerating, settings.rateLimit, addToast]);
 
   // Expanded output rows — click to toggle full output view
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
@@ -643,20 +692,21 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       setDoc(doc(db, 'app_settings', `generate_settings${suffix}`), {
         ...toSharedGenerateSettings(settings),
         updatedAt: new Date().toISOString(),
-      }).catch(e => console.warn('Firestore generate settings save error:', e));
+      }).catch((e) => reportPersistFailure(addToast, 'generate settings', e));
     }, 500);
     return () => { if (settingsSaveTimerRef.current) clearTimeout(settingsSaveTimerRef.current); };
-  }, [settings, suffix, toSharedGenerateSettings]);
+  }, [settings, suffix, toSharedGenerateSettings, addToast]);
 
   // Load settings from Firestore and keep them live-synced
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', `generate_settings${suffix}`), (snap) => {
+      markListenerSnapshot(`generate_settings${suffix}`, snap);
       if (snap.exists()) {
         const data = snap.data();
         const fsSettings: GenerateSettings = {
           apiKey: data.apiKey || '',
           selectedModel: data.selectedModel || '',
-          rateLimit: data.rateLimit || 10,
+          rateLimit: Math.max(1, Math.min(100, Number(data.rateLimit) || 5)),
           minLen: data.minLen || 0,
           maxLen: data.maxLen || 0,
           maxRetries: data.maxRetries ?? 3,
@@ -672,7 +722,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       const defaultSettings: GenerateSettings = {
         apiKey: '',
         selectedModel: '',
-        rateLimit: 10,
+        rateLimit: 5,
         minLen: 0,
         maxLen: 0,
         maxRetries: 3,
@@ -683,11 +733,13 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
       lastSavedSettingsRef.current = JSON.stringify(toSharedGenerateSettings(defaultSettings));
       setSettings(defaultSettings);
       settingsLoadedRef.current = true;
-    }, () => {
+    }, (err) => {
+      markListenerError(`generate_settings${suffix}`);
+      reportPersistFailure(addToast, 'generate settings sync', err);
       settingsLoadedRef.current = true;
     });
     return () => { if (typeof unsub === 'function') unsub(); };
-  }, [suffix, toSharedGenerateSettings]);
+  }, [suffix, toSharedGenerateSettings, addToast]);
 
   // Close model dropdown on outside click — only listen when dropdown is actually open
   useEffect(() => {
@@ -728,7 +780,7 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
         setDoc(doc(db, 'app_settings', `generate_rows${suffix}`), {
           rows: rowsToSave,
           updatedAt: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch((e) => reportPersistFailure(addToast, 'generate rows (flush)', e));
       }
       // Flush pending log save timer
       if (logSaveTimerRef.current) {
@@ -741,12 +793,12 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
         setDoc(doc(db, 'app_settings', `generate_logs${suffix}`), {
           logs: trimmed,
           updatedAt: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch((e) => reportPersistFailure(addToast, 'generate logs (flush)', e));
       }
     } catch (e) {
       console.warn('flushAllSaves error:', e);
     }
-  }, [suffix]);
+  }, [suffix, addToast]);
 
   // beforeunload — flush on tab close / browser close
   useEffect(() => {
@@ -1633,17 +1685,17 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
                 <label className="block text-[10px] font-medium text-zinc-500 mb-1">Concurrent Requests ({settings.rateLimit})<Tip text="How many API requests run in parallel. Higher = faster but may hit rate limits (429 errors). Lower if you see 'throttled' warnings." /></label>
                 <input
                   type="range"
-                  min={10}
-                  max={500}
-                  step={5}
+                  min={1}
+                  max={100}
+                  step={1}
                   value={settings.rateLimit}
                   onChange={(e) => setSettings(prev => ({ ...prev, rateLimit: parseInt(e.target.value) }))}
                   className="w-full accent-indigo-600"
                 />
                 <div className="flex justify-between text-[10px] text-zinc-400">
-                  <span>10</span>
-                  <span>250</span>
-                  <span>500</span>
+                  <span>1</span>
+                  <span>50</span>
+                  <span>100</span>
                 </div>
               </div>
             </div>
@@ -1893,12 +1945,14 @@ const GenerateTabInstance = React.memo(function GenerateTabInstance({ storageKey
 
 // ============ Wrapper with sub-tabs ============
 export default function GenerateTab() {
+  const { addToast } = useToast();
   const [activeSubTab, setActiveSubTab] = useState<'1' | '2'>('1');
   const tabRef = useRef(activeSubTab);
   const [gen2Activated, setGen2Activated] = useState(() => activeSubTab === '2');
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'generate_active_subtab'), (snap) => {
+      markListenerSnapshot('generate_active_subtab', snap);
       if (!snap.exists()) return;
       const tab = snap.data()?.tab;
       if (tab === '1' || tab === '2') {
@@ -1906,9 +1960,12 @@ export default function GenerateTab() {
         setActiveSubTab(tab);
         if (tab === '2') setGen2Activated(true);
       }
+    }, (err) => {
+      markListenerError('generate_active_subtab');
+      reportPersistFailure(addToast, 'generate active subtab sync', err);
     });
     return () => { if (typeof unsub === 'function') unsub(); };
-  }, []);
+  }, [addToast]);
 
   // Starred models — shared across both instances, persisted to Firestore
   const [starredModels, setStarredModels] = useState<Set<string>>(() => new Set());
@@ -1917,14 +1974,17 @@ export default function GenerateTab() {
   // Load from Firestore and keep it live-synced
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'starred_models'), (snap) => {
+      markListenerSnapshot('starred_models', snap);
       const ids: string[] = snap.exists() ? (snap.data().ids || []) : [];
       setStarredModels(new Set(ids));
       starredLoadedRef.current = true;
-    }, () => {
+    }, (err) => {
+      markListenerError('starred_models');
+      reportPersistFailure(addToast, 'starred models sync (generate)', err);
       starredLoadedRef.current = true;
     });
     return () => { if (typeof unsub === 'function') unsub(); };
-  }, []);
+  }, [addToast]);
 
   const toggleStarModel = useCallback((modelId: string) => {
     setStarredModels(prev => {
@@ -1933,10 +1993,12 @@ export default function GenerateTab() {
       else next.add(modelId);
       const arr = [...next];
       // Persist to Firestore in background
-      setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch(() => {});
+      setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch((e) =>
+        reportPersistFailure(addToast, 'save starred models (generate)', e),
+      );
       return next;
     });
-  }, []);
+  }, [addToast]);
 
   const switchTab = useCallback((tab: '1' | '2') => {
     if (tabRef.current === tab) return; // Already on this tab — skip entirely
@@ -1944,10 +2006,10 @@ export default function GenerateTab() {
     setDoc(doc(db, 'app_settings', 'generate_active_subtab'), {
       tab,
       updatedAt: new Date().toISOString(),
-    }).catch(() => {});
+    }).catch((e) => reportPersistFailure(addToast, 'generate active subtab', e));
     if (tab === '2') setGen2Activated(true);
     setActiveSubTab(tab);
-  }, []);
+  }, [addToast]);
 
   return (
     <>

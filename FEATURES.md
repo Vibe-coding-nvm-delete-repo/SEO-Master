@@ -34,6 +34,9 @@
 - **DB lock tests:** database resolution is centralized (`resolveFirestoreDatabaseId`) and covered by tests that enforce lock behavior for missing, matching, and invalid env values.
 - Chunk hydration reconciles `meta` chunk counts with visible chunk docs so mid-save Firestore snapshots cannot drop grouped/approved rows; grouped/approved chunk docs are stamped with `saveId` and hydration rejects snapshots where chunk `saveId` doesn’t match `meta.saveId`
 - Active project ID persisted in localStorage for session restore
+- **Sync failure visibility:** Firestore listener errors and failed writes for project chunks, group review settings, starred models, universal blocked tokens, and project rename surface a toast plus `[PERSIST]` console context (see `persistenceErrors.ts`).
+- **P0.1 atomic paths:** Remove-from-approved and ungroup flows call `removeFromApproved` / `ungroupPages` in `useProjectPersistence` (with matching `results` row rebuilds); project list fileName display uses `syncFileNameLocal`; CSV processing uses `syncFileNameLocal` when a project is active; Reset uses `clearProject()` when a project is active. The persistence hook’s `removeFromApproved` no longer pushes whole approved groups’ clusters into `clusterSummary` (that matched the previous App `bulkSet` behavior, not the buggy unused hook path).
+- **Generate tab sync:** Generate 1/2 Firestore saves and listeners use the same toast + `reportPersistFailure` pattern as the Group tab.
 
 ---
 
@@ -81,11 +84,22 @@
 ## 3. Keyword Management (Left Panel)
 
 ### Tabs
-1. Keywords — All individual processed keywords
-2. Pages — Clustered keywords (one row per unique token signature)
-3. Tokens — Individual tokens with aggregated stats
-4. Grouped — Manually or auto-grouped clusters
-5. Blocked — Keywords blocked during processing
+1. Auto-Group — Filtered auto-group workflow
+2. Ungrouped — Clustered keywords (one row per unique token signature); **Rating** shows cluster average (1–3) from rated keywords
+3. **All Keywords** — Every processed keyword row (page name, tokens, keyword, volume, KD, **Rating**, label, city, state)
+4. Grouped — Manually or auto-grouped clusters; **Rating** is the group aggregate (weighted by keyword count)
+5. Approved — Approved groups (same columns as Grouped, including **Rating**)
+6. Blocked — Keywords blocked during processing; **Rating** when known (e.g. token-block rows carry `kwRating` from results)
+
+### LLM keyword relevance (All Keywords)
+- **Rate KWs** (compact control under Keyword Management): two-phase OpenRouter job using the **same API key** as Group Review; configure a **separate model, temperature, concurrency, max tokens, reasoning, and rating prompt** under **Keyword relevance rating** in the Group Review settings panel.
+- **Phase 1 — Core intent summary:** model outputs JSON summarizing the shared semantic intent of all keywords; stored in settings (read-only textarea + timestamp).
+- **Phase 2 — Per-keyword ratings:** each keyword receives JSON `{"rating":1|2|3}` (1 = relevant to core intent, 2 = unsure, 3 = not relevant). Ratings appear in the **Rating** column with soft green / amber / red styling.
+- **Filters:** min/max **Rating** (1–3); rows without a rating are excluded when either bound is set.
+- **Progress:** bar, percent, done/total; live **1 / 2 / 3** counts (same styling as the Rating column); **elapsed time**, **OpenRouter cost** (`usage.cost` when returned), **prompt/completion token totals**, and **API call count** (1 summary + one per keyword); checkmark when complete; success toast summarizes counts + duration + cost when known; **Cancel** aborts in-flight requests.
+- **Persistence:** `kwRating` on each `ProcessedRow` is saved with the project (IndexedDB + Firestore); ratings are written in batches after each parallel chunk. Each batch merges into the **latest** results snapshot (ref + last merged write) so in-flight rating does not overwrite concurrent edits from a stale array.
+- **Live UI:** After each batch, `clusterSummary` is rebuilt from results and **Grouped** / **Approved** groups get fresh cluster rows + aggregates so **Ungrouped / Grouped / Approved** rating columns update in real time (not only after the job finishes).
+- **After refresh:** On project load (IDB/Firestore), `clusterSummary` and group cluster rows are **always rebuilt from `results`** so `kwRating` on rows is the source of truth — rating columns stay filled and the Rate KWs control shows **done** / partial progress from saved `kwRating` (job UI state itself is not persisted).
 
 ### Search
 - Unified search across all tabs
@@ -99,6 +113,7 @@
 - City/State filters: Text input filters
 - Volume range: Min/max volume
 - KD range: Min/max keyword difficulty
+- **Rating** range (all keyword-management tabs): Min/max 1–3; **All Keywords** filters per-row `kwRating`; **Ungrouped / Grouped / Approved** filter by cluster/group **average** rating; **Blocked** filters by stored rating when present
 - KW count range: Min/max keywords in cluster
 
 ### Sorting
@@ -183,6 +198,8 @@
 ### CSV Export
 - Export button downloads current view as CSV
 - Includes all columns with proper headers
+- Export buttons are available on both the `Grouped` and `Approved` tab toolbars
+- For `Grouped` and `Approved`, export downloads a single `.xlsx` file with 2 tabs: `Rows` and `Unique Groups` (page count, summed KWs, volume, avg KD, labels)
 
 ---
 
@@ -217,6 +234,7 @@
 - Two-panel layout: Keyword Management (left), Token Management (right)
 - Both panels at same vertical level
 - Compact project header
+- **Top status bar:** today’s date; two clocks with explicit prefixes — **Local:** (this device’s timezone, e.g. `America/Los_Angeles`) and **US Eastern (EST/EDT):** (`America/New_York`); **Status** badge (bordered pill, `Status` + line such as Cloud: synced) with **hover / focus / tap** (portal tooltip — structured panel with icons, sections, light gradient header, status-tinted accents; tight **4px** gap to anchor; not the slow browser `title` attribute) showing diagnostics (network, `first-db`, server snapshot, project id, flush queue, last save, listener channel errors) — not driven by one listener: **aggregated Firestore listener error callbacks** (projects list, project chunks, app_settings docs, Generate/AutoGroup/feedback/table width/group-review listeners, etc.), **any snapshot with server metadata** (`metadata.fromCache === false`) for “connected”, **project coalesced flush depth** (“Syncing…”), and **last project Firestore save success vs failure** from the persist queue. Copy: **Cloud: synced** / **Syncing…** / **Offline — saved locally** / **Sync problem — retry** / **Connecting…**
 
 ### Visual Design
 - Consistent font color hierarchy
@@ -245,7 +263,7 @@
 ### Generation
 - Click "Generate" to fire all pending rows
 - Status per row: Pending → Generating → Generated (or Error)
-- Batch parallel processing with configurable concurrency (10-100, default 10)
+- Batch parallel processing with configurable concurrency (1-100, default 5)
 - Stop button to abort mid-generation (in-flight rows revert to Pending)
 - Stats bar shows counts: total rows, generated, errors, generating, pending
 
@@ -253,7 +271,7 @@
 - OpenRouter API key input
 - Auto-fetches all available models when API key is entered
 - Model selector dropdown with search and cost display (price per million tokens)
-- Rate limit slider (10-100 concurrent requests)
+- Rate limit slider (1-100 concurrent requests)
 - Settings persisted to localStorage
 
 ### API Integration
@@ -315,12 +333,17 @@
 
 | Date | Change |
 |------|--------|
+| 2026-03-26 | Feature ideas tab: four new backlog items (CSV relevance gate, token merge pass, unique-token auto-merge + tiers, unique-token 1–4 priority ranking) |
+| 2026-03-26 | **Bugfixes:** Cosine similarity skips embedding when fewer than two pages (avoids useless API calls and NaN progress); grouped/approved sub-cluster keys parse only the first `::` so token strings containing `::` (e.g. cosine anchor pages) ungroup correctly |
+| 2026-03-26 | **Cosine Test** (Auto-Group sub-tab): **Send mismatches to Ungrouped** — after Initial Cosine QA flags mismatches, one click removes those pages from grouped clusters so they only appear under Cosine Ungrouped (manual step until automatic handling lands) |
+| 2026-03-26 | Grouped / Auto-Group QA: sub-page dots for **Mismatch** groups — green for pages that belong, red for mismatched; LLM mismatched page names normalized to canonical names; empty mismatch list shows amber (ambiguous) |
 | 2026-03-26 | Feedback queue: show full body text (no truncation) + per-row Copy button for full combined feedback content |
 | 2026-03-26 | Feedback submit resiliency: screenshot upload/auth failures now fall back to saving feedback text-only with warning toast |
 | 2026-03-26 | Feedback submit gate: issue reports no longer require the "what you expected" field; section is now optional in UI/body |
 | 2026-03-25 | **Feature ideas** main tab: read-only backlog + template at `/seo-magic/feature-ideas` (no IDB/Firestore) |
 | 2026-03-25 | Feedback modal: `FeedbackModalHost` (local state + portal to `document.body` so `App` does not re-render on open); overlay without blur; no transition animations on modal chrome |
 | 2026-03-26 | Realtime collaboration correctness: project saveId marker, conditional chunk cleanup, and realtime shared `user_preferences` syncing |
+| 2026-03-27 | Generate tab: lowered default concurrency to 5 and expanded slider to 1-100 to reduce 429 backoff stalls on slower/rate-limited models |
 | 2026-03-26 | Auto-Group: `Shift+1` now requires active filters and supports 1 matching page |
 | 2026-03-25 | Feedback modal ARIA (dialog, fieldsets, labels, radiogroup); queue: legacy rating “—” + sort/filter; firebase.ts module note |
 | 2026-03-25 | Feedback modal: mandatory area dropdown, severity/impact with color ramp, structured Q&A body; queue shows Area column |
@@ -392,6 +415,10 @@
 | 2026-03-24 | Editable project names (click-to-edit in breadcrumb + project cards) |
 | 2026-03-24 | Google SERP button + Copy button on all page/group names |
 | 2026-03-24 | Token click in Token Management → filters keyword management |
+| 2026-03-26 | Toast UI: smaller/thinner bottom-left, no animations, faster auto-dismiss |
+| 2026-03-26 | Fix old `/group/data/<key>` links: resolve by id suffix even if project name changes |
+| 2026-03-26 | Fixed keyword management AI review badge flicker during rapid auto-grouping by preserving last known approve/mismatch results and re-reviewing only when group membership changes |
+| 2026-03-26 | All Keywords tab: wired **Rating** column min/max filters (`kwRating`) through `FilterBag` / `useKeywordWorkspace`; filters apply to keyword rows; auto-group filter summary includes rating bounds |
 
 ---
 
