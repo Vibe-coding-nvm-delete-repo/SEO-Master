@@ -3255,7 +3255,11 @@ FAILURE CONDITIONS TO AVOID:
                 className="flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-zinc-400 leading-tight"
                 aria-label="Breadcrumb"
               >
-                <span className="text-zinc-600 font-medium">
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab(mainTab)}
+                  className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors"
+                >
                   {mainTab === 'group'
                     ? 'Group'
                     : mainTab === 'generate'
@@ -3269,11 +3273,21 @@ FAILURE CONDITIONS TO AVOID:
                           : mainTab === 'updates'
                             ? 'Updates'
                             : 'Feature ideas'}
-                </span>
+                </button>
                 {mainTab === 'group' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium capitalize">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (groupSubTab === 'data' && activeProjectId) {
+                          setActiveProjectId(null);
+                        } else {
+                          setGroupSubTab(groupSubTab);
+                        }
+                      }}
+                      className="text-zinc-600 font-medium capitalize hover:text-zinc-800 hover:underline transition-colors"
+                    >
                       {groupSubTab === 'data'
                         ? (activeProjectId ? 'Data' : 'Projects')
                         : groupSubTab === 'topics'
@@ -3283,11 +3297,15 @@ FAILURE CONDITIONS TO AVOID:
                             : groupSubTab === 'log'
                               ? 'Log'
                               : groupSubTab}
-                    </span>
+                    </button>
                     {groupSubTab === 'settings' && (
                       <>
                         <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                        <span className="text-zinc-600 font-medium">
+                        <button
+                          type="button"
+                          onClick={() => setSettingsSubTab(settingsSubTab)}
+                          className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors"
+                        >
                           {settingsSubTab === 'general'
                             ? 'General'
                             : settingsSubTab === 'how-it-works'
@@ -3295,7 +3313,7 @@ FAILURE CONDITIONS TO AVOID:
                               : settingsSubTab === 'dictionaries'
                                 ? 'Dictionaries'
                                 : 'Blocked'}
-                        </span>
+                        </button>
                       </>
                     )}
                     {groupSubTab === 'data' && activeProjectId && (
@@ -3334,9 +3352,13 @@ FAILURE CONDITIONS TO AVOID:
                           </button>
                         )}
                         <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                        <span className="text-zinc-600 font-medium capitalize">
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab(activeTab)}
+                          className="text-zinc-600 font-medium capitalize hover:text-zinc-800 hover:underline transition-colors"
+                        >
                           {activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'keywords' ? 'All Keywords' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
-                        </span>
+                        </button>
                       </>
                     )}
                   </>
@@ -3344,19 +3366,19 @@ FAILURE CONDITIONS TO AVOID:
                 {mainTab === 'generate' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium">Generate 1</span>
+                    <button type="button" onClick={() => navigateMainTab('generate')} className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors">Generate 1</button>
                   </>
                 )}
                 {mainTab === 'feedback' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium">Queue</span>
+                    <button type="button" onClick={() => navigateMainTab('feedback')} className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors">Queue</button>
                   </>
                 )}
                 {mainTab === 'feature-ideas' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium">Backlog</span>
+                    <button type="button" onClick={() => navigateMainTab('feature-ideas')} className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors">Backlog</button>
                   </>
                 )}
               </nav>
