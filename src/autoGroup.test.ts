@@ -42,48 +42,48 @@ function makePage(pageName: string, tokens: string[], volume = 1000, kwCount = 1
 }
 
 describe('buildTokenClusters', () => {
-  it('returns empty for empty input', () => {
-    expect(buildTokenClusters([])).toEqual([]);
+  it('returns empty for empty input', async () => {
+    expect(await buildTokenClusters([])).toEqual([]);
   });
 
-  it('creates single-page group for lone page with 2+ tokens', () => {
+  it('creates single-page group for lone page with 2+ tokens', async () => {
     const pages = [makePage('test page', ['a', 'b', 'c', 'd'])];
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     expect(clusters.length).toBe(1);
     expect(clusters[0].pageCount).toBe(1);
     expect(clusters[0].stage).toBe(1); // single-page stage
   });
 
-  it('clusters pages sharing 3 tokens at stage 3 (cascading)', () => {
+  it('clusters pages sharing 3 tokens at stage 3 (cascading)', async () => {
     const pages = [
       makePage('page a', ['x', 'y', 'z']),
       makePage('page b', ['x', 'y', 'z']),
     ];
     // These have identical signatures → identical cluster
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     expect(clusters.length).toBe(1);
     expect(clusters[0].isIdentical).toBe(true);
   });
 
-  it('cascading: 3-token overlap pages cluster at stage 3', () => {
+  it('cascading: 3-token overlap pages cluster at stage 3', async () => {
     const pages = [
       makePage('reverse mortgage rates', ['home', 'loan', 'price', 'reverse'], 5000),
       makePage('reverse mortgage calculator', ['calculator', 'home', 'loan', 'reverse'], 3000),
     ];
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     // They share 3 tokens (home, loan, reverse) — cascading catches this at stage 3
     const multiPageCluster = clusters.find(c => c.pageCount >= 2);
     expect(multiPageCluster).toBeDefined();
     expect(multiPageCluster!.stage).toBe(3);
   });
 
-  it('clusters pages with 4+ shared tokens', () => {
+  it('clusters pages with 4+ shared tokens', async () => {
     const pages = [
       makePage('best reverse mortgage rates', ['best', 'home', 'loan', 'price', 'reverse'], 5000),
       makePage('top reverse mortgage lenders', ['best', 'home', 'lender', 'loan', 'reverse'], 3000),
     ];
     // Shared: best, home, loan, reverse = 4 tokens ✓
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     expect(clusters.length).toBeGreaterThanOrEqual(1);
     const cluster = clusters.find(c => c.pageCount === 2);
     expect(cluster).toBeDefined();
@@ -93,43 +93,43 @@ describe('buildTokenClusters', () => {
     expect(cluster!.sharedTokens).toContain('reverse');
   });
 
-  it('identifies 100% identical token pages', () => {
+  it('identifies 100% identical token pages', async () => {
     const pages = [
       makePage('payday loans online', ['loan', 'online', 'payday'], 50000),
       makePage('online payday loans', ['loan', 'online', 'payday'], 30000),
     ];
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     expect(clusters.length).toBe(1);
     expect(clusters[0].isIdentical).toBe(true);
     expect(clusters[0].pageCount).toBe(2);
     expect(clusters[0].confidence).toBe('high');
   });
 
-  it('assigns high confidence to small clusters (≤8 pages)', () => {
+  it('assigns high confidence to small clusters (≤8 pages)', async () => {
     const tokens = ['best', 'home', 'loan', 'reverse'];
     const pages = Array.from({ length: 5 }, (_, i) =>
       makePage(`page ${i}`, [...tokens, `unique${i}`], 1000 * (i + 1))
     );
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     const cluster = clusters.find(c => c.pageCount >= 2 && !c.isIdentical);
     if (cluster) expect(cluster.confidence).toBe('high');
   });
 
-  it('assigns medium confidence to mid-size clusters (9-20 pages)', () => {
+  it('assigns medium confidence to mid-size clusters (9-20 pages)', async () => {
     const tokens = ['best', 'home', 'loan', 'reverse'];
     const pages = Array.from({ length: 15 }, (_, i) =>
       makePage(`page ${i}`, [...tokens, `unique${i}`], 1000 * (i + 1))
     );
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     const cluster = clusters.find(c => c.pageCount >= 9 && !c.isIdentical);
     if (cluster) expect(cluster.confidence).toBe('medium');
   });
 
-  it('assigns review confidence to large clusters with low stage', () => {
+  it('assigns review confidence to large clusters with low stage', async () => {
     const pages = Array.from({ length: 25 }, (_, i) =>
       makePage(`page ${i}`, ['a', 'b', `unique${i}`], 1000 * (i + 1))
     );
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     // Single-page clusters at stage 1 should be 'review'
     const singleClusters = clusters.filter(c => c.pageCount === 1);
     for (const c of singleClusters) {
@@ -137,26 +137,26 @@ describe('buildTokenClusters', () => {
     }
   });
 
-  it('does not assign a page to multiple clusters', () => {
+  it('does not assign a page to multiple clusters', async () => {
     const pages = [
       makePage('page a', ['t1', 't2', 't3', 't4', 't5'], 5000),
       makePage('page b', ['t1', 't2', 't3', 't4', 't6'], 4000),
       makePage('page c', ['t1', 't2', 't3', 't5', 't6'], 3000),
     ];
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     const allPageTokens = clusters.filter(c => !c.isIdentical).flatMap(c => c.pages.map(p => p.tokens));
     const unique = new Set(allPageTokens);
     expect(allPageTokens.length).toBe(unique.size); // No duplicates
   });
 
-  it('cascading handles pages with fewer than 4 tokens', () => {
+  it('cascading handles pages with fewer than 4 tokens', async () => {
     const pages = [
       makePage('short a', ['a', 'b'], 1000),
       makePage('short b', ['a', 'b'], 2000),  // identical to short a
       makePage('also short', ['a', 'c'], 2000),
       makePage('long enough', ['a', 'b', 'c', 'd', 'e'], 3000),
     ];
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     // short a + short b = identical cluster (2 tokens)
     // also short = single-page cluster
     // long enough = single-page cluster
@@ -166,7 +166,7 @@ describe('buildTokenClusters', () => {
     expect(identicalCluster!.pageCount).toBe(2);
   });
 
-  it('sorts clusters by confidence then volume', () => {
+  it('sorts clusters by confidence then volume', async () => {
     const pages = [
       // Identical pair (high confidence)
       makePage('identical a', ['x', 'y', 'z'], 100),
@@ -175,7 +175,7 @@ describe('buildTokenClusters', () => {
       makePage('overlap a', ['a', 'b', 'c', 'd', 'e'], 50000),
       makePage('overlap b', ['a', 'b', 'c', 'd', 'f'], 40000),
     ];
-    const clusters = buildTokenClusters(pages);
+    const clusters = await buildTokenClusters(pages);
     // High confidence clusters should come first
     if (clusters.length >= 2) {
       expect(clusters[0].confidence).toBe('high');
@@ -468,7 +468,7 @@ describe('parseAutoGroupResponse', () => {
 // ─── Cascading Clusters Tests ───
 
 describe('buildCascadingClusters', () => {
-  it('cascades from max tokens down to 2', () => {
+  it('cascades from max tokens down to 2', async () => {
     const pages = [
       makePage('5 token page a', ['a', 'b', 'c', 'd', 'e'], 5000),
       makePage('5 token page b', ['a', 'b', 'c', 'd', 'f'], 4000),
@@ -476,7 +476,7 @@ describe('buildCascadingClusters', () => {
       makePage('3 token page 2', ['a', 'b', 'h'], 2000),
       makePage('2 token page', ['a', 'i'], 1000),
     ];
-    const clusters = buildCascadingClusters(pages);
+    const clusters = await buildCascadingClusters(pages);
     // 5-token pages share 4 tokens (a,b,c,d) → stage 4 cluster
     const stage4 = clusters.find(c => c.stage === 4 && c.pageCount === 2);
     expect(stage4).toBeDefined();
@@ -489,13 +489,13 @@ describe('buildCascadingClusters', () => {
     expect(single!.stage).toBe(1);
   });
 
-  it('higher stages get priority over lower stages', () => {
+  it('higher stages get priority over lower stages', async () => {
     const pages = [
       makePage('p1', ['a', 'b', 'c', 'd', 'e'], 5000),
       makePage('p2', ['a', 'b', 'c', 'd', 'f'], 4000),
       makePage('p3', ['a', 'b', 'c', 'g', 'h'], 3000),
     ];
-    const clusters = buildCascadingClusters(pages);
+    const clusters = await buildCascadingClusters(pages);
     // p1+p2 share 4 tokens → stage 4
     // p3 shares only 3 with p1 (a,b,c) → but p1 already assigned at stage 4
     // p3 should NOT be in p1's cluster, should be separate
@@ -504,32 +504,32 @@ describe('buildCascadingClusters', () => {
     expect(stage4!.pages.map(p => p.pageName)).not.toContain('p3');
   });
 
-  it('excludes 1-token pages', () => {
+  it('excludes 1-token pages', async () => {
     const pages = [
       makePage('one token', ['a'], 1000),
       makePage('two tokens', ['a', 'b'], 2000),
     ];
-    const clusters = buildCascadingClusters(pages);
+    const clusters = await buildCascadingClusters(pages);
     const oneTokenCluster = clusters.find(c => c.pages.some(p => p.pageName === 'one token'));
     expect(oneTokenCluster).toBeUndefined();
   });
 
-  it('identical pages cluster at their token count stage', () => {
+  it('identical pages cluster at their token count stage', async () => {
     const pages = [
       makePage('page a', ['x', 'y', 'z'], 1000),
       makePage('page b', ['x', 'y', 'z'], 2000),
     ];
-    const clusters = buildCascadingClusters(pages);
+    const clusters = await buildCascadingClusters(pages);
     expect(clusters.length).toBe(1);
     expect(clusters[0].isIdentical).toBe(true);
     expect(clusters[0].stage).toBe(3); // 3 tokens = stage 3
   });
 
-  it('no page appears in multiple clusters', () => {
+  it('no page appears in multiple clusters', async () => {
     const pages = Array.from({ length: 20 }, (_, i) =>
       makePage(`page ${i}`, ['a', 'b', 'c', `t${i}`], 1000 * (i + 1))
     );
-    const clusters = buildCascadingClusters(pages);
+    const clusters = await buildCascadingClusters(pages);
     const allTokens = clusters.flatMap(c => c.pages.map(p => p.tokens));
     const unique = new Set(allTokens);
     expect(allTokens.length).toBe(unique.size);

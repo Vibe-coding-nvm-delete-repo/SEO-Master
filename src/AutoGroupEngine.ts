@@ -165,7 +165,7 @@ export function buildSingleTokenSuggestions(pages: ClusterSummary[]): AutoGroupS
  * Each stage removes matched pages from the pool before the next stage runs.
  * Pages with <2 tokens or no matches become 1-page clusters.
  */
-export function buildCascadingClusters(pages: ClusterSummary[]): AutoGroupCluster[] {
+export async function buildCascadingClusters(pages: ClusterSummary[]): Promise<AutoGroupCluster[]> {
   if (!pages || pages.length === 0) return [];
 
   const pageIndex = new Map<string, ClusterSummary>();
@@ -207,8 +207,10 @@ export function buildCascadingClusters(pages: ClusterSummary[]): AutoGroupCluste
     }
   }
 
-  // Phase 2: Cascade from maxTokens down to 2
+  // Phase 2: Cascade from maxTokens down to 2 (yield between stages to keep UI responsive)
   for (let stage = Math.min(maxTokens, MAX_TOKENS_PER_PAGE); stage >= 2; stage--) {
+    // Yield to browser between stages so UI stays responsive
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
     // Only consider pages not yet assigned and with enough tokens for this stage
     const remainingPages = pages.filter(p => !assignedPages.has(p.tokens) && p.tokenArr.length >= stage);
     if (remainingPages.length < 2) continue;
@@ -292,7 +294,7 @@ export function buildCascadingClusters(pages: ClusterSummary[]): AutoGroupCluste
   return allClusters;
 }
 
-// Keep old name as alias for backward compatibility
+// Keep old name as alias for backward compatibility (now async)
 export const buildTokenClusters = buildCascadingClusters;
 
 /** Count total pages covered by clusters (deduped) */
