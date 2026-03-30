@@ -15,7 +15,7 @@ export function tokenIncludesAnyTerm(token: string, terms: string[]): boolean {
   if (terms.length === 0) return true;
   const tokenLower = token.toLowerCase();
   for (const term of terms) {
-    if (tokenLower.includes(term.toLowerCase())) return true;
+    if (tokenLower.includes(term)) return true; // terms are already lowercased by parseTokenMgmtSearchTerms
   }
   return false;
 }
