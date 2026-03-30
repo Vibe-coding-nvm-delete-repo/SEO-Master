@@ -400,7 +400,7 @@ const ClusterRow = React.memo(({
     {isExpanded && row.keywords.map((kw, i) => (
       <tr
         key={pagesTabChildRowKey(row.pageName, i, kw.keyword)}
-        className="bg-zinc-50/70 border-b border-zinc-100"
+        className={`border-b border-zinc-100 ${i % 2 === 0 ? 'bg-zinc-50/70' : 'bg-zinc-100/50'}`}
       >
         <td className="px-3 py-0.5" aria-hidden />
         <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
@@ -641,8 +641,8 @@ const GroupedClusterRow = React.memo(({
       const isSubExpanded = expandedSubClusters.has(subId);
       return (
         <React.Fragment key={cIdx}>
-          <tr 
-            className="bg-indigo-50/40 hover:bg-indigo-50/70 transition-colors border-b border-zinc-100"
+          <tr
+            className={`hover:bg-indigo-50/70 transition-colors border-b border-zinc-100 ${cIdx % 2 === 0 ? 'bg-indigo-50/40' : 'bg-indigo-50/60'}`}
           >
             <td className="px-3 py-0.5" onClick={(e) => e.stopPropagation()}>
               <input 
@@ -744,7 +744,7 @@ const GroupedClusterRow = React.memo(({
           {isSubExpanded && cluster.keywords.map((kw, i) => (
             <tr
               key={groupedTabChildRowKey(subId, i, kw.keyword)}
-              className="bg-zinc-50/70 border-b border-zinc-100"
+              className={`border-b border-zinc-100 ${i % 2 === 0 ? 'bg-zinc-50/70' : 'bg-zinc-100/50'}`}
             >
               <td className="px-3 py-0.5" aria-hidden />
               <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
@@ -4885,10 +4885,10 @@ FAILURE CONDITIONS TO AVOID:
                                 </td>
                               </tr>
 
-                              {isExpanded && ruleRow.childTokens.map(childToken => {
+                              {isExpanded && ruleRow.childTokens.map((childToken, childIdx) => {
                                 const st = ruleRow.childStats[childToken];
                                 return (
-                                  <tr key={`${ruleRow.ruleId}::${childToken}`} className="hover:bg-zinc-50/30 transition-colors">
+                                  <tr key={`${ruleRow.ruleId}::${childToken}`} className={`transition-colors ${childIdx % 2 === 0 ? 'bg-zinc-50/50 hover:bg-zinc-50/70' : 'bg-zinc-100/40 hover:bg-zinc-100/60'}`}>
                                     <td className="px-2 py-1" onClick={(e) => e.stopPropagation()}>
                                       <input
                                         type="checkbox"
