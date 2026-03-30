@@ -1484,13 +1484,12 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
 
   const tipsRedflagsSource = useMemo(() => ({
     label: 'Sync from Metas/Slug/CTAs',
-    load: (loadMode?: ContentPipelineLoadMode) =>
+    load: () =>
       buildTipsRedflagsRowsFromFirestore({
         settingsDocId: scopedDocIds.tipsRedflagsSettings,
         fallbackPrompt: PRO_TIP_DEFAULT_PROMPT,
         sourceRowsDocId: scopedDocIds.metasSlugCtasRows,
         persistedRowsDocId: scopedDocIds.tipsRedflagsRows,
-        loadMode,
       }),
     emptyMessage: 'No Metas/Slug/CTAs rows found. Generate or sync Metas/Slug/CTAs first.',
     successLabel: 'pro tip/red flag/key takeaway rows',

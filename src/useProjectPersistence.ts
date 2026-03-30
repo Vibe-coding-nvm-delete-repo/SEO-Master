@@ -67,6 +67,7 @@ import {
   recordProjectFirestoreSaveOk,
   recordProjectFlushEnter,
   recordProjectFlushExit,
+  isLocalWriteFailed,
 } from './cloudSyncStatus';
 
 /** Matches App.tsx remove-from-approved row shape (cluster-level location). */
@@ -491,6 +492,8 @@ export function useProjectPersistence(options: {
     }
     try {
       await saveToIDB(projectId, payload);
+      // Both modes clear the failed flag on success — this is critical so that
+      // a flush after a failed checkpoint can recover the durability status.
       recordLocalPersistOk({ decrementPending: mode === 'checkpoint' });
       return true;
     } catch (err) {
@@ -498,6 +501,9 @@ export function useProjectPersistence(options: {
         recordLocalPersistError();
         reportLocalPersistFailure(addToast, 'project data local save', err);
       } else {
+        // Flush mode: still update durability status so the UI reflects reality,
+        // but skip the toast (flushes are background work, don't spam the user).
+        recordLocalPersistError({ decrementPending: false });
         logPersistError('IDB save (flush)', err);
       }
       return false;
@@ -606,6 +612,22 @@ export function useProjectPersistence(options: {
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
     };
+  }, [enqueueSave]);
+
+  // ── Auto-recovery: when local durability is "Failed", periodically retry ──
+  // This ensures that transient IDB failures (busy connection, temporary lock)
+  // automatically recover once IDB becomes available again, rather than staying
+  // stuck in the "Failed" state forever.
+  useEffect(() => {
+    const RECOVERY_INTERVAL_MS = 10_000; // retry every 10s
+    const timer = setInterval(() => {
+      if (!isLocalWriteFailed()) return;
+      if (!activeProjectIdRef.current) return;
+      if (isFlushingRef.current) return; // don't interfere with active flush
+      console.log('[PERSIST] Local durability failed — attempting recovery save...');
+      enqueueSave();
+    }, RECOVERY_INTERVAL_MS);
+    return () => clearInterval(timer);
   }, [enqueueSave]);
 
   // ── Helper: update latest + state + save atomically ───────────────────
