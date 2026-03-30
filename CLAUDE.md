@@ -151,8 +151,15 @@ node scripts/patch-wasm.cjs
 - **Hosting:** https://new-final-8edfc.web.app
 - **Console:** https://console.firebase.google.com/project/new-final-8edfc/firestore
 - **Rules:** `firebase deploy --only firestore --project new-final-8edfc`; Storage: `firebase deploy --only storage` (requires Storage initialized in console)
-- **Deploy:** `npx vite build && npx firebase deploy --only hosting,storage --project new-final-8edfc`
+- **Deploy:** Use the release pipeline: `npm run release:live` (or `npm run release:live -- --allow-dirty` for uncommitted changes). **NEVER** use raw `firebase deploy` — the release script builds, deploys to a preview channel, verifies the hosted bundle, then promotes to live. Every production-affecting code change MUST be followed by a deploy. A build timestamp (`__BUILD_TIMESTAMP__`) is injected at build time and shown in the Build Info tooltip so stale deploys are immediately visible.
 - **Optional App Check:** Set `VITE_FIREBASE_APPCHECK_SITE_KEY` (reCAPTCHA v3) to initialize App Check in `firebase.ts`; tighten Storage rules when ready.
+
+### Environment Variables
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `GEMINI_API_KEY` | Yes (for Generate/Content) | Google Gemini API key for AI generation |
+| `VITE_FIREBASE_APPCHECK_SITE_KEY` | No | reCAPTCHA v3 site key for App Check |
+| `NAPI_RS_FORCE_WASI` | Yes (build/dev) | Forces WASI fallbacks for native deps; set to `1` |
 
 ### Git Push (WDAC blocks libcurl)
 Git HTTPS is blocked by WDAC. Use `isomorphic-git` (installed) with a GitHub Personal Access Token:
@@ -165,8 +172,8 @@ node -e "require('isomorphic-git').push({fs:require('fs'),http:require('isomorph
 ## Design Reference (Light Theme)
 
 ### Existing class patterns to copy
-- **Main tabs:** `px-4 py-2 text-sm font-medium rounded-md transition-all` — Active: `bg-white shadow-sm text-zinc-900` — Inactive: `text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50`
-- **Sub-tabs:** `px-3 py-1 text-xs font-medium rounded-md transition-all` — Active: `bg-white shadow-sm text-zinc-900 border border-zinc-200` — Inactive: `text-zinc-500 hover:text-zinc-700`
+- **Main tabs:** `px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5` — Active: `bg-white shadow-sm text-zinc-900 border border-zinc-200` — Inactive: `text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/60`
+- **Sub-tabs:** `px-3 py-1 text-xs font-medium rounded-md transition-all` — Active: `bg-white shadow-sm text-zinc-900 border border-zinc-200` — Inactive: `text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70`
 - **Cards:** `bg-white border border-zinc-200 rounded-xl shadow-sm`
 - **Content width:** `max-w-4xl mx-auto`
 - **Status badges:** `text-[10px] font-medium px-1.5 py-0.5 rounded-full`
@@ -186,5 +193,5 @@ node -e "require('isomorphic-git').push({fs:require('fs'),http:require('isomorph
 | `npm run dev` | Start dev server (localhost:3000) |
 | `npm run build` | Production build |
 | `npm run lint` | TypeScript + ESLint |
-| `npm test` | Run all tests (160+) |
+| `npm test` | Run all tests (760+) |
 | `npm run setup` | Full install + WASM patches |
