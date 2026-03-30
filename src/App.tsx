@@ -2100,6 +2100,119 @@ export default function App() {
     groupedStats, approvedPageCount, keywordGroupingProgress,
   } = filteredData;
 
+  // --- Performance: stable callbacks for row components ---
+  // Extract groupNameInput auto-population to a useEffect so onSelect callbacks don't close over clusterByTokens
+  useEffect(() => {
+    if (selectedClusters.size > 0) {
+      let highest: ClusterSummary | null = null;
+      for (const tokens of selectedClusters) {
+        const c = clusterByTokens.get(tokens);
+        if (c && (!highest || c.totalVolume > highest.totalVolume)) highest = c;
+      }
+      if (highest) setGroupNameInput(highest.pageName);
+    } else {
+      setGroupNameInput('');
+    }
+  }, [selectedClusters, clusterByTokens]);
+
+  // Stable callback: select/deselect a cluster on the Pages tab
+  const handleClusterSelect = useCallback((tokens: string, checked: boolean) => {
+    setSelectedClusters(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(tokens);
+      else next.delete(tokens);
+      return next;
+    });
+  }, []);
+
+  // Stable callback: toggle group expansion
+  const handleToggleGroup = useCallback((id: string) => {
+    setExpandedGroupedClusters(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Stable callback: toggle sub-cluster expansion
+  const handleToggleSubCluster = useCallback((subId: string) => {
+    setExpandedGroupedSubClusters(prev => {
+      const next = new Set(prev);
+      if (next.has(subId)) next.delete(subId);
+      else next.add(subId);
+      return next;
+    });
+  }, []);
+
+  // Stable callback: select/deselect a group (grouped + approved tabs)
+  const handleGroupSelect = useCallback((groupId: string, clusters: { tokens: string }[], checked: boolean) => {
+    setSelectedGroups(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(groupId);
+      else next.delete(groupId);
+      return next;
+    });
+    setSelectedSubClusters(prev => {
+      const next = new Set(prev);
+      clusters.forEach(c => {
+        const key = `${groupId}::${c.tokens}`;
+        if (checked) next.add(key);
+        else next.delete(key);
+      });
+      return next;
+    });
+  }, []);
+
+  // Stable callback: select/deselect a sub-cluster (grouped + approved tabs)
+  const handleSubClusterSelect = useCallback((subKey: string, checked: boolean) => {
+    setSelectedSubClusters(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(subKey);
+      else next.delete(subKey);
+      // Auto-select/deselect parent group
+      const parsed = parseSubClusterKey(subKey);
+      if (parsed) {
+        // Look up group in both grouped and approved lists via refs
+        const allGroups = [...(groupedClustersRef.current || []), ...(approvedGroupsRef.current || [])];
+        const group = allGroups.find(g => g.id === parsed.groupId);
+        if (group) {
+          const allSelected = group.clusters.every(c => next.has(`${parsed.groupId}::${c.tokens}`));
+          setSelectedGroups(gPrev => {
+            const gNext = new Set(gPrev);
+            if (allSelected) gNext.add(parsed.groupId);
+            else gNext.delete(parsed.groupId);
+            return gNext;
+          });
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  // Memoize approved tab sort+pagination (was an inline IIFE re-computed every render)
+  const sortedPaginatedApproved = useMemo(() => {
+    const sorted = [...filteredApprovedGroups].sort((a, b) => {
+      for (const { key, direction } of groupedSortConfig) {
+        let aVal: any, bVal: any;
+        if (key === 'groupName') { aVal = a.groupName.toLowerCase(); bVal = b.groupName.toLowerCase(); }
+        else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
+        else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
+        else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
+        else if (key === 'avgKwRating') { aVal = a.avgKwRating ?? -1; bVal = b.avgKwRating ?? -1; }
+        else { aVal = 0; bVal = 0; }
+        if (typeof aVal === 'string') {
+          const cmp = aVal.localeCompare(bVal);
+          if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
+          continue;
+        }
+        if (aVal !== bVal) return direction === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+      return 0;
+    });
+    return sorted.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+  }, [filteredApprovedGroups, groupedSortConfig, currentPage, itemsPerPage]);
+
   // Shared filter bag for TableHeader — single object passed to all tabs
   const filterBag = useMemo((): FilterBag => ({
     minLen, setMinLen, maxLen, setMaxLen,
@@ -2643,6 +2756,14 @@ export default function App() {
     removeFromApproved,
     ungroupPages,
   });
+
+  // Stable callback: middle-click on a ClusterRow to quick-group
+  const handleClusterMiddleClick = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      handleGroupClusters();
+    }
+  }, [handleGroupClusters]);
 
   // Update ETA every 10 seconds based on rolling average
   useEffect(() => {
@@ -4203,23 +4324,15 @@ FAILURE CONDITIONS TO AVOID:
                       showCheckbox={true}
                       allChecked={paginatedClusters.length > 0 && paginatedClusters.every(c => selectedClusters.has(c.tokens))}
                       onCheckAll={(checked) => {
-                        const newSelected = new Set(selectedClusters);
-                        if (checked) {
-                          paginatedClusters.forEach(c => newSelected.add(c.tokens));
-                        } else {
-                          paginatedClusters.forEach(c => newSelected.delete(c.tokens));
-                        }
-                        setSelectedClusters(newSelected);
-                        if (newSelected.size > 0) {
-                          let highest: ClusterSummary | null = null;
-                          for (const tokens of newSelected) {
-                            const c = clusterByTokens.get(tokens);
-                            if (c && (!highest || c.totalVolume > highest.totalVolume)) highest = c;
+                        setSelectedClusters(prev => {
+                          const next = new Set(prev);
+                          if (checked) {
+                            paginatedClusters.forEach(c => next.add(c.tokens));
+                          } else {
+                            paginatedClusters.forEach(c => next.delete(c.tokens));
                           }
-                          if (highest) setGroupNameInput(highest.pageName);
-                        } else {
-                          setGroupNameInput('');
-                        }
+                          return next;
+                        });
                       }}
                       sortKey={sortConfig[0]?.key ?? null}
                       sortDirection={sortConfig[0]?.direction ?? 'desc'}
@@ -4297,46 +4410,18 @@ FAILURE CONDITIONS TO AVOID:
                     />
                   ) : null}
                   <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
-                    {activeTab === 'pages' && paginatedClusters.map((row, idx) => (
-                      <ClusterRow 
-                        key={idx} 
-                        row={row} 
+                    {activeTab === 'pages' && paginatedClusters.map((row) => (
+                      <ClusterRow
+                        key={row.tokens}
+                        row={row}
                         isExpanded={expandedClusters.has(row.pageName)}
                         isSelected={selectedClusters.has(row.tokens)}
                         selectedTokens={selectedTokens}
                         toggleCluster={toggleCluster}
-                        onSelect={(checked) => {
-                          const newSelected = new Set(selectedClusters);
-                          if (checked) {
-                            newSelected.add(row.tokens);
-                          } else {
-                            newSelected.delete(row.tokens);
-                          }
-                          setSelectedClusters(newSelected);
-                          
-                          if (newSelected.size > 0) {
-                            let highest: ClusterSummary | null = null;
-                            for (const tokens of newSelected) {
-                              const c = clusterByTokens.get(tokens);
-                              if (c && (!highest || c.totalVolume > highest.totalVolume)) {
-                                highest = c;
-                              }
-                            }
-                            if (highest) setGroupNameInput(highest.pageName);
-                          } else {
-                            setGroupNameInput('');
-                          }
-                        }}
+                        onSelect={handleClusterSelect}
                         setSelectedTokens={setSelectedTokens}
                         setCurrentPage={setCurrentPage}
-                        onMiddleClick={(e) => {
-                          if (e.button === 1) { // Middle click
-                            e.preventDefault();
-                            if (selectedClusters.size > 0 && groupNameInput.trim()) {
-                              handleGroupClusters();
-                            }
-                          }
-                        }}
+                        onMiddleClick={handleClusterMiddleClick}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                       />
@@ -4376,67 +4461,21 @@ FAILURE CONDITIONS TO AVOID:
                       </tr>
                     ))}
                     
-                    {activeTab === 'grouped' && paginatedGroupedClusters.map((row, idx) => (
-                      <GroupedClusterRow 
-                        key={idx} 
-                        row={row} 
+                    {activeTab === 'grouped' && paginatedGroupedClusters.map((row) => (
+                      <GroupedClusterRow
+                        key={row.id}
+                        row={row}
                         isExpanded={expandedGroupedClusters.has(row.id)}
                         expandedSubClusters={expandedGroupedSubClusters}
-                        toggleGroup={(id) => {
-                          const newExpanded = new Set(expandedGroupedClusters);
-                          if (newExpanded.has(id)) newExpanded.delete(id);
-                          else newExpanded.add(id);
-                          setExpandedGroupedClusters(newExpanded);
-                        }}
-                        toggleSubCluster={(subId) => {
-                          const newExpanded = new Set(expandedGroupedSubClusters);
-                          if (newExpanded.has(subId)) newExpanded.delete(subId);
-                          else newExpanded.add(subId);
-                          setExpandedGroupedSubClusters(newExpanded);
-                        }}
+                        toggleGroup={handleToggleGroup}
+                        toggleSubCluster={handleToggleSubCluster}
                         selectedTokens={selectedTokens}
                         setSelectedTokens={setSelectedTokens}
                         setCurrentPage={setCurrentPage}
                         isGroupSelected={selectedGroups.has(row.id)}
                         selectedSubClusters={selectedSubClusters}
-                        onGroupSelect={(checked) => {
-                          const newGroups = new Set(selectedGroups);
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) {
-                            newGroups.add(row.id);
-                            // Also select all sub-clusters in this group
-                            row.clusters.forEach(c => newSubs.add(`${row.id}::${c.tokens}`));
-                          } else {
-                            newGroups.delete(row.id);
-                            // Also deselect all sub-clusters in this group
-                            row.clusters.forEach(c => newSubs.delete(`${row.id}::${c.tokens}`));
-                          }
-                          setSelectedGroups(newGroups);
-                          setSelectedSubClusters(newSubs);
-                        }}
-                        onSubClusterSelect={(subKey, checked) => {
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) {
-                            newSubs.add(subKey);
-                          } else {
-                            newSubs.delete(subKey);
-                          }
-                          setSelectedSubClusters(newSubs);
-                          // If all sub-clusters of a group are selected, auto-select the group
-                          const groupId = parseSubClusterKey(subKey)?.groupId;
-                          if (!groupId) return;
-                          const group = groupedClusters.find(g => g.id === groupId);
-                          if (group) {
-                            const allSelected = group.clusters.every(c => newSubs.has(`${groupId}::${c.tokens}`));
-                            const newGroups = new Set(selectedGroups);
-                            if (allSelected) {
-                              newGroups.add(groupId);
-                            } else {
-                              newGroups.delete(groupId);
-                            }
-                            setSelectedGroups(newGroups);
-                          }
-                        }}
+                        onGroupSelect={handleGroupSelect}
+                        onSubClusterSelect={handleSubClusterSelect}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                         groupActionButton={
@@ -4451,81 +4490,21 @@ FAILURE CONDITIONS TO AVOID:
                       />
                     ))}
 
-                    {activeTab === 'approved' && (() => {
-                      // Apply same multi-sorting as grouped tab
-                      const sorted = [...filteredApprovedGroups].sort((a, b) => {
-                        for (const { key, direction } of groupedSortConfig) {
-                          let aVal: any, bVal: any;
-                          if (key === 'groupName') { aVal = a.groupName.toLowerCase(); bVal = b.groupName.toLowerCase(); }
-                          else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
-                          else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
-                          else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
-                          else if (key === 'avgKwRating') { aVal = a.avgKwRating ?? -1; bVal = b.avgKwRating ?? -1; }
-                          else { aVal = 0; bVal = 0; }
-                          if (typeof aVal === 'string') {
-                            const cmp = aVal.localeCompare(bVal);
-                            if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
-                            continue;
-                          }
-                          if (aVal !== bVal) return direction === 'asc' ? aVal - bVal : bVal - aVal;
-                        }
-                        return 0;
-                      });
-                      // Apply same pagination
-                      const paginated = sorted.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
-                      return paginated;
-                    })().map((group, idx) => (
+                    {activeTab === 'approved' && sortedPaginatedApproved.map((group) => (
                       <GroupedClusterRow
                         key={group.id}
                         row={group}
                         isExpanded={expandedGroupedClusters.has(group.id)}
                         expandedSubClusters={expandedGroupedSubClusters}
-                        toggleGroup={(id) => {
-                          const newExpanded = new Set(expandedGroupedClusters);
-                          if (newExpanded.has(id)) newExpanded.delete(id);
-                          else newExpanded.add(id);
-                          setExpandedGroupedClusters(newExpanded);
-                        }}
-                        toggleSubCluster={(subId) => {
-                          const newExpanded = new Set(expandedGroupedSubClusters);
-                          if (newExpanded.has(subId)) newExpanded.delete(subId);
-                          else newExpanded.add(subId);
-                          setExpandedGroupedSubClusters(newExpanded);
-                        }}
+                        toggleGroup={handleToggleGroup}
+                        toggleSubCluster={handleToggleSubCluster}
                         selectedTokens={selectedTokens}
                         setSelectedTokens={setSelectedTokens}
                         setCurrentPage={setCurrentPage}
                         isGroupSelected={selectedGroups.has(group.id)}
                         selectedSubClusters={selectedSubClusters}
-                        onGroupSelect={(checked) => {
-                          const newGroups = new Set(selectedGroups);
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) {
-                            newGroups.add(group.id);
-                            group.clusters.forEach(c => newSubs.add(`${group.id}::${c.tokens}`));
-                          } else {
-                            newGroups.delete(group.id);
-                            group.clusters.forEach(c => newSubs.delete(`${group.id}::${c.tokens}`));
-                          }
-                          setSelectedGroups(newGroups);
-                          setSelectedSubClusters(newSubs);
-                        }}
-                        onSubClusterSelect={(subKey, checked) => {
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) newSubs.add(subKey);
-                          else newSubs.delete(subKey);
-                          setSelectedSubClusters(newSubs);
-                          const groupId = parseSubClusterKey(subKey)?.groupId;
-                          if (!groupId) return;
-                          const g = approvedGroups.find(ag => ag.id === groupId);
-                          if (g) {
-                            const allSelected = g.clusters.every(c => newSubs.has(`${groupId}::${c.tokens}`));
-                            const newGroups = new Set(selectedGroups);
-                            if (allSelected) newGroups.add(groupId);
-                            else newGroups.delete(groupId);
-                            setSelectedGroups(newGroups);
-                          }
-                        }}
+                        onGroupSelect={handleGroupSelect}
+                        onSubClusterSelect={handleSubClusterSelect}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                         groupActionButton={
@@ -4540,8 +4519,8 @@ FAILURE CONDITIONS TO AVOID:
                       />
                     ))}
 
-                    {activeTab === 'blocked' && sortedBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row, idx) => (
-                      <tr key={idx} className="hover:bg-red-50/50 transition-colors">
+                    {activeTab === 'blocked' && sortedBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row) => (
+                      <tr key={row.keyword} className="hover:bg-red-50/50 transition-colors">
                         <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 break-words">{row.keyword}</td>
                         <td className="px-3 py-0.5 overflow-hidden">
                           {row.tokenArr ? (

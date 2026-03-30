@@ -1685,10 +1685,18 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     return () => clearInterval(interval);
   }, [isRunningRecon]);
 
-  // Compute token clusters from ungrouped pages
-  const clusters = useMemo(() => {
-    if (!effectiveClusters || effectiveClusters.length < 2) return [];
-    return buildCascadingClusters(effectiveClusters);
+  // Compute token clusters from ungrouped pages (async to avoid blocking UI)
+  const [clusters, setClusters] = useState<AutoGroupCluster[]>([]);
+  useEffect(() => {
+    if (!effectiveClusters || effectiveClusters.length < 2) {
+      setClusters([]);
+      return;
+    }
+    let cancelled = false;
+    buildCascadingClusters(effectiveClusters).then(result => {
+      if (!cancelled) setClusters(result);
+    });
+    return () => { cancelled = true; };
   }, [effectiveClusters]);
 
   const coveredPages = useMemo(() => countCoveredPages(clusters), [clusters]);
