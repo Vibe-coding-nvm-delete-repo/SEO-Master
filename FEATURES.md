@@ -23,7 +23,7 @@
 
 ## Content Pipeline (Generate > Content)
 
-- Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, and project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts.
+- Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts, and timed-out IndexedDB project writes now abort and reopen the cached DB connection before retrying so local durability does not keep hammering a poisoned transaction handle.
 
 - Renderer-stability hardening pass for Generate/Content:
   - `App` now mounts `Generate` and `Content` only when the tab is active or currently busy, instead of keeping both full trees mounted indefinitely.
