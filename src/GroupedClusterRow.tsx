@@ -92,6 +92,9 @@ const GroupedClusterRow = React.memo(({
               )}
             </button>
             <span className="break-words">{row.groupName}</span>
+            {row.groupAutoMerged && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 shrink-0" title="Created by group auto-merge">Merged</span>
+            )}
             <button
               onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.groupName)}`, '_blank'); }}
               className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/gname:opacity-100 transition-opacity shrink-0"

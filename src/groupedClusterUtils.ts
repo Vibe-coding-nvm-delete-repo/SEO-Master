@@ -62,6 +62,7 @@ export function buildGroupedClusterFromPages(
       reviewCost: existing.reviewCost,
       reviewedAt: existing.reviewedAt,
     } : {}),
+    ...(existing?.groupAutoMerged ? { groupAutoMerged: true } : {}),
   };
 
   if (existingReviewed && tokensSame) {

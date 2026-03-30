@@ -77,6 +77,7 @@ export interface GroupedCluster {
   reviewCost?: number;
   reviewedAt?: string;
   mergeAffected?: boolean;  // Set when token merge auto-unapproves this group
+  groupAutoMerged?: boolean; // Set when this group was created by group auto-merge
 }
 
 export interface BlockedKeyword {
@@ -204,6 +205,7 @@ export interface GroupMergeRecommendationGroup {
   pageCount: number;
   totalVolume: number;
   locationSummary: string;
+  source?: 'grouped' | 'approved';
 }
 
 export interface GroupMergeRecommendation {

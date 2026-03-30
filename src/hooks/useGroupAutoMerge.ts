@@ -16,6 +16,8 @@ import type { GroupMergeRecommendation, GroupedCluster } from '../types';
 interface UseGroupAutoMergeParams {
   groupedClusters: GroupedCluster[];
   groupedClustersRef: MutableRefObject<GroupedCluster[]>;
+  approvedGroups: GroupedCluster[];
+  approvedGroupsRef: MutableRefObject<GroupedCluster[]>;
   groupMergeRecommendations: GroupMergeRecommendation[];
   groupMergeRecommendationsRef: MutableRefObject<GroupMergeRecommendation[]>;
   groupReviewSettingsRef: RefObject<GroupReviewSettingsRef | null>;
@@ -23,6 +25,7 @@ interface UseGroupAutoMergeParams {
   updateGroupMergeRecommendations: (recommendations: GroupMergeRecommendation[]) => void;
   bulkSet: (data: {
     groupedClusters?: GroupedCluster[];
+    approvedGroups?: GroupedCluster[];
     groupMergeRecommendations?: GroupMergeRecommendation[];
   }) => void;
   addToast: (msg: string, type: 'success' | 'info' | 'warning' | 'error') => void;
@@ -65,6 +68,8 @@ const INITIAL_JOB: GroupAutoMergeJobState = {
 export function useGroupAutoMerge({
   groupedClusters,
   groupedClustersRef,
+  approvedGroups,
+  approvedGroupsRef,
   groupMergeRecommendations,
   groupMergeRecommendationsRef,
   groupReviewSettingsRef,
@@ -83,9 +88,14 @@ export function useGroupAutoMerge({
     [groupMergeRecommendations],
   );
 
+  const allGroups = useMemo(
+    () => [...groupedClusters, ...approvedGroups],
+    [groupedClusters, approvedGroups],
+  );
+
   const currentFingerprint = useMemo(
-    () => buildGroupAutoMergeFingerprint(groupedClusters),
-    [groupedClusters],
+    () => buildGroupAutoMergeFingerprint(allGroups),
+    [allGroups],
   );
 
   const recommendationsAreStale = useMemo(
@@ -124,7 +134,8 @@ export function useGroupAutoMerge({
 
   const runRecommendations = useCallback(async () => {
     const settings = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
-    const groups = groupedClustersRef.current;
+    const grouped = groupedClustersRef.current;
+    const approved = approvedGroupsRef.current;
     if (!settings?.apiKey || settings.apiKey.trim().length < 10) {
       addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
       return;
@@ -133,8 +144,8 @@ export function useGroupAutoMerge({
       addToast('Choose a group auto-merge embedding model in Group Review settings.', 'error');
       return;
     }
-    if (groups.length < 2) {
-      addToast('Need at least 2 grouped groups before Auto Merge can compare them.', 'info');
+    if (grouped.length + approved.length < 2) {
+      addToast('Need at least 2 groups across Grouped and Approved before Auto Merge can compare them.', 'info');
       return;
     }
 
@@ -143,9 +154,10 @@ export function useGroupAutoMerge({
     abortRef.current = controller;
     startedAtRef.current = performance.now();
 
-    const groupsSnapshot = [...groups];
+    const groupedIdSet = new Set(grouped.map((g) => g.id));
+    const groupsSnapshot = [...grouped, ...approved];
     const sourceFingerprint = buildGroupAutoMergeFingerprint(groupsSnapshot);
-    const sources = groupsSnapshot.map(buildGroupAutoMergeSource);
+    const sources = groupsSnapshot.map((g) => buildGroupAutoMergeSource(g, groupedIdSet.has(g.id) ? 'grouped' : 'approved'));
     const totalPairs = (sources.length * (sources.length - 1)) / 2;
 
     setJob({
@@ -224,10 +236,18 @@ export function useGroupAutoMerge({
 
       groupMergeRecommendationsRef.current = nextRecommendations;
       updateGroupMergeRecommendations(nextRecommendations);
-      await flushNow();
+      // Don't let a persistence hang block the completion UI — race with a timeout
+      try {
+        await Promise.race([
+          flushNow(),
+          new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
+        ]);
+      } catch {
+        // persistence failure is non-fatal for the merge flow
+      }
 
       const runFinishedStale =
-        buildGroupAutoMergeFingerprint(groupedClustersRef.current) !== sourceFingerprint;
+        buildGroupAutoMergeFingerprint([...groupedClustersRef.current, ...approvedGroupsRef.current]) !== sourceFingerprint;
 
       setJob({
         phase: 'complete',
@@ -285,14 +305,16 @@ export function useGroupAutoMerge({
     const currentRecommendations = Array.isArray(groupMergeRecommendationsRef.current)
       ? groupMergeRecommendationsRef.current
       : [];
-    if (isGroupMergeRecommendationSetStale(currentRecommendations, buildGroupAutoMergeFingerprint(groupedClustersRef.current))) {
-      addToast('These recommendations are stale because grouped data changed. Click Embed again before merging.', 'warning');
+    const combinedFingerprint = buildGroupAutoMergeFingerprint([...groupedClustersRef.current, ...approvedGroupsRef.current]);
+    if (isGroupMergeRecommendationSetStale(currentRecommendations, combinedFingerprint)) {
+      addToast('These recommendations are stale because group data changed. Click Embed again before merging.', 'warning');
       return false;
     }
 
     const hasReviewApi = Boolean(groupReviewSettingsRef.current?.hasApiKey() ?? groupReviewSettingsSnapshot?.apiKey?.trim());
     const resolution = resolveGroupAutoMergeSelection({
       groupedClusters: groupedClustersRef.current,
+      approvedGroups: approvedGroupsRef.current,
       recommendations: currentRecommendations,
       selectedRecommendationIds: recommendationIds,
       hasReviewApi,
@@ -310,25 +332,38 @@ export function useGroupAutoMerge({
       'accepted',
       reviewedAt,
     );
+    // Merged groups always land in the Grouped tab (reverts approved status)
     const nextGrouped = [
       ...groupedClustersRef.current.filter((group) => !resolution.removedGroupIds.has(group.id)),
       ...resolution.mergedGroups,
     ].sort((a, b) => b.totalVolume - a.totalVolume);
+    // Remove any approved groups that were consumed by the merge
+    const nextApproved = approvedGroupsRef.current.filter(
+      (group) => !resolution.removedApprovedGroupIds.has(group.id),
+    );
 
+    // Ref-before-save: sync all refs before bulkSet
     groupedClustersRef.current = nextGrouped;
+    approvedGroupsRef.current = nextApproved;
     groupMergeRecommendationsRef.current = nextRecommendations;
     bulkSet({
       groupedClusters: nextGrouped,
+      approvedGroups: nextApproved,
       groupMergeRecommendations: nextRecommendations,
     });
-    await flushNow();
+    // Best-effort persistence — don't block UI on Firestore/IDB
+    flushNow().catch(() => {});
 
     const mergedNames = resolution.mergedGroups.map((group) => `'${group.groupName}'`).join(', ');
+    const revertedCount = resolution.removedApprovedGroupIds.size;
+    const revertNote = revertedCount > 0
+      ? ` ${revertedCount} approved group${revertedCount === 1 ? '' : 's'} reverted to Grouped.`
+      : '';
     logAndToast(
       'merge',
       `Auto-merged semantic duplicate groups into ${mergedNames}`,
       resolution.removedGroupIds.size,
-      `Auto-merged ${resolution.removedGroupIds.size} grouped cluster${resolution.removedGroupIds.size === 1 ? '' : 's'}.`,
+      `Auto-merged ${resolution.removedGroupIds.size} group${resolution.removedGroupIds.size === 1 ? '' : 's'}.${revertNote}`,
       'success',
     );
     return true;
