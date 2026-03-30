@@ -14,7 +14,7 @@ import {
   loadQaLocalCache,
   saveQaLocalCache,
 } from './qa/contentPipelineQaRuntime';
-import { PersistOperationTimeoutError, withPersistTimeout } from './persistTimeout';
+import { withPersistTimeout } from './persistTimeout';
 import type {
   ActivityLogEntry,
   AutoMergeRecommendation,
