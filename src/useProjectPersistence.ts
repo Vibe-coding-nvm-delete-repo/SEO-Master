@@ -32,6 +32,8 @@ import {
 } from './projectStorage';
 import {
   loadProjectDataForView,
+  loadProjectDataFromIDBOnly,
+  reconcileWithFirestore,
   toProjectViewState,
   createEmptyProjectViewState,
   type ProjectViewState,
@@ -711,25 +713,63 @@ export function useProjectPersistence(options: {
 
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
-    const data = await loadProjectDataForView(projectId);
     const project = projectList.find(p => p.id === projectId);
+
+    // ── Phase 1: IDB-first fast path (~5ms) ──────────────────────────────
+    // Show cached data instantly. Reconcile with Firestore in background.
+    const idbData = await loadProjectDataFromIDBOnly(projectId);
+
+    if (idbData) {
+      // skipRebuild: IDB data was saved by this app, clusterSummary is consistent.
+      // Consistency check inside toProjectViewState falls back to rebuilding if not.
+      const viewState = toProjectViewState(idbData, project, { skipRebuild: true });
+      applyViewState(viewState);
+
+      const loadedSaveId = idbData.lastSaveId ?? 0;
+      if (loadedSaveId > saveCounterRef.current) {
+        saveCounterRef.current = loadedSaveId;
+      }
+      loadFenceRef.current = countGroupedPages(viewState);
+
+      // Phase 1 done — spinner can disappear, data is visible.
+      projectLoadingRef.current = false;
+
+      // ── Phase 2: Background Firestore reconciliation (fire-and-forget) ──
+      // The onSnapshot listener handles real-time sync going forward.
+      // This is a safety net for when IDB is stale and the first snapshot
+      // was suppressed by the projectLoading guard during Phase 1.
+      const saveIdAtLoad = saveCounterRef.current;
+      reconcileWithFirestore(projectId, idbData)
+        .then((result) => {
+          if (activeProjectIdRef.current !== projectId) return;   // user switched projects
+          if (saveCounterRef.current > saveIdAtLoad) return;      // user edited or onSnapshot advanced
+          if (result.action === 'update' && result.data) {
+            const fsSaveId = result.data.lastSaveId ?? 0;
+            if (fsSaveId <= saveCounterRef.current) return;       // already up to date
+            const fsViewState = toProjectViewState(result.data, project);
+            applyViewState(fsViewState);
+            saveCounterRef.current = fsSaveId;
+            const fsTotal = countGroupedPages(fsViewState);
+            if (fsTotal > loadFenceRef.current) loadFenceRef.current = fsTotal;
+          }
+        })
+        .catch((err) => {
+          console.warn('[PERSIST] Background Firestore reconciliation failed:', err);
+        });
+
+      return;
+    }
+
+    // ── Fallback: No IDB cache — blocking load from both sources ────────
+    const data = await loadProjectDataForView(projectId);
     const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
     applyViewState(viewState);
 
-    // Initialize save counter from IDB so new saves continue from where we
-    // left off. This ensures that Firestore meta.saveId from our previous
-    // session is always <= saveCounterRef, which lets the stale-save guard work.
     const loadedSaveId = data?.lastSaveId ?? 0;
     if (loadedSaveId > saveCounterRef.current) {
       saveCounterRef.current = loadedSaveId;
     }
-
-    // Set load fence = total grouped pages loaded at startup. The onSnapshot
-    // listener will reject any snapshot that would shrink below this count — preventing
-    // stale Firestore data (from incomplete saves of a prior session) from
-    // overwriting the fresher IDB state.
-    const loadedTotal = countGroupedPages(viewState);
-    loadFenceRef.current = loadedTotal;
+    loadFenceRef.current = countGroupedPages(viewState);
 
     projectLoadingRef.current = false;
   }, [applyViewState]);
