@@ -1,6 +1,12 @@
 // GroupReviewEngine.ts — Pure logic for AI-powered semantic group review
 // No React dependencies. Handles queue processing, API calls, JSON parsing, concurrency.
 
+import {
+  OPENROUTER_REQUEST_TIMEOUT_MS,
+  resolveOpenRouterAbortError,
+  runWithOpenRouterTimeout,
+} from './openRouterTimeout';
+
 export interface ReviewRequest {
   groupId: string;
   groupName: string;
@@ -102,28 +108,35 @@ async function reviewSingleGroup(
 
   for (let attempt = 0; attempt <= maxRateLimitRetries; attempt++) {
     if (signal.aborted) return { groupId: request.groupId, error: '__aborted__', durationMs: 0 };
+    let timedOut = false;
 
     try {
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': window.location.origin,
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages: [
-            { role: 'system', content: config.systemPrompt || DEFAULT_SYSTEM_PROMPT },
-            { role: 'user', content: buildUserMessage(request.groupName, request.pages) },
-          ],
-          temperature: config.temperature ?? 0.3,
-          ...(config.maxTokens > 0 ? { max_tokens: config.maxTokens } : {}),
-          ...(config.reasoningEffort && config.reasoningEffort !== 'none' ? { reasoning: { effort: config.reasoningEffort } } : {}),
-          response_format: { type: 'json_object' },
-        }),
+      const timedResponse = await runWithOpenRouterTimeout({
         signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${config.apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': window.location.origin,
+          },
+          body: JSON.stringify({
+            model: config.model,
+            messages: [
+              { role: 'system', content: config.systemPrompt || DEFAULT_SYSTEM_PROMPT },
+              { role: 'user', content: buildUserMessage(request.groupName, request.pages) },
+            ],
+            temperature: config.temperature ?? 0.3,
+            ...(config.maxTokens > 0 ? { max_tokens: config.maxTokens } : {}),
+            ...(config.reasoningEffort && config.reasoningEffort !== 'none' ? { reasoning: { effort: config.reasoningEffort } } : {}),
+            response_format: { type: 'json_object' },
+          }),
+          signal: requestSignal,
+        }),
       });
+      const res = timedResponse.result;
+      timedOut = timedResponse.timedOut;
 
       // Rate limited — retry with exponential backoff
       if (res.status === 429) {
@@ -136,11 +149,23 @@ async function reviewSingleGroup(
       }
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => '');
+        const timedErrText = await runWithOpenRouterTimeout({
+          signal,
+          timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          run: async () => res.text().catch(() => ''),
+        }).catch(() => ({ result: '', timedOut }));
+        const errText = timedErrText.result;
+        timedOut = timedErrText.timedOut;
         return { groupId: request.groupId, error: `API ${res.status}: ${errText.slice(0, 200)}`, durationMs: Math.round(performance.now() - startTime) };
       }
 
-      const data = await res.json();
+      const timedJson = await runWithOpenRouterTimeout({
+        signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async () => res.json(),
+      });
+      const data = timedJson.result;
+      timedOut = timedJson.timedOut;
 
       // Check for API-level error in body
       if (data.error) {
@@ -202,7 +227,15 @@ async function reviewSingleGroup(
       };
     } catch (e: any) {
       if (e.name === 'AbortError') {
-        return { groupId: request.groupId, error: '__aborted__', durationMs: 0 };
+        return {
+          groupId: request.groupId,
+          error: resolveOpenRouterAbortError({
+            parentAborted: signal.aborted,
+            timedOut,
+            timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          }),
+          durationMs: 0,
+        };
       }
       return { groupId: request.groupId, error: e.message || 'Unknown error', durationMs: Math.round(performance.now() - startTime) };
     }

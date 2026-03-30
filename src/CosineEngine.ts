@@ -23,6 +23,13 @@
  * Result: A table of clusters with similarity scores, expandable to see pages.
  */
 
+import {
+  computeVectorMagnitudes,
+  cosineSimilarity,
+  fetchOpenRouterEmbeddings,
+  yieldToBrowser,
+} from './embeddingSimilarity';
+
 // Use inline type to avoid import-order issues
 interface CosinePageInput {
   pageName: string;
@@ -78,97 +85,6 @@ export interface CosineProgress {
   elapsedMs: number;
 }
 
-// Cosine similarity between two vectors (optimized: pre-computed magnitudes)
-function cosineSim(a: number[], b: number[], magA: number, magB: number): number {
-  let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-  const denom = magA * magB;
-  return denom === 0 ? 0 : dot / denom;
-}
-
-// Pre-compute magnitude for each vector (avoids recomputing per pair)
-function computeMagnitudes(vectors: number[][]): number[] {
-  return vectors.map(v => {
-    let sum = 0;
-    for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
-    return Math.sqrt(sum);
-  });
-}
-
-// Helper: yield control back to browser so UI updates
-function yieldToUI(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
-// Get embeddings from OpenRouter (batched with small bounded concurrency)
-async function getEmbeddings(
-  texts: string[],
-  apiKey: string,
-  model: string,
-  signal: AbortSignal | undefined,
-  onBatchDone?: (completed: number, total: number) => void
-): Promise<{ vectors: number[][]; tokensUsed: number; cost: number }> {
-  const BATCH_SIZE = 100;
-  const EMBEDDING_CONCURRENCY = 4;
-  const batchResults: number[][][] = [];
-  let totalTokens = 0;
-  const totalBatches = Math.ceil(texts.length / BATCH_SIZE);
-  let completedBatches = 0;
-
-  const batchInputs = Array.from({ length: totalBatches }, (_, batchIndex) => ({
-    batchIndex,
-    batch: texts.slice(batchIndex * BATCH_SIZE, (batchIndex + 1) * BATCH_SIZE),
-  }));
-
-  async function fetchBatch(batchIndex: number, batch: string[]) {
-    if (signal?.aborted) throw new Error('Aborted');
-
-    const res = await fetch('https://openrouter.ai/api/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': window.location.origin,
-      },
-      body: JSON.stringify({ model, input: batch }),
-      signal,
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      throw new Error(`Embedding API ${res.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const data = await res.json();
-    const embeddings = data.data || [];
-    embeddings.sort((a: any, b: any) => a.index - b.index);
-
-    batchResults[batchIndex] = embeddings.map((emb: any) => emb.embedding);
-    totalTokens += data.usage?.total_tokens || data.usage?.prompt_tokens || 0;
-    completedBatches++;
-    onBatchDone?.(completedBatches, totalBatches);
-  }
-
-  let nextBatch = 0;
-  async function worker() {
-    while (nextBatch < batchInputs.length) {
-      const current = nextBatch++;
-      const { batchIndex, batch } = batchInputs[current];
-      await fetchBatch(batchIndex, batch);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(EMBEDDING_CONCURRENCY, totalBatches) }, () => worker())
-  );
-
-  const allVectors = batchResults.flat();
-
-  // Estimate cost based on model pricing (approximate)
-  const cost = totalTokens * 0.00000001; // $0.01/M default
-  return { vectors: allVectors, tokensUsed: totalTokens, cost };
-}
-
 // Find similar pairs — ASYNC with chunked yields so browser doesn't freeze
 async function findSimilarPairs(
   pages: CosinePageInput[],
@@ -203,12 +119,12 @@ async function findSimilarPairs(
         if (computed - lastReport >= CHUNK_SIZE) {
           lastReport = computed;
           onProgress?.(computed, total, pairs.length);
-          await yieldToUI();
+          await yieldToBrowser();
         }
         continue;
       }
 
-      const sim = cosineSim(vectors[i], vectors[j], magnitudes[i], magnitudes[j]);
+      const sim = cosineSimilarity(vectors[i], vectors[j], magnitudes[i], magnitudes[j]);
       if (sim >= threshold) {
         pairs.push({
           pageA: { name: pages[i].pageName, tokens: pages[i].tokens, volume: pages[i].totalVolume },
@@ -222,7 +138,7 @@ async function findSimilarPairs(
       if (computed - lastReport >= CHUNK_SIZE) {
         lastReport = computed;
         onProgress?.(computed, total, pairs.length);
-        await yieldToUI();
+        await yieldToBrowser();
       }
     }
   }
@@ -314,7 +230,7 @@ function buildClusters(
         const pageIdx = pageIndexMap.get(page.tokens)!;
         const repSimilarity = page.tokens === representative.tokens
           ? 1
-          : cosineSim(vectors[pageIdx], representativeVector, magnitudes[pageIdx], representativeMagnitude);
+          : cosineSimilarity(vectors[pageIdx], representativeVector, magnitudes[pageIdx], representativeMagnitude);
 
         return {
           ...page,
@@ -506,7 +422,7 @@ export async function runCosineSimilarity(
   });
 
   const embStart = performance.now();
-  const embResult = await getEmbeddings(
+  const embResult = await fetchOpenRouterEmbeddings(
     pageNames, apiKey, model, signal,
     (done, total) => {
       const batchPct = total > 0 ? Math.round((done / total) * 100) : 100;
@@ -525,7 +441,7 @@ export async function runCosineSimilarity(
   if (signal?.aborted) throw new Error('Aborted');
 
   // Pre-compute magnitudes (optimization)
-  const magnitudes = computeMagnitudes(vectors);
+  const magnitudes = computeVectorMagnitudes(vectors);
 
   // ── Phase 2: COMPARE ────────────────────────────
   progress({

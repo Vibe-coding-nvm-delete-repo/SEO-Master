@@ -4,14 +4,18 @@
  * Every mutation atomically updates:
  *   1. The `latest` ref (synchronous, never stale)
  *   2. React state (for rendering)
- *   3. Firestore + IDB (via enqueueSave)
+ *   3. Firestore + IDB (via enqueueSave — queued immediately, no debounce)
  *
  * No external code should ever call saveProjectData or touch refs directly.
  * The stale-closure bug class is structurally impossible because:
  *   - All mutation functions have EMPTY dependency arrays
  *   - They read from `latest.current` (always fresh), never from closures
- *   - `enqueueSave` requests a coalesced flush; the queue reads `latest.current`
- *     at write time so bursts (rapid auto-group) collapse to few Firestore writes
+ *   - `enqueueSave` chains `flushPersistQueue` on a serialized promise; the flush
+ *     loop reads `latest.current` at write time and re-runs while new mutations
+ *     arrived mid-await so bursts still collapse to few round-trips when possible
+ *   - `saveCounterRef` increments on every `mutateAndSave` (and suggestion checkpoints)
+ *     so IDB `lastSaveId` is always strictly newer than the last cloud write until the
+ *     next flush — refresh merge picks local state over stale Firestore (ungroup/unblock).
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
@@ -32,11 +36,13 @@ import {
   createEmptyProjectViewState,
   type ProjectViewState,
 } from './projectWorkspace';
+import { getUniqueClustersToRestore } from './ungroupedRestoration';
 import type {
   ProcessedRow,
   ClusterSummary,
   TokenSummary,
   GroupedCluster,
+  GroupMergeRecommendation,
   BlockedKeyword,
   LabelSection,
   Project,
@@ -47,11 +53,16 @@ import type {
   AutoGroupSuggestion,
 } from './types';
 import { parseSubClusterKey } from './subClusterKeys';
-import { logPersistError, reportPersistFailure } from './persistenceErrors';
+import { logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
 import {
   clearListenerError,
+  CLOUD_SYNC_CHANNELS,
   markListenerError,
   markListenerSnapshot,
+  recordLocalPersistError,
+  recordLocalPersistOk,
+  recordLocalPersistStart,
+  recordProjectCloudWriteStart,
   recordProjectFirestoreSaveError,
   recordProjectFirestoreSaveOk,
   recordProjectFlushEnter,
@@ -114,6 +125,14 @@ function appendResultRowsUngroup(
   return [...currentResults, ...newRows];
 }
 
+function ensureArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function ensureNullableArray<T>(value: T[] | null | undefined): T[] | null {
+  return Array.isArray(value) ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -130,6 +149,7 @@ export interface PersistedState {
   datasetStats: any | null;
   autoGroupSuggestions: AutoGroupSuggestion[];
   autoMergeRecommendations: AutoMergeRecommendation[];
+  groupMergeRecommendations: GroupMergeRecommendation[];
   tokenMergeRules: TokenMergeRule[];
   blockedTokens: Set<string>;
   labelSections: LabelSection[];
@@ -192,6 +212,7 @@ export interface ProjectPersistence extends PersistedState {
   updateLabelSections: (sections: LabelSection[]) => void;
   updateSuggestions: (suggestions: AutoGroupSuggestion[]) => void;
   updateAutoMergeRecommendations: (recommendations: AutoMergeRecommendation[]) => void;
+  updateGroupMergeRecommendations: (recommendations: GroupMergeRecommendation[]) => void;
   addActivityEntry: (entry: ActivityLogEntry) => void;
   clearActivityLog: () => void;
   bulkSet: (data: Partial<ProjectViewState>) => void;
@@ -208,6 +229,7 @@ export interface ProjectPersistence extends PersistedState {
   setDatasetStats: React.Dispatch<React.SetStateAction<any | null>>;
   setAutoGroupSuggestions: React.Dispatch<React.SetStateAction<AutoGroupSuggestion[]>>;
   setAutoMergeRecommendations: React.Dispatch<React.SetStateAction<AutoMergeRecommendation[]>>;
+  setGroupMergeRecommendations: React.Dispatch<React.SetStateAction<GroupMergeRecommendation[]>>;
   setTokenMergeRules: React.Dispatch<React.SetStateAction<TokenMergeRule[]>>;
   setBlockedTokens: React.Dispatch<React.SetStateAction<Set<string>>>;
   setLabelSections: React.Dispatch<React.SetStateAction<LabelSection[]>>;
@@ -226,6 +248,7 @@ export interface ProjectPersistence extends PersistedState {
     datasetStats: React.MutableRefObject<any | null>;
     autoGroupSuggestions: React.MutableRefObject<AutoGroupSuggestion[]>;
     autoMergeRecommendations: React.MutableRefObject<AutoMergeRecommendation[]>;
+    groupMergeRecommendations: React.MutableRefObject<GroupMergeRecommendation[]>;
     tokenMergeRules: React.MutableRefObject<TokenMergeRule[]>;
     blockedTokens: React.MutableRefObject<Set<string>>;
     labelSections: React.MutableRefObject<LabelSection[]>;
@@ -250,6 +273,7 @@ const EMPTY: PersistedState = {
   datasetStats: null,
   autoGroupSuggestions: [],
   autoMergeRecommendations: [],
+  groupMergeRecommendations: [],
   tokenMergeRules: [],
   blockedTokens: new Set<string>(),
   labelSections: [],
@@ -257,6 +281,76 @@ const EMPTY: PersistedState = {
 };
 
 const SESSION_CLIENT_ID = `c_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+
+// ---------------------------------------------------------------------------
+// Snapshot guard evaluation — pure function, unit-testable
+// ---------------------------------------------------------------------------
+
+export type SnapshotGuardInput = {
+  hasPendingWrites: boolean;
+  isProjectLoading: boolean;
+  isFlushing: boolean;
+  metaClientId: string | null;
+  ourClientId: string;
+  dataExists: boolean;
+  localResults: number;
+  localGroupedCount: number;
+  localApprovedCount: number;
+  localClusterCount: number;
+  incomingGroupedChunkCount: number | null;
+  incomingApprovedChunkCount: number | null;
+  incomingDataGroupedCount: number;
+  incomingDataApprovedCount: number;
+  loadFence: number;
+  incomingGroupedPageMass: number;
+  incomingSaveId: number;
+  localSaveId: number;
+};
+
+export type SnapshotGuardResult =
+  | { action: 'skip'; guard: string }
+  | { action: 'apply' };
+
+export function evaluateSnapshotGuards(input: SnapshotGuardInput): SnapshotGuardResult {
+  if (input.hasPendingWrites) return { action: 'skip', guard: '0:hasPendingWrites' };
+  if (input.isProjectLoading) return { action: 'skip', guard: '1a:projectLoading' };
+  if (input.isFlushing) return { action: 'skip', guard: '1b:isFlushing' };
+  if (input.metaClientId === input.ourClientId) return { action: 'skip', guard: '2:ownEcho' };
+
+  if (!input.dataExists) {
+    if (input.localResults > 0) return { action: 'skip', guard: '3:emptySnap_hasResults' };
+    if (input.localGroupedCount > 0) return { action: 'skip', guard: '3:emptySnap_hasGrouped' };
+    if (input.localApprovedCount > 0) return { action: 'skip', guard: '3:emptySnap_hasApproved' };
+    if (input.localClusterCount > 0) return { action: 'skip', guard: '3:emptySnap_hasClusters' };
+  }
+
+  if (input.dataExists) {
+    if (
+      input.incomingGroupedChunkCount != null && input.incomingGroupedChunkCount > 0 &&
+      input.localGroupedCount > 0 && input.incomingDataGroupedCount === 0
+    ) return { action: 'skip', guard: '4:partialGrouped' };
+    if (
+      input.incomingApprovedChunkCount != null && input.incomingApprovedChunkCount > 0 &&
+      input.localApprovedCount > 0 && input.incomingDataApprovedCount === 0
+    ) return { action: 'skip', guard: '4:partialApproved' };
+  }
+
+  if (input.dataExists && input.loadFence > 0) {
+    if (input.incomingGroupedPageMass < input.loadFence) {
+      return { action: 'skip', guard: '5:loadFence' };
+    }
+  }
+
+  if (input.dataExists) {
+    const iSave = input.incomingSaveId;
+    const lSave = input.localSaveId;
+    if (iSave > 0 && lSave > 0 && iSave < lSave) {
+      return { action: 'skip', guard: '6:staleSaveId' };
+    }
+  }
+
+  return { action: 'apply' };
+}
 
 // ---------------------------------------------------------------------------
 // Hook
@@ -281,6 +375,7 @@ export function useProjectPersistence(options: {
   const [datasetStats, setDatasetStats] = useState<any | null>(null);
   const [autoGroupSuggestions, setAutoGroupSuggestions] = useState<AutoGroupSuggestion[]>([]);
   const [autoMergeRecommendations, setAutoMergeRecommendations] = useState<AutoMergeRecommendation[]>([]);
+  const [groupMergeRecommendations, setGroupMergeRecommendations] = useState<GroupMergeRecommendation[]>([]);
   const [tokenMergeRules, setTokenMergeRules] = useState<TokenMergeRule[]>([]);
   const [blockedTokens, setBlockedTokens] = useState<Set<string>>(new Set());
   const [labelSections, setLabelSections] = useState<LabelSection[]>([]);
@@ -301,7 +396,7 @@ export function useProjectPersistence(options: {
     latest.current = {
       results, clusterSummary, tokenSummary, groupedClusters,
       approvedGroups, blockedKeywords, activityLog, stats,
-      datasetStats, autoGroupSuggestions, autoMergeRecommendations, tokenMergeRules,
+      datasetStats, autoGroupSuggestions, autoMergeRecommendations, groupMergeRecommendations, tokenMergeRules,
       blockedTokens, labelSections, fileName,
     };
   });
@@ -318,6 +413,7 @@ export function useProjectPersistence(options: {
   const datasetStatsRef = useRef(datasetStats);
   const autoGroupSuggestionsRef = useRef(autoGroupSuggestions);
   const autoMergeRecommendationsRef = useRef(autoMergeRecommendations);
+  const groupMergeRecommendationsRef = useRef(groupMergeRecommendations);
   const tokenMergeRulesRef = useRef(tokenMergeRules);
   const blockedTokensRef = useRef(blockedTokens);
   const labelSectionsRef = useRef(labelSections);
@@ -335,6 +431,7 @@ export function useProjectPersistence(options: {
   useEffect(() => { datasetStatsRef.current = datasetStats; }, [datasetStats]);
   useEffect(() => { autoGroupSuggestionsRef.current = autoGroupSuggestions; }, [autoGroupSuggestions]);
   useEffect(() => { autoMergeRecommendationsRef.current = autoMergeRecommendations; }, [autoMergeRecommendations]);
+  useEffect(() => { groupMergeRecommendationsRef.current = groupMergeRecommendations; }, [groupMergeRecommendations]);
   useEffect(() => { tokenMergeRulesRef.current = tokenMergeRules; }, [tokenMergeRules]);
   useEffect(() => { blockedTokensRef.current = blockedTokens; }, [blockedTokens]);
   useEffect(() => { labelSectionsRef.current = labelSections; }, [labelSections]);
@@ -346,11 +443,14 @@ export function useProjectPersistence(options: {
   const clientIdRef = useRef(SESSION_CLIENT_ID);
   const projectLoadingRef = useRef(false);
   const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
-  /** Coalesce rapid saves (e.g. keyword rating batches) — Firestore flushes after quiet period */
-  const firestoreFlushDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingLocalPersistRef = useRef<Promise<void>>(Promise.resolve());
   const saveCounterRef = useRef(0);
   /** True if a mutation happened since we started the current persist iteration (coalesced saves). */
   const needsPersistFlushRef = useRef(false);
+  /** True while flushPersistQueue is awaiting IDB/Firestore writes. Prevents onSnapshot
+   *  from calling applyViewState and overwriting `latest.current` mid-flush, which would
+   *  cause the next loop iteration to save remote data instead of local edits. */
+  const isFlushingRef = useRef(false);
   // Load fence: prevents a stale onSnapshot (from a previous session with a
   // different clientId) from shrinking grouped/approved state below what was
   // loaded from IDB. Set after loadProject, cleared on first local save.
@@ -374,10 +474,35 @@ export function useProjectPersistence(options: {
       tokenMergeRules: s.tokenMergeRules,
       autoGroupSuggestions: s.autoGroupSuggestions,
       autoMergeRecommendations: s.autoMergeRecommendations,
+      groupMergeRecommendations: s.groupMergeRecommendations,
       updatedAt: new Date().toISOString(),
       lastSaveId: saveCounterRef.current,
     };
   }, []);
+
+  const persistProjectPayloadToIDB = useCallback(async (
+    projectId: string,
+    payload: ProjectDataPayload,
+    options?: { mode?: 'checkpoint' | 'flush' },
+  ): Promise<boolean> => {
+    const mode = options?.mode ?? 'checkpoint';
+    if (mode === 'checkpoint') {
+      recordLocalPersistStart();
+    }
+    try {
+      await saveToIDB(projectId, payload);
+      recordLocalPersistOk({ decrementPending: mode === 'checkpoint' });
+      return true;
+    } catch (err) {
+      if (mode === 'checkpoint') {
+        recordLocalPersistError();
+        reportLocalPersistFailure(addToast, 'project data local save', err);
+      } else {
+        logPersistError('IDB save (flush)', err);
+      }
+      return false;
+    }
+  }, [addToast]);
 
   /**
    * Flush pending state to IDB + Firestore. Uses a while-loop so rapid auto-group /
@@ -389,24 +514,33 @@ export function useProjectPersistence(options: {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
 
+    isFlushingRef.current = true;
     recordProjectFlushEnter();
     try {
       while (needsPersistFlushRef.current) {
         needsPersistFlushRef.current = false;
 
-        const saveId = ++saveCounterRef.current;
+        // saveCounterRef is bumped in mutateAndSave (and suggestion checkpoints), not here —
+        // otherwise IDB checkpoints would reuse the previous id and merge could prefer stale FS.
+        const saveId = saveCounterRef.current;
         const payload = buildPayload();
         payload.lastSaveId = saveId;
         const clientId = clientIdRef.current;
 
+        // Guard: refuse to save a completely empty payload. A project with zero
+        // results, zero grouped clusters, AND zero approved groups is never a
+        // valid user state worth persisting — it's always a clearProject race
+        // artifact. Saving it would overwrite real data in IDB/Firestore.
+        if (!(payload.results?.length) && !(payload.groupedClusters?.length) && !(payload.approvedGroups?.length)) {
+          console.warn('[PERSIST] Skipping flush of empty payload (no results/groups/approved)');
+          break;
+        }
+
         loadFenceRef.current = 0;
 
+        await persistProjectPayloadToIDB(projectId, payload, { mode: 'flush' });
         try {
-          await saveToIDB(projectId, payload);
-        } catch (err) {
-          logPersistError('IDB save (flush)', err);
-        }
-        try {
+          recordProjectCloudWriteStart();
           await saveProjectDataToFirestore(projectId, payload, { saveId, clientId });
           recordProjectFirestoreSaveOk();
           console.log(
@@ -422,69 +556,57 @@ export function useProjectPersistence(options: {
         // If mutateAndSave ran during the awaits above, needsPersistFlushRef is true → loop
       }
     } finally {
+      isFlushingRef.current = false;
       recordProjectFlushExit();
     }
-  }, [buildPayload, addToast]);
+  }, [buildPayload, addToast, persistProjectPayloadToIDB]);
 
-  /** Queue Firestore sync (debounced). `latest.current` is always read at flush time. */
+  /** Queue Firestore + IDB flush (no debounce). `latest.current` is read at flush time. */
   const enqueueSave = useCallback(() => {
     if (!activeProjectIdRef.current) return;
     needsPersistFlushRef.current = true;
-    if (firestoreFlushDebounceRef.current) clearTimeout(firestoreFlushDebounceRef.current);
-    firestoreFlushDebounceRef.current = setTimeout(() => {
-      firestoreFlushDebounceRef.current = null;
-      pendingSaveRef.current = pendingSaveRef.current
-        .then(flushPersistQueue)
-        .catch((err) => logPersistError('persist queue flush', err));
-    }, 500);
-  }, [flushPersistQueue]);
-
-  /** Flush cloud sync immediately (e.g. tab hidden) — skip debounce */
-  const enqueueSaveImmediate = useCallback(() => {
-    if (!activeProjectIdRef.current) return;
-    needsPersistFlushRef.current = true;
-    if (firestoreFlushDebounceRef.current) {
-      clearTimeout(firestoreFlushDebounceRef.current);
-      firestoreFlushDebounceRef.current = null;
-    }
     pendingSaveRef.current = pendingSaveRef.current
       .then(flushPersistQueue)
       .catch((err) => logPersistError('persist queue flush', err));
   }, [flushPersistQueue]);
 
   /**
-   * Immediate durability barrier used by long-running jobs that need a
-   * user-visible "done and synced" moment before returning control.
+   * Durability barrier for long-running jobs that need a user-visible "done and synced"
+   * moment before returning control.
    */
   const flushNow = useCallback(async () => {
     if (!activeProjectIdRef.current) return;
-    enqueueSaveImmediate();
+    enqueueSave();
+    await pendingLocalPersistRef.current;
     await pendingSaveRef.current;
-  }, [enqueueSaveImmediate]);
+  }, [enqueueSave]);
 
   /**
    * Crash-safety checkpoint: persist latest state to IDB immediately.
-   * Firestore remains coalesced via enqueueSave, but IDB gets a best-effort
-   * snapshot right away so reloads recover the newest local edits.
+   * `enqueueSave` runs the same payload to Firestore on the serialized queue.
    */
-  const checkpointToIDB = useCallback((overrides?: Partial<PersistedState>) => {
+  const checkpointToIDB = useCallback(async (overrides?: Partial<PersistedState>) => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     const payload = buildPayload(overrides);
-    saveToIDB(projectId, payload).catch((err) =>
-      logPersistError('IDB checkpoint', err),
-    );
-  }, [buildPayload]);
+    await persistProjectPayloadToIDB(projectId, payload, { mode: 'checkpoint' });
+  }, [buildPayload, persistProjectPayloadToIDB]);
 
-  // Best-effort: queue a flush when the tab hides so refresh/navigation is less likely
-  // to hit the server before the coalesced queue finishes writing.
+  // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === 'hidden') enqueueSaveImmediate();
+      if (document.visibilityState === 'hidden') enqueueSave();
+    };
+    const onPageHide = () => {
+      enqueueSave();
     };
     document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
-  }, [enqueueSaveImmediate]);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [enqueueSave]);
 
   // ── Helper: update latest + state + save atomically ───────────────────
   const mutateAndSave = useCallback((
@@ -493,6 +615,9 @@ export function useProjectPersistence(options: {
     const changes = updater(latest.current);
     // 1. Update latest ref synchronously
     latest.current = { ...latest.current, ...changes };
+    // 1b. Monotonic save id — every mutation gets a new id before IDB checkpoint so
+    // pickNewerProjectPayload prefers this session over stale Firestore on refresh.
+    saveCounterRef.current += 1;
     // 2. Update React state for rendering
     if ('results' in changes) setResults(changes.results!);
     if ('clusterSummary' in changes) setClusterSummary(changes.clusterSummary!);
@@ -505,33 +630,35 @@ export function useProjectPersistence(options: {
     if ('datasetStats' in changes) setDatasetStats(changes.datasetStats!);
     if ('autoGroupSuggestions' in changes) setAutoGroupSuggestions(changes.autoGroupSuggestions!);
     if ('autoMergeRecommendations' in changes) setAutoMergeRecommendations(changes.autoMergeRecommendations!);
+    if ('groupMergeRecommendations' in changes) setGroupMergeRecommendations(changes.groupMergeRecommendations!);
     if ('tokenMergeRules' in changes) setTokenMergeRules(changes.tokenMergeRules!);
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
     if ('fileName' in changes) setFileName(changes.fileName!);
     // 3. Immediate local durability (crash-safe)
-    checkpointToIDB();
-    // 4. Queue save (coalesced — latest.current already has full state)
+    pendingLocalPersistRef.current = checkpointToIDB();
+    // 4. Queue Firestore + IDB flush (serialized queue; loop coalesces mid-await mutations)
     enqueueSave();
   }, [checkpointToIDB, enqueueSave]);
 
   // ── applyViewState: batch-set all 14 fields from a ProjectViewState ──
   const applyViewState = useCallback((vs: ProjectViewState) => {
     const next: PersistedState = {
-      results: vs.results,
-      clusterSummary: vs.clusterSummary,
-      tokenSummary: vs.tokenSummary,
-      groupedClusters: vs.groupedClusters,
-      approvedGroups: vs.approvedGroups,
-      activityLog: vs.activityLog,
-      tokenMergeRules: vs.tokenMergeRules,
-      autoGroupSuggestions: vs.autoGroupSuggestions,
-      autoMergeRecommendations: vs.autoMergeRecommendations,
+      results: ensureNullableArray(vs.results),
+      clusterSummary: ensureNullableArray(vs.clusterSummary),
+      tokenSummary: ensureNullableArray(vs.tokenSummary),
+      groupedClusters: ensureArray(vs.groupedClusters),
+      approvedGroups: ensureArray(vs.approvedGroups),
+      activityLog: ensureArray(vs.activityLog),
+      tokenMergeRules: ensureArray(vs.tokenMergeRules),
+      autoGroupSuggestions: ensureArray(vs.autoGroupSuggestions),
+      autoMergeRecommendations: ensureArray(vs.autoMergeRecommendations),
+      groupMergeRecommendations: ensureArray(vs.groupMergeRecommendations),
       stats: vs.stats,
       datasetStats: vs.datasetStats as any,
-      blockedTokens: new Set<string>(vs.blockedTokens),
-      blockedKeywords: vs.blockedKeywords,
-      labelSections: vs.labelSections,
+      blockedTokens: new Set<string>(ensureArray(vs.blockedTokens)),
+      blockedKeywords: ensureArray(vs.blockedKeywords),
+      labelSections: ensureArray(vs.labelSections),
       fileName: vs.fileName,
     };
     latest.current = next;
@@ -544,6 +671,7 @@ export function useProjectPersistence(options: {
     setTokenMergeRules(next.tokenMergeRules);
     setAutoGroupSuggestions(next.autoGroupSuggestions);
     setAutoMergeRecommendations(next.autoMergeRecommendations);
+    setGroupMergeRecommendations(next.groupMergeRecommendations);
     setStats(next.stats);
     setDatasetStats(next.datasetStats);
     setBlockedTokens(next.blockedTokens);
@@ -585,6 +713,9 @@ export function useProjectPersistence(options: {
   }, [applyViewState]);
 
   const clearProject = useCallback(() => {
+    // Cancel any pending flushes so stale mutations from the previous project
+    // don't persist empty state to the NEW project's IDB/Firestore slot.
+    needsPersistFlushRef.current = false;
     applyViewState(createEmptyProjectViewState());
   }, [applyViewState]);
 
@@ -608,128 +739,87 @@ export function useProjectPersistence(options: {
     const unsub = onSnapshot(
       collection(db, 'projects', pid, 'chunks'),
       (snap) => {
-        markListenerSnapshot('project_chunks', snap);
+        markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
+
         const metaDoc = snap.docs.find((d) => (d.data() as any)?.type === 'meta');
         const meta = metaDoc ? (metaDoc.data() as any) : null;
-
-        // ── Guard 1: project is loading — loadProject is the authority ──
-        if (projectLoadingRef.current) return;
-
-        // ── Guard 2: skip our OWN save echoes ──
-        // Every save writes our clientId into the meta doc. If the incoming
-        // snapshot came from us, the local state is already correct (set by
-        // mutateAndSave). Applying the echo would overwrite fresher local
-        // data with stale intermediate snapshots during rapid chained saves.
-        if (meta?.clientId === ourClientId) return;
-
-        // From here on we're handling another client's write (or a first-load
-        // snapshot from a previous session with a different clientId).
-
-        const project = projectsRef.current.find(p => p.id === pid);
         const data = snap.empty ? null : buildProjectDataPayloadFromChunkDocs(snap.docs);
 
-        // ── Guard 3: don't wipe local state with empty/null data ──
-        if (!data && latest.current.results && latest.current.results.length > 0) {
-          console.warn('[PERSIST] Ignoring empty snapshot — local has', latest.current.results.length, 'results');
-          return;
-        }
-        if (!data && latest.current.groupedClusters.length > 0) {
-          console.warn('[PERSIST] Ignoring null snapshot — local has', latest.current.groupedClusters.length, 'grouped');
-          return;
-        }
-        if (!data && latest.current.approvedGroups.length > 0) {
-          console.warn('[PERSIST] Ignoring null snapshot — local has', latest.current.approvedGroups.length, 'approved');
-          return;
-        }
-        if (!data && latest.current.clusterSummary && latest.current.clusterSummary.length > 0) {
-          console.warn('[PERSIST] Ignoring null snapshot — local has', latest.current.clusterSummary.length, 'clusters');
+        const guardResult = evaluateSnapshotGuards({
+          hasPendingWrites: Boolean(snap.metadata?.hasPendingWrites),
+          isProjectLoading: projectLoadingRef.current,
+          isFlushing: isFlushingRef.current,
+          metaClientId: meta?.clientId ?? null,
+          ourClientId,
+          dataExists: data != null,
+          localResults: latest.current.results?.length ?? 0,
+          localGroupedCount: latest.current.groupedClusters.length,
+          localApprovedCount: latest.current.approvedGroups.length,
+          localClusterCount: latest.current.clusterSummary?.length ?? 0,
+          incomingGroupedChunkCount:
+            typeof meta?.groupedClusterCount === 'number' ? meta.groupedClusterCount : null,
+          incomingApprovedChunkCount:
+            typeof meta?.approvedGroupCount === 'number' ? meta.approvedGroupCount : null,
+          incomingDataGroupedCount: data?.groupedClusters?.length ?? 0,
+          incomingDataApprovedCount: data?.approvedGroups?.length ?? 0,
+          loadFence: loadFenceRef.current,
+          incomingGroupedPageMass: data ? groupedPageMass(data) : 0,
+          incomingSaveId: data?.lastSaveId ?? 0,
+          localSaveId: saveCounterRef.current,
+        });
+
+        if (guardResult.action === 'skip') {
+          if (guardResult.guard.startsWith('6:') || guardResult.guard.startsWith('3:') || guardResult.guard.startsWith('5:')) {
+            console.warn('[PERSIST] Snapshot rejected by guard:', guardResult.guard);
+          }
           return;
         }
 
-        // ── Guard 4: partial multi-batch writes from other clients ──
-        if (data) {
-          const incomingGroupedCount =
-            typeof meta?.groupedClusterCount === 'number' ? meta.groupedClusterCount : null;
-          const incomingApprovedCount =
-            typeof meta?.approvedGroupCount === 'number' ? meta.approvedGroupCount : null;
-          if (
-            incomingGroupedCount != null && incomingGroupedCount > 0 &&
-            latest.current.groupedClusters.length > 0 && data.groupedClusters.length === 0
-          ) {
-            console.warn('[PERSIST] Ignoring partial grouped snapshot from other client');
-            return;
-          }
-          if (
-            incomingApprovedCount != null && incomingApprovedCount > 0 &&
-            latest.current.approvedGroups.length > 0 && data.approvedGroups.length === 0
-          ) {
-            console.warn('[PERSIST] Ignoring partial approved snapshot from other client');
-            return;
-          }
-        }
-
-        // ── Guard 5: load fence — don't shrink below grouped page mass loaded at session start ──
-        // After refresh, loadProjectDataForView merges IDB + Firestore by lastSaveId.
-        // If Firestore still lags an incomplete write, the fence blocks a shrink until
-        // a local save clears it.
+        // Guard 5 side-effect: clear load fence when snapshot passes it
         if (data && loadFenceRef.current > 0) {
-          const incomingTotal = groupedPageMass(data);
-          if (incomingTotal < loadFenceRef.current) {
-            console.warn(
-              '[PERSIST] Load fence active — rejecting snapshot that would shrink grouped pages from',
-              loadFenceRef.current, 'to', incomingTotal,
-              '(fence clears on first local save)',
-            );
-            return;
-          }
-          // Snapshot is >= fence, safe to apply. Clear fence since Firestore is caught up.
           loadFenceRef.current = 0;
         }
 
-        // ── Guard 6: stale saveId snapshot shrink protection ──
-        // Prevent late arrival of an older save (often from cache/listener timing) from
-        // shrinking grouped pages after we've already advanced locally.
-        if (data) {
-          const incomingSaveId = data.lastSaveId ?? 0;
-          const localSaveId = saveCounterRef.current;
-          const incomingPages = groupedPageMass(data);
-          const localPages = countGroupedPages(latest.current);
-          if (
-            incomingSaveId > 0 &&
-            localSaveId > 0 &&
-            incomingSaveId < localSaveId &&
-            incomingPages < localPages
-          ) {
-            console.warn(
-              '[PERSIST] Rejecting stale snapshot shrink: saveId',
-              incomingSaveId,
-              '<',
-              localSaveId,
-              'pages',
-              incomingPages,
-              '<',
-              localPages,
-            );
-            return;
-          }
-        }
+        const project = projectsRef.current.find(p => p.id === pid);
 
         applyViewState(
           data ? toProjectViewState(data, project) : createEmptyProjectViewState()
         );
+        // Advance saveCounterRef so subsequent local mutations produce IDs
+        // higher than the remote snapshot. Without this, a local edit after a
+        // remote apply could have a LOWER saveId than Firestore, causing
+        // pickNewerProjectPayload to discard it on refresh.
+        if (data) {
+          const incomingSaveId = data.lastSaveId ?? 0;
+          if (incomingSaveId > saveCounterRef.current) {
+            saveCounterRef.current = incomingSaveId;
+          }
+        }
+        // Only cache remote snapshot to IDB when it's at least as new as local
+        // state. Otherwise a stale echo overwrites the correct IDB checkpoint
+        // from mutateAndSave, causing data loss on next refresh.
+        // SAFETY: Never cache a completely empty snapshot to IDB — it's a
+        // corruption artifact from a clearProject race, not real user data.
         if (data && pid) {
-          saveToIDB(pid, data).catch((err) =>
-            logPersistError('IDB cache after remote snapshot', err),
-          );
+          const incomingSaveId = data.lastSaveId ?? 0;
+          const localSaveId = saveCounterRef.current;
+          const incomingHasData = (data.results?.length ?? 0) > 0 ||
+            (data.groupedClusters?.length ?? 0) > 0 ||
+            (data.approvedGroups?.length ?? 0) > 0;
+          if (incomingSaveId >= localSaveId && incomingHasData) {
+            saveToIDB(pid, data).catch((err) =>
+              logPersistError('IDB cache after remote snapshot', err),
+            );
+          }
         }
       },
       (err) => {
-        markListenerError('project_chunks');
+        markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
         reportPersistFailure(addToast, 'project chunks listener', err);
       },
     );
     return () => {
-      clearListenerError('project_chunks');
+      clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
       if (typeof unsub === 'function') unsub();
     };
   }, [activeProjectId, applyViewState, addToast]);
@@ -825,17 +915,25 @@ export function useProjectPersistence(options: {
       }
     }
 
+    const { clustersToAppend, duplicateTokens } = getUniqueClustersToRestore(
+      s.clusterSummary,
+      clustersToReturn,
+    );
+    if (duplicateTokens.length > 0) {
+      console.warn('[PERSIST] Prevented duplicate approved restore for tokens:', duplicateTokens);
+    }
+
     const nextGrouped = groupsToReturn.length > 0
       ? [...s.groupedClusters, ...groupsToReturn]
       : s.groupedClusters;
 
-    const nextClusters = clustersToReturn.length > 0 && s.clusterSummary
-      ? [...s.clusterSummary, ...clustersToReturn]
+    const nextClusters = clustersToAppend.length > 0
+      ? [...(s.clusterSummary || []), ...clustersToAppend]
       : s.clusterSummary;
 
     let nextResults = s.results;
-    if (s.results && clustersToReturn.length > 0) {
-      nextResults = appendResultRowsRemoveFromApproved(s.results, clustersToReturn);
+    if (s.results && clustersToAppend.length > 0) {
+      nextResults = appendResultRowsRemoveFromApproved(s.results, clustersToAppend);
     }
 
     mutateAndSave(() => ({
@@ -887,13 +985,21 @@ export function useProjectPersistence(options: {
       }
     }
 
-    const nextClusters = s.clusterSummary
-      ? [...s.clusterSummary, ...clustersToReturn]
-      : null;
+    const { clustersToAppend, duplicateTokens } = getUniqueClustersToRestore(
+      s.clusterSummary,
+      clustersToReturn,
+    );
+    if (duplicateTokens.length > 0) {
+      console.warn('[PERSIST] Prevented duplicate ungroup restore for tokens:', duplicateTokens);
+    }
+
+    const nextClusters = clustersToAppend.length > 0
+      ? [...(s.clusterSummary || []), ...clustersToAppend]
+      : s.clusterSummary;
 
     let nextResults = s.results;
-    if (s.results && clustersToReturn.length > 0) {
-      nextResults = appendResultRowsUngroup(s.results, clustersToReturn);
+    if (s.results && clustersToAppend.length > 0) {
+      nextResults = appendResultRowsUngroup(s.results, clustersToAppend);
     }
 
     mutateAndSave(() => ({
@@ -966,6 +1072,10 @@ export function useProjectPersistence(options: {
     mutateAndSave(() => ({ autoMergeRecommendations: recommendations }));
   }, [mutateAndSave]);
 
+  const updateGroupMergeRecommendations = useCallback((recommendations: GroupMergeRecommendation[]) => {
+    mutateAndSave(() => ({ groupMergeRecommendations: recommendations }));
+  }, [mutateAndSave]);
+
   // Debounced suggestion-only persistence — onSuggestionsChange can still fire very
   // often; main mutations now coalesce in flushPersistQueue. Suggestions alone use
   // a 2s idle timer so we do not schedule redundant flushes on every keystroke.
@@ -974,8 +1084,9 @@ export function useProjectPersistence(options: {
     // Update state + ref immediately (UI stays responsive)
     latest.current = { ...latest.current, autoGroupSuggestions: suggestions };
     setAutoGroupSuggestions(suggestions);
+    saveCounterRef.current += 1;
     // Persist immediately to local cache for crash resilience.
-    checkpointToIDB({ autoGroupSuggestions: suggestions });
+    pendingLocalPersistRef.current = checkpointToIDB({ autoGroupSuggestions: suggestions });
 
     // Debounce the actual save
     if (suggestionTimerRef.current) clearTimeout(suggestionTimerRef.current);
@@ -1007,6 +1118,7 @@ export function useProjectPersistence(options: {
     if ('tokenMergeRules' in data) changes.tokenMergeRules = data.tokenMergeRules!;
     if ('autoGroupSuggestions' in data) changes.autoGroupSuggestions = data.autoGroupSuggestions!;
     if ('autoMergeRecommendations' in data) changes.autoMergeRecommendations = data.autoMergeRecommendations!;
+    if ('groupMergeRecommendations' in data) changes.groupMergeRecommendations = data.groupMergeRecommendations!;
     if ('stats' in data) changes.stats = data.stats!;
     if ('datasetStats' in data) changes.datasetStats = data.datasetStats;
     if ('blockedTokens' in data) changes.blockedTokens = new Set<string>(data.blockedTokens!);
@@ -1022,11 +1134,15 @@ export function useProjectPersistence(options: {
         );
         setProjects(updatedProjects);
         const proj = updatedProjects.find(p => p.id === projectId);
-        if (proj) saveProjectToFirestore(proj);
+        if (proj) {
+          saveProjectToFirestore(proj).catch((err) => {
+            reportPersistFailure(addToast, 'project metadata save', err);
+          });
+        }
       }
     }
     mutateAndSave(() => changes);
-  }, [mutateAndSave, projects, setProjects]);
+  }, [mutateAndSave, projects, setProjects, addToast]);
 
   // ── Return ────────────────────────────────────────────────────────────
   return {
@@ -1034,7 +1150,7 @@ export function useProjectPersistence(options: {
     results, clusterSummary, tokenSummary, groupedClusters,
     approvedGroups, blockedKeywords, activityLog, stats,
     datasetStats, autoGroupSuggestions, tokenMergeRules,
-    autoMergeRecommendations,
+    autoMergeRecommendations, groupMergeRecommendations,
     blockedTokens, labelSections, fileName,
     activeProjectId,
 
@@ -1059,6 +1175,7 @@ export function useProjectPersistence(options: {
     undoMerge,
     updateLabelSections,
     updateAutoMergeRecommendations,
+    updateGroupMergeRecommendations,
     updateSuggestions,
     addActivityEntry,
     clearActivityLog,
@@ -1069,6 +1186,7 @@ export function useProjectPersistence(options: {
     setApprovedGroups, setBlockedKeywords, setActivityLog, setStats,
     setDatasetStats, setAutoGroupSuggestions, setTokenMergeRules,
     setAutoMergeRecommendations,
+    setGroupMergeRecommendations,
     setBlockedTokens, setLabelSections, setFileName,
 
     // Transitional refs
@@ -1084,6 +1202,7 @@ export function useProjectPersistence(options: {
       datasetStats: datasetStatsRef,
       autoGroupSuggestions: autoGroupSuggestionsRef,
       autoMergeRecommendations: autoMergeRecommendationsRef,
+      groupMergeRecommendations: groupMergeRecommendationsRef,
       tokenMergeRules: tokenMergeRulesRef,
       blockedTokens: blockedTokensRef,
       labelSections: labelSectionsRef,

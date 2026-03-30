@@ -24,3 +24,20 @@ jobs:
         run: NAPI_RS_FORCE_WASI=1 npx vitest run
       - name: Production Build
         run: NAPI_RS_FORCE_WASI=1 npx vite build
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm install --ignore-scripts
+      - run: npm install --ignore-scripts esbuild-wasm @rollup/wasm-node @tailwindcss/oxide-wasm32-wasi --force
+      - run: node scripts/patch-wasm.cjs
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run Browser E2E
+        run: npx playwright test

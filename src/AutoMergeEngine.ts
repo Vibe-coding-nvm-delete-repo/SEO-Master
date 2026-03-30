@@ -1,5 +1,6 @@
 import type { OpenRouterUsage } from './KeywordRatingEngine';
 import { addOpenRouterUsage, parseOpenRouterUsage } from './KeywordRatingEngine';
+import { OPENROUTER_REQUEST_TIMEOUT_MS, runWithOpenRouterTimeout } from './openRouterTimeout';
 import type { TokenSummary } from './types';
 
 export const DEFAULT_AUTO_MERGE_PROMPT = `You identify tokens that are lexically or semantically IDENTICAL to a source token.
@@ -245,24 +246,29 @@ export async function fetchAutoMergeMatches(
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${settings.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
-      },
-      body: JSON.stringify(
-        openRouterBody(
-          model,
-          user,
-          settings.temperature,
-          settings.maxTokens,
-          settings.reasoningEffort,
-        ),
-      ),
+    const timedResponse = await runWithOpenRouterTimeout({
       signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${settings.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
+        },
+        body: JSON.stringify(
+          openRouterBody(
+            model,
+            user,
+            settings.temperature,
+            settings.maxTokens,
+            settings.reasoningEffort,
+          ),
+        ),
+        signal: requestSignal,
+      }),
     });
+    const res = timedResponse.result;
     if (res.status === 429) {
       if (attempt < maxRetries) {
         const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
@@ -272,10 +278,18 @@ export async function fetchAutoMergeMatches(
       throw new Error('Rate limited (429) during Auto Merge.');
     }
     if (!res.ok) {
-      const t = await res.text().catch(() => '');
+      const t = (await runWithOpenRouterTimeout({
+        signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async () => res.text().catch(() => ''),
+      }).catch(() => ({ result: '' }))).result;
       throw new Error(`Auto Merge API ${res.status}: ${t.slice(0, 200)}`);
     }
-    const data = await res.json();
+    const data = (await runWithOpenRouterTimeout({
+      signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async () => res.json(),
+    })).result;
     const content = data.choices?.[0]?.message?.content || '';
     const parsed = parseAutoMergeJson(content);
     if (!parsed) {

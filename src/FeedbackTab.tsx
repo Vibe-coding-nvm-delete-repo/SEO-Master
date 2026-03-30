@@ -138,7 +138,12 @@ const FeedbackTab: React.FC = () => {
         await swapFeedbackPriority(a, b);
       } catch (e) {
         console.warn('Reorder failed:', e);
-        addToast('Could not update priority. Try again.', 'error');
+        addToast('Could not update priority. Try again.', 'error', {
+          notification: {
+            mode: 'none',
+            source: 'feedback',
+          },
+        });
       } finally {
         setSwapping(null);
       }
@@ -194,10 +199,20 @@ const FeedbackTab: React.FC = () => {
 
       try {
         await navigator.clipboard.writeText(content);
-        addToast('Copied full feedback.', 'success');
+        addToast('Copied full feedback.', 'success', {
+          notification: {
+            mode: 'none',
+            source: 'feedback',
+          },
+        });
       } catch (e) {
         console.warn('Copy feedback failed:', e);
-        addToast('Could not copy feedback. Try again.', 'error');
+        addToast('Could not copy feedback. Try again.', 'error', {
+          notification: {
+            mode: 'none',
+            source: 'feedback',
+          },
+        });
       }
     },
     [addToast],

@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-import { db } from './firebase';
 import { loadFromIDB, saveToIDB } from './projectStorage';
+import { persistAppSettingsDoc, subscribeAppSettingsDoc } from './appSettingsPersistence';
+import { CLOUD_SYNC_CHANNELS } from './cloudSyncStatus';
 import {
   buildDefaultRows,
   buildSeedKeywords,
@@ -68,10 +68,11 @@ export default function TopicsSubTab() {
     let mounted = true;
     (async () => {
       try {
-        const idb = await loadFromIDB<{ rows?: unknown[]; schemaVersion?: number }>(IDB_KEY);
+        const idb = await loadFromIDB<{ rows?: unknown[]; schemaVersion?: number; value?: { rows?: unknown[]; schemaVersion?: number } }>(IDB_KEY);
         if (!mounted) return;
-        const parsed = (idb?.rows || []).map(parseTopicRow).filter((r): r is LoanTopicRow => r !== null);
-        const resolved = resolveLoanTopicsRows(parsed.length > 0 ? parsed : null, idb?.schemaVersion, CANONICAL_LOAN_TOPICS_SEED, LOAN_TOPICS_SCHEMA_VERSION);
+        const payload = idb?.value ?? idb;
+        const parsed = (payload?.rows || []).map(parseTopicRow).filter((r): r is LoanTopicRow => r !== null);
+        const resolved = resolveLoanTopicsRows(parsed.length > 0 ? parsed : null, payload?.schemaVersion, CANONICAL_LOAN_TOPICS_SEED, LOAN_TOPICS_SCHEMA_VERSION);
         setRows(resolved);
       } catch {
         if (!mounted) return;
@@ -81,16 +82,17 @@ export default function TopicsSubTab() {
       }
     })();
 
-    const unsub = onSnapshot(
-      doc(db, 'app_settings', FS_DOC),
-      (snap) => {
+    const unsub = subscribeAppSettingsDoc({
+      docId: FS_DOC,
+      channel: CLOUD_SYNC_CHANNELS.topicsLoans,
+      onData: (snap) => {
         if (!snap.exists()) return;
         const data = snap.data() as { rows?: unknown[]; updatedAt?: string; schemaVersion?: number };
         const incomingUpdatedAt = typeof data.updatedAt === 'string' ? data.updatedAt : '';
-        if (suppressSnapshotRef.current && incomingUpdatedAt && incomingUpdatedAt === lastWrittenAtRef.current) {
-          suppressSnapshotRef.current = false;
+        if (suppressSnapshotRef.current && incomingUpdatedAt && lastWrittenAtRef.current && incomingUpdatedAt <= lastWrittenAtRef.current) {
           return;
         }
+        suppressSnapshotRef.current = false;
         const parsed = (data?.rows || []).map(parseTopicRow).filter((r): r is LoanTopicRow => r !== null);
         if (parsed.length === 0) return;
         const resolved = resolveLoanTopicsRows(parsed, data.schemaVersion, CANONICAL_LOAN_TOPICS_SEED, LOAN_TOPICS_SCHEMA_VERSION);
@@ -101,10 +103,10 @@ export default function TopicsSubTab() {
           schemaVersion: LOAN_TOPICS_SCHEMA_VERSION,
         });
       },
-      (err) => {
+      onError: (err) => {
         console.warn('[Topics] Firestore sync error:', err);
       },
-    );
+    });
 
     return () => {
       mounted = false;
@@ -112,17 +114,34 @@ export default function TopicsSubTab() {
     };
   }, []);
 
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
   useEffect(() => {
     if (!hydratedRef.current) return;
-    const updatedAt = new Date().toISOString();
-    const payload = { rows, updatedAt, schemaVersion: LOAN_TOPICS_SCHEMA_VERSION };
-    lastWrittenAtRef.current = updatedAt;
-    suppressSnapshotRef.current = true;
-    void saveToIDB(IDB_KEY, payload).catch((err) => console.warn('[Topics] IDB save failed:', err));
-    void setDoc(doc(db, 'app_settings', FS_DOC), payload, { merge: true }).catch((err) => {
-      suppressSnapshotRef.current = false;
-      console.warn('[Topics] Firestore save failed:', err);
-    });
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      const updatedAt = new Date().toISOString();
+      const payload = { rows: rowsRef.current, updatedAt, schemaVersion: LOAN_TOPICS_SCHEMA_VERSION };
+      lastWrittenAtRef.current = updatedAt;
+      suppressSnapshotRef.current = true;
+      void persistAppSettingsDoc({
+        docId: FS_DOC,
+        idbKey: IDB_KEY,
+        data: payload,
+        merge: true,
+        localContext: 'topics loans',
+        cloudContext: 'topics loans',
+      }).then(({ cloudOk }) => {
+        if (cloudOk) return;
+        suppressSnapshotRef.current = false;
+      }).catch((err) => {
+        suppressSnapshotRef.current = false;
+        console.warn('[Topics] Firestore save failed:', err);
+      });
+    }, 500);
+    return () => { if (persistTimerRef.current) clearTimeout(persistTimerRef.current); };
   }, [rows]);
 
   useEffect(() => {

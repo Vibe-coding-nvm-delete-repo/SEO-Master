@@ -6,7 +6,7 @@
 import { useCallback, useState, useTransition, type Dispatch, type SetStateAction } from 'react';
 import type { ClusterSummary, TokenSummary } from '../types';
 
-export type GroupDataTab = 'pages' | 'keywords' | 'grouped' | 'approved' | 'blocked' | 'auto-group';
+export type GroupDataTab = 'pages' | 'keywords' | 'grouped' | 'group-auto-merge' | 'approved' | 'blocked' | 'auto-group';
 
 export interface UseKeywordWorkspaceInput {
   setSelectedClusters: Dispatch<SetStateAction<Set<string>>>;
@@ -19,14 +19,13 @@ export function useKeywordWorkspace({ setSelectedClusters }: UseKeywordWorkspace
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(500);
   const [, startTransition] = useTransition();
+  /** Urgent updates — do not wrap in startTransition or tab switches feel delayed (seconds) under load. */
   const switchTab = useCallback((tab: GroupDataTab) => {
-    startTransition(() => {
-      setActiveTab(tab);
-      setCurrentPage(1);
-      setSelectedClusters(new Set());
-      setSelectedGroups(new Set());
-      setSelectedSubClusters(new Set());
-    });
+    setActiveTab(tab);
+    setCurrentPage(1);
+    setSelectedClusters(new Set());
+    setSelectedGroups(new Set());
+    setSelectedSubClusters(new Set());
   }, [setSelectedClusters]);
   const [statsExpanded, setStatsExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);

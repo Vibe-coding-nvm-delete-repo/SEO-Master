@@ -2,6 +2,10 @@
 // No React dependencies. Handles clustering, cost estimation, prompt building, response parsing, queue processing.
 
 import type { ClusterSummary, AutoGroupCluster, AutoGroupSuggestion, ReconciliationCandidate } from './types';
+import {
+  OPENROUTER_REQUEST_TIMEOUT_MS,
+  runWithOpenRouterTimeout,
+} from './openRouterTimeout';
 
 /** Max ungrouped pages (keywords) per v1 assignment API call — UI slider and prompts stay aligned to this. */
 export const AUTO_GROUP_MAX_BATCH_PAGES = 500;
@@ -848,17 +852,10 @@ export async function processAutoGroupQueue(
             body.reasoning = { effort: config.reasoningEffort };
           }
 
-          // Per-request timeout (60s) — prevents hanging forever on slow models
-          const timeoutController = new AbortController();
-          const timeoutId = setTimeout(() => timeoutController.abort(), 60000);
-          const combinedSignal = signal.aborted ? signal : timeoutController.signal;
-          // Also abort per-request if the global signal fires
-          const globalAbortHandler = () => timeoutController.abort();
-          signal.addEventListener('abort', globalAbortHandler, { once: true });
-
-          let res: Response;
-          try {
-            res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          const timedResponse = await runWithOpenRouterTimeout({
+            signal,
+            timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+            run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
               method: 'POST',
               headers: {
                 'Authorization': `Bearer ${config.apiKey}`,
@@ -866,12 +863,10 @@ export async function processAutoGroupQueue(
                 'HTTP-Referer': window.location.origin,
               },
               body: JSON.stringify(body),
-              signal: combinedSignal,
-            });
-          } finally {
-            clearTimeout(timeoutId);
-            signal.removeEventListener('abort', globalAbortHandler);
-          }
+              signal: requestSignal,
+            }),
+          });
+          const res = timedResponse.result;
 
           if (res.status === 429) {
             if (attempt < maxRateLimitRetries) {
@@ -887,7 +882,11 @@ export async function processAutoGroupQueue(
           }
 
           if (!res.ok) {
-            const errText = await res.text().catch(() => '');
+            const errText = (await runWithOpenRouterTimeout({
+              signal,
+              timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+              run: async () => res.text().catch(() => ''),
+            }).catch(() => ({ result: '' }))).result;
             callbacks.onError(cluster.id, `API ${res.status}: ${errText.slice(0, 200)}`);
             totalProcessed++;
             callbacks.onCompleted(cluster.id);
@@ -895,7 +894,11 @@ export async function processAutoGroupQueue(
             break;
           }
 
-          responseData = await res.json();
+          responseData = (await runWithOpenRouterTimeout({
+            signal,
+            timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+            run: async () => res.json(),
+          })).result;
           result = responseData.choices?.[0]?.message?.content || '';
           break;
         }
@@ -928,7 +931,7 @@ export async function processAutoGroupQueue(
           }
         }
       } catch (e: any) {
-        if (e.name === 'AbortError') return;
+        if (e.name === 'AbortError' && signal.aborted) return;
         callbacks.onError(cluster.id, e.message || 'Unknown error');
         totalProcessed++;
         callbacks.onCompleted(cluster.id);
@@ -1044,14 +1047,10 @@ export async function processReconciliation(
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
           if (signal.aborted) return;
 
-          const timeoutController = new AbortController();
-          const timeoutId = setTimeout(() => timeoutController.abort(), 60000);
-          const globalAbortHandler = () => timeoutController.abort();
-          signal.addEventListener('abort', globalAbortHandler, { once: true });
-
-          let res: Response;
-          try {
-            res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          const timedResponse = await runWithOpenRouterTimeout({
+            signal,
+            timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+            run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
               method: 'POST',
               headers: {
                 'Authorization': `Bearer ${config.apiKey}`,
@@ -1059,12 +1058,10 @@ export async function processReconciliation(
                 'HTTP-Referer': window.location.origin,
               },
               body: JSON.stringify(body),
-              signal: timeoutController.signal,
-            });
-          } finally {
-            clearTimeout(timeoutId);
-            signal.removeEventListener('abort', globalAbortHandler);
-          }
+              signal: requestSignal,
+            }),
+          });
+          const res = timedResponse.result;
 
           if (res.status === 429) {
             if (attempt < maxRetries) {
@@ -1077,12 +1074,21 @@ export async function processReconciliation(
           }
 
           if (!res.ok) {
-            callbacks.onError(batchIdx, `API ${res.status}`);
+            const errText = (await runWithOpenRouterTimeout({
+              signal,
+              timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+              run: async () => res.text().catch(() => ''),
+            }).catch(() => ({ result: '' }))).result;
+            callbacks.onError(batchIdx, `API ${res.status}: ${errText.slice(0, 200)}`);
             result = null;
             break;
           }
 
-          responseData = await res.json();
+          responseData = (await runWithOpenRouterTimeout({
+            signal,
+            timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+            run: async () => res.json(),
+          })).result;
           result = responseData.choices?.[0]?.message?.content || '';
           break;
         }
@@ -1107,7 +1113,7 @@ export async function processReconciliation(
 
         totalProcessed++;
       } catch (e: any) {
-        if (e.name === 'AbortError') return;
+        if (e.name === 'AbortError' && signal.aborted) return;
         callbacks.onError(batchIdx, e.message || 'Unknown error');
         totalProcessed++;
       }
@@ -1275,16 +1281,21 @@ export async function processShortGroupAssignments(
           body.reasoning = { effort: config.reasoningEffort };
         }
 
-        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${config.apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': window.location.origin,
-          },
-          body: JSON.stringify(body),
+        const timedResponse = await runWithOpenRouterTimeout({
           signal,
+          timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${config.apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': window.location.origin,
+            },
+            body: JSON.stringify(body),
+            signal: requestSignal,
+          }),
         });
+        const res = timedResponse.result;
 
         if (!res.ok) {
           callbacks.onError(shortGroup.id, `API ${res.status}`);
@@ -1293,7 +1304,11 @@ export async function processShortGroupAssignments(
           continue;
         }
 
-        const responseData = await res.json();
+        const responseData = (await runWithOpenRouterTimeout({
+          signal,
+          timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          run: async () => res.json(),
+        })).result;
         if (callbacks.onCost) {
           const promptTokens = responseData.usage?.prompt_tokens || 0;
           const completionTokens = responseData.usage?.completion_tokens || 0;
@@ -1308,7 +1323,7 @@ export async function processShortGroupAssignments(
         processed++;
         callbacks.onProcessed(processed, shortGroups.length, assignment);
       } catch (e: any) {
-        if (e.name === 'AbortError') return;
+        if (e.name === 'AbortError' && signal.aborted) return;
         callbacks.onError(shortGroup.id, e.message || 'Unknown error');
         processed++;
         callbacks.onProcessed(processed, shortGroups.length, null);

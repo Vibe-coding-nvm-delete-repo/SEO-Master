@@ -6,14 +6,19 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { collection, onSnapshot } from 'firebase/firestore';
-import { clearListenerError, markListenerError, markListenerSnapshot } from '../cloudSyncStatus';
+import {
+  clearListenerError,
+  CLOUD_SYNC_CHANNELS,
+  markListenerError,
+  markListenerSnapshot,
+} from '../cloudSyncStatus';
 import { db } from '../firebase';
 import type { Project } from '../types';
 import {
   deleteFromIDB,
   deleteProjectDataFromFirestore,
   deleteProjectFromFirestore,
-  loadProjectsFromFirestore,
+  loadProjectsBootstrapState,
   projectFromFirestoreData,
   reviveProjectInFirestore,
   saveProjectToFirestore,
@@ -47,6 +52,8 @@ export interface UseProjectLifecycleInput {
   setNewProjectDescription: (v: string) => void;
   setProjectError: (v: string | null) => void;
   setIsCreatingProject: (v: boolean) => void;
+  canChangeProject?: () => boolean;
+  onProjectChangeBlocked?: () => void;
 }
 
 export function useProjectLifecycle(input: UseProjectLifecycleInput) {
@@ -73,7 +80,17 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     setNewProjectDescription,
     setProjectError,
     setIsCreatingProject,
+    canChangeProject,
+    onProjectChangeBlocked,
   } = input;
+
+  const allowProjectChange = useCallback(() => {
+    if (canChangeProject?.() === false) {
+      onProjectChangeBlocked?.();
+      return false;
+    }
+    return true;
+  }, [canChangeProject, onProjectChangeBlocked]);
 
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
@@ -138,18 +155,21 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
   const initialProjectsLoadedAtRef = useRef<number>(0);
   const lastAppliedProjectsSnapshotRef = useRef<Project[] | null>(null);
   const recentlyCreatedProjectRef = useRef<{ id: string; until: number } | null>(null);
+  const bootstrappedFromLocalCacheRef = useRef(false);
 
   // Load projects, saved clusters, and restore active project on mount
   useEffect(() => {
     setIsAuthReady(true);
     let cancelled = false;
 
-    Promise.all([loadProjectsFromFirestore(), loadSavedWorkspacePrefs()])
-      .then(([loadedProjects, prefs]) => {
+    Promise.all([loadProjectsBootstrapState(), loadSavedWorkspacePrefs()])
+      .then(([projectBootstrap, prefs]) => {
         if (cancelled) return;
+        const loadedProjects = projectBootstrap.projects;
         initialProjectsLoadedRef.current = true;
         initialProjectsLoadedAtRef.current = Date.now();
         lastAppliedProjectsSnapshotRef.current = loadedProjects;
+        bootstrappedFromLocalCacheRef.current = projectBootstrap.source === 'local-cache';
         setProjects(loadedProjects);
         setSavedClusters(prefs.savedClusters || []);
 
@@ -177,6 +197,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         initialProjectsLoadedRef.current = true;
         initialProjectsLoadedAtRef.current = Date.now();
         lastAppliedProjectsSnapshotRef.current = [];
+        bootstrappedFromLocalCacheRef.current = false;
         setProjects([]);
         setSavedClusters([]);
         setIsProjectLoading(false);
@@ -212,7 +233,12 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
           return;
         }
         if (projectIdFromUrl === activeProjectId) return;
+        if (!allowProjectChange()) {
+          syncProjectIdToUrl(activeProjectIdRef.current, projectsRef.current);
+          return;
+        }
         setActiveProjectId(projectIdFromUrl);
+        clearProject();
         setIsProjectLoading(true);
         try {
           await loadProject(projectIdFromUrl, projectsRef.current);
@@ -248,11 +274,24 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [activeProjectId, clearProject, loadProject, resolveProjectIdFromUrlKey, setActiveProjectId, setGroupSubTab, setIsProjectLoading, setMainTab, setSettingsSubTab]);
+  }, [
+    activeProjectId,
+    activeProjectIdRef,
+    allowProjectChange,
+    clearProject,
+    loadProject,
+    resolveProjectIdFromUrlKey,
+    setActiveProjectId,
+    setGroupSubTab,
+    setIsProjectLoading,
+    setMainTab,
+    setSettingsSubTab,
+    syncProjectIdToUrl,
+  ]);
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'projects'), (snap) => {
-      markListenerSnapshot('projects', snap);
+      markListenerSnapshot(CLOUD_SYNC_CHANNELS.projects, snap);
       const liveProjects = mapProjectsSnapshot(snap);
 
       if (!initialProjectsLoadedRef.current) {
@@ -263,6 +302,13 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         liveProjects.length === 0 &&
         (lastAppliedProjectsSnapshotRef.current?.length ?? 0) > 0
       ) {
+        const isBootstrapEmptySnapshot =
+          bootstrappedFromLocalCacheRef.current &&
+          initialProjectsLoadedAtRef.current > 0 &&
+          Date.now() - initialProjectsLoadedAtRef.current < 15000;
+        if (isBootstrapEmptySnapshot) {
+          return;
+        }
         if (snap.metadata?.fromCache === true) {
           return;
         }
@@ -271,6 +317,9 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         }
       }
 
+      if (liveProjects.length > 0) {
+        bootstrappedFromLocalCacheRef.current = false;
+      }
       lastAppliedProjectsSnapshotRef.current = liveProjects;
       setProjects(liveProjects);
 
@@ -310,15 +359,24 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         syncFileNameLocal(activeProject.fileName);
       }
     }, (error) => {
-      markListenerError('projects');
+      markListenerError(CLOUD_SYNC_CHANNELS.projects);
       console.warn('[PROJECTS] Firestore snapshot error (likely quota exceeded):', error?.message || error);
     });
 
     return () => {
-      clearListenerError('projects');
+      clearListenerError(CLOUD_SYNC_CHANNELS.projects);
       if (typeof unsub === 'function') unsub();
     };
-  }, [clearProject, mapProjectsSnapshot, setActiveProjectId, setGroupSubTab, setMainTab, setProjects, syncFileNameLocal]);
+  }, [
+    activeProjectIdRef,
+    clearProject,
+    mapProjectsSnapshot,
+    setActiveProjectId,
+    setGroupSubTab,
+    setMainTab,
+    setProjects,
+    syncFileNameLocal,
+  ]);
 
   const createProject = async () => {
     if (!newProjectName.trim()) {
@@ -326,6 +384,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
       return;
     }
     setProjectError(null);
+    if (!allowProjectChange()) return;
     setIsProjectLoading(true);
     try {
       const newProject: Project = {
@@ -350,7 +409,9 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
       if (typeof window !== 'undefined') {
         window.history.pushState({}, '', buildMainPath('group', 'data', projectUrlKey(newProject)));
       }
-      clearProject();
+      // loadProject (not clearProject alone) resets load fence / save id from storage for this id
+      // and avoids stale session refs after switching from another project.
+      await loadProject(newProject.id, updatedProjects);
     } catch {
       setProjectError('Failed to create project.');
     } finally {
@@ -408,7 +469,10 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
   const selectProject = async (projectId: string) => {
     const target = projectsRef.current.find(p => p.id === projectId);
     if (target?.deletedAt) return;
+    if (!allowProjectChange()) return;
     setActiveProjectId(projectId);
+    // Clear immediately so the UI never shows another project’s keywords while the new one loads.
+    clearProject();
     setIsProjectLoading(true);
     setMainTab('group');
     setGroupSubTab('data');

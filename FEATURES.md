@@ -17,7 +17,118 @@
   - Auto-calculated `Best of Both Avg = (Source Rank + Lead Intent) / 2` and top-row highlighting for highest averages.
   - Dual seed keyword recommendation fields (`Seed KWs (Source)` + `Seed KWs (Intent)`).
   - Full row editing: add/remove subtopics, edit scores/rationale/notes, add/remove/edit multiple Ahrefs links per subtopic.
-  - Live persistence to IndexedDB + Firestore (`app_settings/topics_loans`) so edits survive refresh and sync across users.
+- Live persistence to IndexedDB + Firestore (`app_settings/topics_loans`) so edits survive refresh and sync across users.
+
+---
+
+## Content Pipeline (Generate > Content)
+
+- `Content` now supports a second external pipeline view: `Rating`, alongside `H2 Content`.
+- The content-stage rail now uses shorter stage labels and a visual left-to-right flow treatment:
+  - `Page Name` -> `Pages`
+  - `H2 Names` -> `H2s`
+  - `Page Guidelines` -> `Page Guide`
+  - `H2 Content` -> `H2 Body`
+  - `Rating` -> `H2 Rate`
+  - `H2 Content HTML` -> `H2 Body HTML`
+- Content stages now render with small icons plus `>` flow separators, and the rail can wrap to multiple lines without changing the underlying pipeline behavior.
+- Added a leftmost `Overview` stage before `Pages` that summarizes pipeline progress, total/blocked/active/complete page counts, bottlenecks, highest-cost stage, latest completed stage, and clickable stage rows that jump directly into the corresponding content tab.
+- `Rating` derives rows from generated H2 body rows and persists through the same localStorage + IndexedDB + Firestore pattern as the rest of Generate.
+- Rating rows auto-build their prompt from page context, H2 name, and generated H2 content instead of relying on manual freeform prompts.
+- Rating responses are requested as strict JSON and parsed into:
+  - `Rating Explanation` in the main output column
+  - `Rating Score` in a separate visible table column
+- `H2 Content` now mirrors the `Rating Score` column so low-rated answers are visible directly in the rewrite view.
+- `H2 Body` row sync now rebuilds one canonical per-H2 context bundle from `Pages`, `H2s`, `Page Guide`, and `H2 Rate`, so the visible H2 table and the generated prompt input stay aligned on `Page Name`, `#`, `H2 Name`, `Rating Score`, and H2-specific guideline text instead of silently dropping those fields.
+- `H2 Content` includes a top-level bulk `Redo Rated 3/4` action that resets only the H2 answers currently rated `3` or `4` back to pending for rewrite.
+- Shared Generate/Content instances now scope the header `Clear` button to the active visible subtab:
+  - clearing a slot subtab only wipes that slot’s own generated state
+  - clearing the primary/source subtab still invalidates dependent sibling slot data for correctness
+- `Content` also includes an `H2 Content HTML` pipeline view that derives from H2 answers plus their ratings:
+  - rows rated `1`, `2`, or `5` can generate HTML immediately
+  - rows missing a rating or rated `3` / `4` stay visible but locked until they are fixed and re-rated
+- Generated HTML now runs through a reusable deterministic HTML policy validator:
+  - adds a `Validate` column with `Pass` / `Fail`
+  - failed rows stay visible but move to error status so the user can regenerate them
+  - validates baseline rules like allowed tags, forbidden tags, leftover Markdown markers, bad links, wrapper quotes, empty blocks, and capitalization
+- Rating settings are fully separate from H2 Content settings while reusing the same OpenRouter API key behavior.
+- The OpenRouter API key is now shared across Generate 1, Generate 2, H2 Content, Rating, and future Generate-based tabs via one local persisted key.
+- Generate-based tabs now live-sync that shared OpenRouter API key across already-mounted instances, so changing it in one content/generate surface updates the others without a reload.
+- The preferred default OpenRouter model across Generate/Content, Group Review, and dedicated Auto-Group settings is now `OpenAI GPT-5.4 mini` (`openai/gpt-5.4-mini`), with Keyword Rating and Auto Merge continuing to inherit the main Group Review model unless explicitly overridden.
+- Generate/content model selection no longer snaps back to a previously hydrated shared/default model after the user picks a different option; local explicit selection now wins over late cache/Firestore/shared-model hydration.
+- Generate/content model locking is now restored per visible subtab/view on refresh using the scoped persisted settings as the authoritative source of truth, so locked subtabs no longer silently fall back to `AI21: Jamba Large 1.7` during startup.
+- Generate/content requests now enforce a hard 60s per-request timeout for both primary and slot pipelines, so a few hung provider requests cannot leave batches stuck forever in `active`.
+- Generate settings now include a persisted reasoning dropdown, and reasoning is sent for both primary and slot requests when enabled.
+- Added Playwright browser automation for the content pipeline through a hidden dev-only QA harness route (`/__qa/content-pipeline`):
+  - uses deterministic in-memory app-settings/changelog state instead of real Firestore/OpenRouter
+  - renders the real `ContentTab` + `AppStatusBar`
+  - covers rating rewrite, HTML locking, HTML validation display, shared API key/log behavior, and the build badge tooltip
+  - uses stable `data-testid` hooks on high-risk controls/cells so browser tests stay resilient across light UI refactors
+- Added visible locked placeholder stages to the content rail so future automation steps are mapped without enabling unfinished logic yet:
+  - `H2 Summ.`
+  - `H1 Body`
+  - `H1 Body HTML`
+  - `Quick Answer`
+  - `Quick Answer HTML`
+  - `Metas/Slug/CTAs`
+  - `Pro Tip/Red Flag/Key Takeaways`
+- Locked future stages are greyed out, show a lock indicator, and open a placeholder panel instead of any live generation pipeline until their carryover logic and prompts are built.
+- `Metas/Slug/CTAs` is now a live page-level stage sourced from `Quick Answer HTML`:
+  - primary output generates `Meta Description`
+  - `Meta Title` is derived directly from `Page Name`
+  - `Slug` generates in its own slot and is also surfaced as a visible table column
+  - `CTAs` generate as strict JSON in one raw slot output, then parse into separate `CTA Headline` and `CTA Body` columns
+- `Pages` now hard-validates new `H2s` generations against a strict JSON object contract:
+  - the `H2s` slot runs in JSON-object mode
+  - new H2 outputs must be `{ "h2s": [...] }` with 7-11 sequential, unique H2 entries
+  - invalid JSON now hard-fails the slot instead of falling back to loose line parsing
+  - settings now include a persisted `H2 JSON Contract` reference field beside the normal prompt tabs
+- `Pages` now keeps shared metadata columns visible while you switch into slot subtabs like `Page Guide`, and it adds an `H2s` preview column so the generated H2 outline stays visible during downstream review.
+- `H2 Body` now rebuilds from authoritative shared Page Guide data during upstream sync, so per-H2 guideline text and formatting instructions no longer stay stuck at `(No guidelines generated yet)` after Page Guide JSON has been generated.
+- Derived content subtabs now reuse persisted outputs only when the current derived prompt still matches the saved upstream-driven input, so `Page Guide` / `H2s` / prompt changes immediately invalidate stale `H2 Body`, `H2 Rate`, and downstream content rows instead of leaving old generated text attached to the wrong source state.
+- Downstream content builders now ignore stale upstream text unless the source row/slot is still in `generated` state, so resetting or erroring `Pages`, `H2s`, or `Page Guide` can no longer keep leaking old page titles/H2 context into `H2 Body` or `H1 Body`.
+- Generate row snapshot reloads and deferred upstream syncs now wait for active content batches to go idle, and generation flushes its latest row state before those shared-doc reloads resume. This prevents `H2 Body` batches from dropping back to `pending`, losing visible outputs, or snapping generated counts back to zero mid-run while preserving downstream `H2 Rate` carry-over.
+- Generate/content stop controls now keep a batch in a visible `Stopping...` state until the worker pool actually drains, discard late results after stop is requested, and abort retry backoff immediately. This prevents Stop from disappearing while hidden requests keep landing outputs underneath it.
+- Generate/content requests now resolve the OpenRouter API key from the shared live key source at request time, so the Pages surface can no longer send a missing auth header after the key was updated on another already-mounted subtab.
+- Generate/content toolbars now use an explicit saving phase instead of an inferred `Finalizing...` state, and final row persistence is time-bounded before the CTA is released. This prevents Pages/H2 batches from getting stranded on a dead-end completion button while cloud sync cleanup lags or stalls.
+- Content pipeline tables now use a more consistent compact column-width scale across subtabs, with tighter shared presets for metadata columns and clipped header overflow so narrow header labels and help icons no longer bleed into adjacent columns.
+- The `H2 Body` rewrite banner and Generate shell now use the same compact spacing rhythm as the rest of Content, so stacked cards stay tight and consistent without collapsing into each other.
+- Generate/content row persistence now sanitizes Firestore payloads more defensively and normalizes non-finite usage/cost values, preventing shared-doc `invalid-argument` sync failures when a model returns incomplete pricing metadata.
+- Generate/content row persistence now chunks shared `app_settings` row docs by actual serialized payload size, so large H2/content row sets stay under Firestore's 1 MiB document limit instead of failing upstream sync writes.
+- The top-left cloud status no longer claims failed shared-doc writes are "retrying" when they are really waiting for the next valid save, and invalid Firestore payload errors now surface with accurate notification copy instead of blaming the network.
+- The top-left cloud status diagnostics are now project-first and domain-aware:
+  - when a project is open, the headline prioritizes project persistence health instead of unrelated shared-doc/listener noise
+  - the dropdown uses one live per-tab snapshot, so the chip and diagnostics stay in sync
+  - diagnostics now split project vs shared-doc writes/sync times and show auxiliary listener issues separately
+- Notifications are now larger and easier to read, stay visible an extra second, animate out on dismissal, show both local and US Eastern timestamps, and collapse repeated identical errors into one card with a repeat count.
+- The `Overview` content subtab now uses tighter card padding, chip spacing, and progress-row rhythm so more of the summary fits onscreen before you have to scroll.
+- `Pages` also includes a new `H2 QA` slot:
+  - evaluates generated H2 sets against the keyword phrase and page title
+  - returns strict JSON with a `1-4` rating plus flagged H2s when the set is off-intent
+  - surfaces parsed `H2 QA` metadata on the main Pages table while preserving the raw slot JSON for audit/debugging
+- `Page Guide` now follows the same strict JSON pattern:
+  - the slot runs in JSON-object mode instead of a loose array/text flow
+  - new outputs must be `{ "guidelines": [...] }` with one entry per H2 in the exact same order
+  - invalid or mismatched guideline payloads now hard-fail the slot instead of being loosely accepted downstream
+  - formatting recommendations that mention tables or tabular layouts now hard-fail validation, and legacy saved table-style formatting hints are sanitized before they can flow into `H2 Body`
+  - settings now include a persisted `Page Guide JSON Contract` reference field and the Pages table shows a `Guide JSON` validation status column
+- Content prompt policy now force-migrates stale saved `Page Guide` and `H2 Body` prompts that predate the no-table rule, auto-restores the current no-table page-guide validator text, and resets existing generated `Page Guide` slot rows back to pending when a stale page-guide prompt is detected so legacy table guidance cannot remain visible.
+- `Final Pages` is now the read-only export surface for the assembled page output:
+  - uses HTML-stage outputs for `Quick Answer`, `H1 Body`, and dynamic H2 descriptions
+  - includes an `Export CSV` action for the assembled final table
+  - final-table column widths were tightened so the grid is denser and easier to scan horizontally
+- Content subtab routing is now canonical and URL-backed:
+  - each content stage owns a real `subtab` route plus `panel=table|log`
+  - returning to `Content`, browser back/forward, Overview jumps, and Final Pages source jumps now reconcile to the same route instead of drifting between URL, visible stage, and cached Generate view state
+- Content readiness is now stricter and shared across `Overview` and `Final Pages`:
+  - `generated` rows/slots with blank output no longer count as complete or publish-ready
+  - `Overview` now includes a terminal `Final Pages` stage so publish readiness and stage completion use the same final assembled-page rules
+- Prompt slots now support per-slot JSON mode and slot-output transforms that can write parsed metadata back onto the row while preserving the raw slot output.
+- Generate and Content shared workspaces are now scoped to the active project instead of one global `app_settings` workspace:
+  - page rows, downstream content rows, shared logs, and shared stage settings now survive refresh per project and are visible to collaborators on that same project
+  - existing legacy global Generate/Content docs are imported once into a project the first time that project opens Generate or Content
+  - browser-only UI state stays local, including the shared API key, active Generate rail tab, table/log view, and column widths
+- Generate/content hydration now uses ref-first row/settings mutations plus local edit guards so late cache or Firestore hydration cannot overwrite the newest in-progress edits during startup, refresh, or deferred snapshot reloads.
 
 ---
 
@@ -38,8 +149,17 @@
 - Token Management now includes an `auto-merge` sub-tab for review workflow:
   - Review recommendation rows with canonical token, merge tokens, confidence, and impacted keyword/page counts.
   - Apply one merge, decline one recommendation, or bulk `Merge All` pending recommendations.
-  - Approved recommendations remain visible with `Undo`, which reverses the applied merge via the existing merge undo cascade.
+- Approved recommendations remain visible with `Undo`, which reverses the applied merge via the existing merge undo cascade.
 - Auto-merge recommendations persist to IndexedDB + Firestore and sync across users/projects.
+
+## Group Auto Merge (Grouped)
+
+- Keyword Management now includes a dedicated `Auto Merge` tab immediately to the right of `Grouped` for finding semantic duplicate groups after they have already been accepted into the real grouped dataset.
+- The `Embed` action analyzes only the current `Grouped` groups, builds embeddings from each group's name, normalized location summary, and top page names, then compares all group pairs without requiring shared tokens.
+- Auto Merge recommendations are shown in a dedicated review table with similarity score, helper signals, expandable side-by-side page lists, per-row `Merge` / `Dismiss` actions, and bulk `Merge Selected` / `Dismiss Selected`.
+- Applying selected recommendations resolves connected components (`A-B` plus `B-C` becomes one merge), rebuilds one merged grouped cluster per component, keeps the highest-volume group name as the surviving label, and sends the merged result back through the existing grouped review flow.
+- Recommendations persist to IndexedDB + Firestore as project data, sync across users, and are fingerprinted against the current grouped dataset so they are automatically treated as stale if grouped membership changes after an embed run.
+- Group Review settings now include a persisted `Group Auto Merge` embedding model and minimum similarity threshold, reusing the shared OpenRouter API key.
 
 ## 1. Project Management
 
@@ -47,12 +167,18 @@
 - User creates a project with a name and optional description
 - Saved immediately to localStorage, IndexedDB, and Firestore
 - Each project stores its own independent keyword data
+- After creation, the app runs the same `loadProject` path as **Select Project** so workspace refs (save id, load fence) match the new empty project instead of inheriting the previous session’s guards.
+
+### CSV import (cross-project safety)
+- Large CSVs parse in chunks; import is **pinned to the project that was active when the file was chosen**. If you switch projects before parsing finishes, the import is **cancelled** (warning toast) and no data is written, preventing the previous bug where persistence used the **current** project ref while the UI branch used a **stale** project id and could save one project’s file into another’s storage.
 
 ### Projects tab (folders & deleted)
 - **Folders:** Create named folders (Firestore `app_settings/project_folders` + localStorage + IndexedDB cache). Drag project cards onto **Unassigned** or a folder to set `folderId` on the project doc, or use the **Move to folder** control on each card (keyboard-accessible). Rename a folder by clicking its title; remove a folder with the trash control — projects in that folder move back to **Unassigned** (nothing is deleted).
 - **Delete project (soft):** Trash on a card moves the project to **Deleted projects**; keyword data stays in IDB + Firestore until **Delete forever**. Removing a folder never deletes projects.
 - **Restore / permanent delete:** Deleted list shows **Restore** (clears `deletedAt`) or **Delete forever** (same as legacy hard delete: metadata doc, chunks, IDB).
 - If the active project is deleted or soft-deleted, the workspace clears and the app returns to the Projects sub-tab.
+- **Startup safety:** when Firestore initially reports an empty project collection but the local project cache still has projects, the app now keeps the cached project list visible during bootstrap instead of wiping the Projects tab to blank before the shared list catches up.
+- **Shared-settings bootstrap hardening:** Group Review settings, Auto Group settings, starred models, and universal blocked tokens now use the same guarded cache/bootstrap pattern so cache-only empty/missing Firestore snapshots cannot silently reset visible shared state during startup.
 
 ### Delete Project
 - Trash icon on project card moves it to **Deleted projects** (see above). **Delete forever** in that list performs the final removal.
@@ -61,26 +187,32 @@
 - If deleting the active project (soft or permanent), clears all workspace state
 
 ### Select Project
-- Click project card to load its data
-- Loads **IDB + Firestore in parallel**; Firestore leg uses **`getDocsFromServer`** (falls back to cache if offline) so refresh does not merge against a **stale local Firestore cache**. Merges with `pickNewerProjectPayload`: monotonic `lastSaveId`, then `updatedAt`; **ties prefer Firestore**; safety rules when IDB has higher `lastSaveId` but **fewer CSV rows or fewer groups** vs server (legacy `saveId`, or large id gap). Fixes grouped/pages drops and “CSV disappeared” after refresh.
+- Click project card to load its data. The workspace **clears immediately** when you select a different project, then loads that project’s saved data — you never see the previous project’s keywords on screen while the new one is loading (each project, e.g. Installment Loans vs Title Loans, stays visually separate).
+- Project switching is blocked while any Generate or Content run is active or still finalizing persistence, preventing in-flight shared-doc writes from landing in the wrong project workspace.
+- Loads **IDB + Firestore in parallel**; Firestore leg uses **`getDocsFromServer`** (falls back to cache if offline) so refresh does not merge against a **stale local Firestore cache**. Merges with `pickNewerProjectPayload`: monotonic `lastSaveId` (incremented on **every** local mutation before IDB checkpoint, not only on cloud flush), then `updatedAt`; **ties prefer Firestore**; safety rules when IDB has higher `lastSaveId` but **fewer CSV rows or fewer groups** vs server (legacy `saveId`, or large id gap). Fixes grouped/pages drops, “CSV disappeared” after refresh, and **ungroup/unblock reverting** when reload beat the debounced Firestore write.
 - If Firestore wins, IDB cache is refreshed from it
 - Restores all state: results, clusters, tokens, groups, blocked keywords, stats
-- Active project sync no longer clears selection when `user_preferences.activeProjectId` arrives before the `projects` listener has that project in memory; this removes intermittent fallback to the amber **Select Project** button while a valid project still exists.
+- **`user_preferences` listener:** syncs **`savedClusters`** in realtime from the shared Firestore doc. It does **not** apply `activeProjectId` from remote snapshots — another collaborator (or stale cloud data) cannot switch your focused project; active project is chosen at init (URL + local/IDB prefs) and only changes from explicit in-app actions. Local changes still **write** `activeProjectId` to that doc for backup/cross-device visibility, but incoming listener updates ignore that field.
 
 ### Persistence
 - Project metadata: localStorage + Firestore projects/{id} doc
 - Project data: IDB (local cache) + Firestore chunked subcollections (results/clusters/suggestions in ~400 rows/doc; grouped/approved groups in smaller chunks to avoid Firestore 1MB doc limits)
 - Firestore database selection is environment-configurable via `VITE_FIRESTORE_DATABASE_ID`; when unset, the app uses the default Firestore database so startup does not hard-crash with Firestore `NOT_FOUND` (code 5) if a named DB is missing
 - **IndexedDB saves are serialized** with the same queue as Firestore writes (same order as local mutations). Previously IDB used concurrent writes — an older save could finish last and overwrite a newer one, so a refresh showed stale “ungrouped” state.
-- **Coalesced persist flushes:** many rapid mutations (e.g. auto-group spam) set a dirty flag; one async worker loops until quiet, always building the payload from **`latest.current`**. That avoids a deep queue of 50+ full Firestore writes and keeps the server much closer to the UI when the user pauses or refreshes.
-- **Crash-safety IDB checkpoints:** every state mutation now writes an immediate best-effort snapshot to IndexedDB before queued Firestore flushes, and auto-group suggestion edits also checkpoint instantly. This reduces data loss if the tab crashes or reloads before coalesced cloud writes finish.
+- **Serialized persist flushes:** each mutation queues `flushPersistQueue` immediately (no 500ms debounce). The flush worker’s **while** loop still coalesces if new mutations arrive **during** `await` I/O, so rapid bursts don’t stack dozens of redundant full writes. Auto-group **suggestion** text still uses a 2s idle debounce before enqueueing a flush (high-frequency typing).
+- **Crash-safety IDB checkpoints:** every state mutation now writes an immediate best-effort snapshot to IndexedDB before queued Firestore flushes, and auto-group suggestion edits also checkpoint instantly. Each mutation bumps `lastSaveId` so the merge step always prefers that snapshot over stale cloud data until the next successful flush. This reduces data loss if the tab crashes or reloads before coalesced cloud writes finish.
 - **Database targeting hard lock:** Firestore is now pinned to the workspace database (`first-db`) at runtime. `VITE_FIRESTORE_DATABASE_ID` cannot switch databases anymore; non-matching values are ignored and logged as configuration errors.
 - **DB lock tests:** database resolution is centralized (`resolveFirestoreDatabaseId`) and covered by tests that enforce lock behavior for missing, matching, and invalid env values.
 - Chunk hydration reconciles `meta` chunk counts with visible chunk docs so mid-save Firestore snapshots cannot drop grouped/approved rows; grouped/approved chunk docs are stamped with `saveId` and hydration rejects snapshots where chunk `saveId` doesn’t match `meta.saveId`
 - Active project ID persisted in localStorage for session restore
 - **Sync failure visibility:** Firestore listener errors and failed writes for project chunks, group review settings, starred models, universal blocked tokens, and project rename surface a toast plus `[PERSIST]` console context (see `persistenceErrors.ts`).
 - **P0.1 atomic paths:** Remove-from-approved and ungroup flows call `removeFromApproved` / `ungroupPages` in `useProjectPersistence` (with matching `results` row rebuilds); project list fileName display uses `syncFileNameLocal`; CSV processing uses `syncFileNameLocal` when a project is active; Reset uses `clearProject()` when a project is active. The persistence hook’s `removeFromApproved` no longer pushes whole approved groups’ clusters into `clusterSummary` (that matched the previous App `bulkSet` behavior, not the buggy unused hook path).
+- **Ungrouped duplicate guard:** restoring pages from `Grouped` / `Approved` now refuses to append a second copy of an already-present token signature, so duplicate pages and duplicate keyword rows cannot be re-added to Ungrouped even if an upstream selection or stale state tries to restore the same page twice.
 - **Generate tab sync:** Generate 1/2 Firestore saves and listeners use the same toast + `reportPersistFailure` pattern as the Group tab.
+- **Unified persistence contract:** team-shared `app_settings` documents (Generate rows/logs/settings, starred models, universal blocked tokens, group review settings, auto-group settings, cosine summary cache, topics loans data, user preferences, project folders, etc.) use the same path: local durable mirror first (IndexedDB, plus localStorage where used for quick paint), then Firestore, with common status/error reporting. **Per-browser only (no cross-user sync):** Generate 1/2 rail choice, Generate table vs log + status filter, and keyword table column widths — those persist in IndexedDB/localStorage on this device only.
+- **Top-left status now shows write safety:** the cloud status chip turns amber for `Saving… don’t refresh` while IndexedDB durability is still pending, amber for `Saved locally — syncing…` while Firestore is still in flight, rose for local durability failures (`Save failed — local data at risk`) and cloud retry states, and keeps richer local/cloud details in the tooltip. When healthy, the chip adds a muted **clock suffix** after each successful Firestore write (project or shared doc), e.g. `Cloud: synced · 3:45:02 PM` — stable text that only changes when a new write completes (no per-second UI churn). The **Saved locally — syncing…** state uses **display hysteresis** (~600ms after writes finish) so rapid back-to-back Firestore operations do not flash synced/syncing.
+- **Unsafe refresh warning:** the browser now shows a native unload warning if you try to refresh while a local durability write is still pending or after a local save failure that could lose the latest edits.
+- **Visible local failure reporting:** IndexedDB failures now surface through the same status/toast flow instead of silently disappearing into the console.
 
 ---
 
@@ -201,6 +333,7 @@
 - Sortable columns: Token, Volume, Frequency, KD
 - Bulk select with checkboxes
 - Block/Unblock tokens
+- Unblocking from the Blocked sub-tab switches Keyword Management to **Ungrouped** and Token Management to **Current** (so the token is shown in the usual ungrouped scope)
 - When a token is blocked, all keywords with that token move to Blocked tab
 - Clusters and groups recalculate after blocking
 - Merge/Unmerge tokens via token merge rules (parent + nested children shown under a collapsible row)
@@ -285,6 +418,7 @@
 - Compact project header
 - **Top status bar:** today’s date (**calendar** icon); **Local** clock line (**clock** icon); **US Eastern** line (**globe** icon); **local weather** from Open-Meteo (**thermometer** + condition icon; while loading: **Finding your location…** then **Loading forecast…** in a light sky-tint dashed pill; if location is **blocked**: amber **Location blocked — hover for help** with portal steps for Chrome/Edge/Safari/Firefox on Windows & Mac (+ OS location notes); **unavailable** uses cloud-off; **°F** when the device timezone is a known US zone, otherwise **°C** for Canada, EU, and the rest of the world; temperature tint follows cold→hot hues; **manual Refresh/Retry buttons** let users force an immediate weather re-fetch instead of waiting for cadence; **hover / focus / tap** opens a portal tooltip with a **7-day** min/max forecast, per-day icons, and per-day tint **plus short nowcast insight lines**: update cadence (**every 15 minutes**), **next refresh countdown**, likely hold duration for current conditions, estimated next weather-change time, and likely rain windows in the next 24h; day rows reserve a dedicated temperature column and truncate long condition labels to prevent overlap in narrow widths; graceful fallback if location is blocked/unavailable); **Status** badge (small **cloud** icon + `Status` + line such as Cloud: synced; colored dot) with **hover / focus / tap** (portal tooltip — structured panel with icons, sections, light gradient header, status-tinted accents; tight **4px** gap to anchor; not the slow browser `title` attribute) showing diagnostics (network, `first-db`, server snapshot, project id, flush queue, last save, listener channel errors) — not driven by one listener: **aggregated Firestore listener error callbacks** (projects list, project chunks, app_settings docs, Generate/AutoGroup/feedback/table width/group-review listeners, etc.), **any snapshot with server metadata** (`metadata.fromCache === false`) for “connected”, **project coalesced flush depth** (“Syncing…”), and **last project Firestore save success vs failure** from the persist queue. Copy: **Cloud: synced** / **Syncing…** / **Offline — saved locally** / **Sync problem — retry** / **Connecting…**
 
+- **Weather visibility polish:** the 7-day tooltip now surfaces a **wettest chance** summary card and per-day **rain probability** + **temperature swing** chips, so users can scan not just highs/lows but also which day is most likely to turn wet and how wide each dayâ€™s range is.
 ### Visual Design
 - Consistent font color hierarchy
 - Alternating row colors for table readability
@@ -327,6 +461,53 @@
 - Uses OpenRouter.ai API (v1/chat/completions)
 - Supports all models available on OpenRouter
 - Displays per-model pricing and context length
+
+---
+
+## 9b. Content Tab (Content Pipeline)
+
+### Overview
+- Multi-step content generation pipeline accessible via the **Content** main tab
+- Step-by-step workflow: Page Names & Guidelines → H2 Names → Extract Guidelines → H2 Content → ... → Export
+- Each step uses a `GenerateTabInstance` with step-specific prompts and optional **prompt slots**
+- **Page Name / H2 Names / Page Guidelines / H2 Content** view tabs: first three share one instance (`_page_names`); **H2 Content** opens a second instance (`_h2_content`) with extra metadata columns and “Sync from Page Names”
+- **H2 Content auto-pipeline:** the H2 Content `GenerateTabInstance` stays mounted (hidden when not on that view) so Firestore listeners stay active; when the upstream Page Names rows document (`generate_rows_page_names`) **or** the H2 generate settings doc (`generate_settings_h2_content`, primary “H2 Body” prompt) changes, the H2 table auto-rebuilds row **Input** cells from the **saved** template plus `{PAGE_NAME}`, `{H2_NAME}`, `{ALL_H2S}`, `{CONTENT_GUIDELINES}` (debounced). If no saved prompt exists yet, the bundled default template is used. Auto-apply is skipped if any row already has generated body output (manual “Sync from Page Names” still available with confirm).
+- **Layout:** Both instances use `rootLayout="flush"` under one parent `max-w-4xl mx-auto space-y-3` so the Generate toolbar and table share the same horizontal column and vertical rhythm as the single-instance steps (no nested `max-w-4xl` stacking)
+
+### Page Names & Guidelines (Step 1)
+- Combined subtab with **three column groups** (switchable via sub-tabs):
+  - **Page Name** (primary): #, Status, Input, Output, Copy, Reset, Len, R, Date — user enters keywords, generates page titles
+  - **H2 Names** (slot): Status, Input, Output, Copy, Reset, Len, R, Date — auto-populates prompt with `{PAGE_NAME}` (from primary output) and `{KEYWORD_VARIANTS}` (from row input/keywords), generates 7-11 H2 headings per page
+  - **Page Guidelines** (slot): Status, Input, Output, Copy, Reset, Len, R, Date — auto-populates prompt with `{PAGE_NAME}` and `{H2_NAMES}`, generates content consistency guidelines
+- Column groups separated by a thick left border (`border-l-2`) and spanning group header row
+- **Three independent Generate buttons**: primary "Generate" (indigo) for page names, "H2 Names" (cyan) for H2 headings, "Page Guidelines" (cyan) for guidelines — each with its own worker pool, abort controller, progress, and cost tracking
+- **Settings panel** has a **tabbed prompt editor**: "Page Name Prompt" tab, "H2 Names Template" tab (template with `{PAGE_NAME}` and `{KEYWORD_VARIANTS}` placeholders), and "Page Guidelines Template" tab (template with `{PAGE_NAME}` and `{H2_NAMES}` placeholders)
+
+### Prompt Slot System (Reusable)
+- `PromptSlotConfig` interface defines additional prompt slots for any step:
+  - `id`, `label`, `promptLabel`, `defaultPrompt`, optional `buildInput()` function
+  - `buildInput(template, primaryOutput, externalData?, rowInput?)` auto-populates slot Input cells from primary output, row input (keywords), and external data (e.g., H2 names from a future step)
+- Auto-input only runs when generation is idle (prevents race conditions with batch flush)
+- Uses functional `setRows()` updates to avoid overwriting concurrent state changes
+
+### Dependency Warnings
+- When slot dependencies are missing (e.g., H2 names not generated yet, page names not generated), amber warning banners appear below the toolbar
+- Slot Generate button is disabled with a tooltip explaining what's needed
+- Slot Input cells show "Waiting for dependencies..." placeholder when auto-input can't populate
+
+### Persistence
+- Slot data stored in `GenerateRow.slots` field (backward-compatible — existing rows without slots load fine)
+- Slot prompts stored in `GenerateSettings.slotPrompts` (keyed by slot ID)
+- All data persisted to IDB + Firestore via existing 3-tier storage pattern
+- Chunked Firestore storage handles larger rows with slot data
+- **`suppressSnapshotRef` guard** on all Firestore writes (rows, settings, logs) — prevents `onSnapshot` echo from overwriting newer local state when a save is in flight
+- **`rowsFirestoreLoadedRef` guard** on rows load — prevents async IDB cache from overwriting authoritative Firestore data (matches existing settings guard pattern)
+
+### Export / Clear / Undo
+- CSV export includes slot columns (Status, Input, Output, Len, Retries, Cost, Tokens, Date per slot)
+- Clear All / Clear Cell resets both primary and all slot data
+- Undo stack captures full row state including slots
+- Bulk Copy available per column group (primary and each slot independently)
 
 ---
 
@@ -378,10 +559,42 @@
 
 ---
 
+## 11. Notifications Tab
+
+- New top-level **Notifications** tab sits immediately left of **Updates** and is visible to all users.
+- Route: `/seo-magic/notifications`.
+- Shared notification history is persisted to Firestore collection `notifications` and mirrored into IndexedDB cache key `__notifications__`.
+- Only explicitly marked shared alerts from the toast pipeline are written to this feed; local-only confirmations remain toast-only.
+- Filters at the top include:
+  - type (`all / success / info / warning / error`)
+  - source (`all / group / generate / content / feedback / projects / settings / system`)
+  - free-text search across message, source, and project name
+- The table shows timestamp, type, source, scope (`Global` or a project name/id), the full notification text, and a **Copy** action.
+- Timestamp cells show both the browser-local date/time and a secondary **US Eastern** line.
+- Copy uses the stored full notification text when present, otherwise it composes a formatted block with source, scope, timestamps, and message.
+- The Notifications feed starts from this rollout forward and does **not** backfill the existing Group activity log or the Updates changelog.
+
+---
+
+## 12. Updates Tab (Changelog)
+
+- New top-level **Updates** tab (rightmost position, `History` icon) visible to all users.
+- Displays the **current build name** at the top in a styled badge — stored in `app_settings/build_info` Firestore doc.
+- Lists all changelog entries in reverse chronological order (newest first) from the `changelog` Firestore collection.
+- Each entry shows: build name badge, summary text, date/time, and a bullet list of specific changes.
+- Real-time updates via Firestore `onSnapshot` — entries appear instantly when added.
+- Claude is mandated (CLAUDE.md rule #9) to write a changelog entry after every code-change session using `addChangelogEntry()` from `src/changelogStorage.ts`.
+- Build name can be updated via `updateCurrentBuildName()`.
+- Route: `/seo-magic/updates`.
+
+---
+
 ## Changelog
 
 | Date | Change |
 |------|--------|
+| 2026-03-30 | Notifications tab: shared alert history with filters, search, timestamps, and copy-full-message actions |
+| 2026-03-27 | Ungrouped duplicate guard: restoring pages from Grouped/Approved now skips already-present token signatures so duplicate pages and duplicate keyword rows cannot be appended back into Ungrouped |
 | 2026-03-27 | Token signatures: removed `no`, `not`, `without`, `with` from stop-word stripping; added `vancouver` to stop words (still in foreign cities for detection) |
 | 2026-03-27 | Auto-Group v1: assignment batch size up to **500** ungrouped keywords per API call; dynamic `max_tokens` for large assignment and cosine-summary JSON; default two-token LLM batches span up to 500 pages |
 | 2026-03-27 | UI polish: unified main tabs/sub-tabs into a shared segmented-control pattern and tightened tab/header spacing for a more compact, consistent light-theme look across Group, Generate, Auto-Group, and Settings |
@@ -397,6 +610,8 @@
 | 2026-03-26 | Realtime collaboration correctness: project saveId marker, conditional chunk cleanup, and realtime shared `user_preferences` syncing |
 | 2026-03-27 | Generate tab: lowered default concurrency to 5 and expanded slider to 1-100 to reduce 429 backoff stalls on slower/rate-limited models |
 | 2026-03-27 | Generate tab refresh durability: guarded against cached-empty Firestore snapshots; added immediate local cache fallback for Generate 1/2 rows, settings, logs, and active sub-tab; persisted per-tab Generate view state (Table/Log + status filter); and made unload flush use chunked row writes so large in-progress tables are not lost on refresh/close |
+| 2026-03-27 | Keyword management tables: `<colgroup>` aligns header, filter row, and body columns; resize widths are **clamped** to a viewport-safe max; drag updates are **rAF-coalesced**; **IndexedDB persists once on mouseup** (per browser, not shared to collaborators); filter cells use **min-width / shrink** so min–max inputs stay inside their columns |
+| 2026-03-27 | Collaboration: Generate rail (1/2), Generate view chrome (table/log + row-status filter), and table column widths no longer sync via Firestore — each browser keeps its own UI; shared settings and project/workspace data unchanged |
 | 2026-03-26 | Auto-Group: `Shift+1` now requires active filters and supports 1 matching page |
 | 2026-03-25 | Feedback modal ARIA (dialog, fieldsets, labels, radiogroup); queue: legacy rating “—” + sort/filter; firebase.ts module note |
 | 2026-03-25 | Feedback modal: mandatory area dropdown, severity/impact with color ramp, structured Q&A body; queue shows Area column |
@@ -469,9 +684,14 @@
 | 2026-03-24 | Google SERP button + Copy button on all page/group names |
 | 2026-03-24 | Token click in Token Management → filters keyword management |
 | 2026-03-26 | Toast UI: smaller/thinner bottom-left, no animations, faster auto-dismiss |
+| 2026-03-30 | Toast UI: slimmer KWG notification cards with lighter chrome and +1s dwell time |
 | 2026-03-26 | Fix old `/group/data/<key>` links: resolve by id suffix even if project name changes |
 | 2026-03-26 | Fixed keyword management AI review badge flicker during rapid auto-grouping by preserving last known approve/mismatch results and re-reviewing only when group membership changes |
 | 2026-03-26 | All Keywords tab: wired **Rating** column min/max filters (`kwRating`) through `FilterBag` / `useKeywordWorkspace`; filters apply to keyword rows; auto-group filter summary includes rating bounds |
+| 2026-03-27 | Keyword management tab switches: removed deferred React transitions (instant tab highlight) and avoided redundant token-management recomputation when Token Management subtab is not “current” |
+| 2026-03-27 | Unblock token: navigate to Ungrouped + Token Management “current” (was easy to land on Grouped scope after unblock) |
+| 2026-03-27 | CRITICAL persistence fix: ungroup/unblock/block changes no longer revert on refresh (3 bugs in onSnapshot Guard 6 + pickNewerProjectPayload + IDB snapshot writes) |
+| 2026-03-27 | Persistence hardening: saveCounterRef advances on remote snapshots; hasPendingWrites guard; isFlushingRef prevents mid-flush overwrites; reset via clearProject |
 
 ---
 
@@ -493,8 +713,8 @@ Token Clusters → Run Auto-Group → ✨ Find Duplicates ✨ → Run QA → App
 - For 1,000 groups: 334 API calls
 - Input per call: ~6,200 tokens (3 check groups + 1,000 numbered group names)
 - Output per call: ~60 tokens (JSON with 0-3 matches)
-- **Total cost: ~$0.32 per pass** with a cheap model (GPT-4o-mini / OSS 120B)
-- **3 passes to fully clean up: ~$0.96 total**
+- **Total cost varies by selected model and group count**; `GPT-5.4 mini` is now the default lower-cost choice for new model selections.
+- **3 passes scale linearly from that per-pass cost**
 
 ### Prompt Design
 ```
@@ -651,4 +871,88 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 
 ---
 
-*Last updated: 2026-03-27*
+*Last updated: 2026-03-30*
+
+### 2026-03-28: HTML Prompt / Validator Alignment
+
+- Tightened the default `H2 HTML` compiler prompt so it explicitly forbids bare `<a>` tags, placeholder hrefs, invented URLs, and malformed anchors without usable URLs.
+- Added regression coverage for the exact validator failure `Anchor tag is missing href.` so the prompt contract and the deterministic HTML validator stay aligned.
+
+### 2026-03-29: HTML Retry Feedback + H2 Summary Stage
+
+- `H2 HTML` now appends the prior row-level validator failure into the next input prompt so retries explicitly target the exact HTML policy error instead of blindly regenerating.
+- Added a live `H2 Summ.` stage wired into the same content pipeline stack, with persisted rows/settings, shared model selection, shared logs, and summary rows derived from generated `H2 Body` content.
+
+### 2026-03-29: H1 Body Stage
+
+- Added a live `H1 Body` stage that derives one page-level row from `Pages` plus generated `H2 Summ.` outputs, using the same shared API key, model persistence, logs, and Firestore-backed state flow as the other content stages.
+- The `H1 Body` rows now carry concatenated H2 names, concatenated H2 body reference text, and concatenated H2 summaries in row metadata so the table and the prompt both reflect the same article-level context.
+
+### 2026-03-29: H1 Body HTML Stage
+
+- Added a live `H1 Body HTML` stage sourced from generated `H1 Body` rows, using the same shared HTML validator contract, retry feedback loop, model persistence, and logs as `H2 Body HTML`.
+- The `H1 Body HTML` prompt now receives prior validator failure text on retries so repeated HTML resets target the exact failing rule instead of looping on the same malformed output.
+
+### 2026-03-29: Quick Answer Stage
+
+- Added a live `Quick Answer` stage sourced from generated `H1 Body` rows, using the same shared API key, model persistence, logs, and page-level metadata columns as the `H1 Body HTML` stage.
+- The quick answer prompt now references the page title plus generated `H1 Body` content so its two-paragraph output stays contextually aligned with the article intro instead of drifting from the page-level content.
+
+### 2026-03-29: Quick Answer HTML Stage
+
+- Added a live `Quick Answer HTML` stage sourced from generated `Quick Answer` rows, using the same shared HTML validator contract, retry feedback loop, model persistence, and logs as the other HTML stages.
+- The `Quick Answer HTML` prompt now receives prior validator failure text on retries so repeated resets target the exact failing rule instead of looping on the same malformed HTML.
+
+### 2026-03-29: Shared OpenRouter Timeout Hardening
+
+- Added a shared OpenRouter timeout helper that keeps the 60-second timeout active for the full request lifecycle, including response body reads.
+- Migrated the shared Generate row path, Generate slot path, Group Review, Keyword Rating, Auto Group, Auto Group Panel, and Auto Merge OpenRouter calls to the shared timeout helper.
+- Added regression coverage for hung requests, user aborts, and slot-active timeout handling so provider stalls fail visibly instead of leaving rows stuck in `generating`.
+
+### 2026-03-29: Metas/Slug/CTAs Slot Stats Wiring
+
+- The shared Generate summary bar now switches to the active slot's counts, elapsed time, live cost, throttle count, and error-reset behavior when a slot like `Slug` or `CTAs` is generating or selected.
+- Added regression coverage for slot-stat aggregation and active-summary selection so slot completions now update the same `Done`/`active` surface that the primary generate path uses.
+
+### 2026-03-29: Pro Tip / Red Flag / Key Takeaways Stage
+
+- Added a live page-level `Pro Tip/Red Flag/Key Takeaways` stage sourced from `Metas/Slug/CTAs`, with `Pro Tip` as the primary output and `Red Flag` plus `Key Takeaways` as prompt slots.
+- The new stage reuses the same shared model persistence, shared logs, slot-aware summary stats, and Firestore-backed state flow as the other page-level content stages.
+- All three prompts now use the combined H2 summaries as article context so the final guidance outputs stay aligned to the full article rather than drifting to one section.
+- Added a leftmost `Overview` content tab that reads the existing pipeline row docs and shows total active pages, per-stage completion/cost, overall progress, latest completed stage, and full pipeline cost without introducing any new persistence schema.
+
+### 2026-03-29: Final Pages Aggregation
+
+- Replaced the locked `Final Pages` placeholder with a live read-only table that assembles one final row per active page from the existing content pipeline docs.
+- The final table now auto-populates `Title`, meta fields, quick answer, H1 body, CTA fields, pro tip, red flags, key takeaways, and `Dynamic Header` / `Dynamic Description` pairs from ordered H2 body rows.
+- Final-page values are fully derived from upstream state, so clearing an upstream stage immediately clears the corresponding final-table cells instead of leaving stale data behind.
+- `Final Pages` now includes a publish-readiness summary strip showing `Total Pages`, `Ready`, `Needs Review`, `Completion %`, and `Last Updated`, all derived from the assembled final rows instead of a separate saved audit state.
+- Publish readiness is deterministic: a row is only marked ready when all required final fields are present, including the first dynamic header/description pair, and the summary exposes how many rows are still missing required fields.
+- Final-page column headers now link directly to their source content subtabs, so users can jump from assembled output straight to `Pages`, `H2 Body HTML`, `H1 Body HTML`, `Quick Answer HTML`, `Metas/Slug/CTAs`, or `Pro Tip/Red Flag/Key Takeaways` without leaving the final handoff table.
+
+### 2026-03-29: Content Subtab URLs
+
+- Added URL-addressable content subtabs for `Overview`, `Pages`, `H2s`, `Page Guide`, `H2 Body`, `H2 Rate`, `H2 Body HTML`, `H2 Summ.`, `H1 Body`, `H1 Body HTML`, `Quick Answer`, `Quick Answer HTML`, `Metas/Slug/CTAs`, `Pro Tip/Red Flag/Key Takeaways`, and `Final Pages`.
+- Content subtab links now restore the same visible content state for anyone opening the URL, including the page-level `H2s` and `Page Guide` slot views that previously lived only in local generate view state.
+- Overview jump targets now map to the correct content subtabs instead of relying on mismatched internal stage ids.
+
+### 2026-03-29: Per-Subtab Model Locking
+
+- Added a per-subtab model lock on the shared Generate surface so each content stage can pin its own required model and make that choice visible to all users through the existing Firestore-backed settings flow.
+- Locked subtabs now disable model changes locally, keep showing the pinned model after refresh, and ignore shared selected-model updates until the subtab is explicitly unlocked.
+
+### 2026-03-29: GPT-5.4 Mini Default Alignment
+
+- Replaced the remaining mixed default-model behavior so Generate/Content, Group Review, and dedicated Auto-Group settings now all start from `OpenAI GPT-5.4 mini` instead of blank/legacy provider fallbacks.
+- Shared model hydration now normalizes blank or unavailable selections back to the preferred model when possible, while still preserving explicit valid selections and optional per-workflow overrides.
+- Updated `README.md` so local setup uses `npm run setup` and the documented OpenRouter default matches the live application behavior.
+
+### 2026-03-29: Content Subtab Stale-Upstream Guard
+
+- `H2 Body` and `H1 Body` derivation now require the upstream page row and relevant slot outputs to still be in `generated` state before reusing their text.
+- This prevents stale page titles, H2 names, and page-guide context from surviving resets/errors and silently reappearing in downstream content subtabs.
+
+### 2026-03-30: Content Derived-Input Reuse Guard
+
+- Derived content rows now keep generated output only when the saved row input still exactly matches the current upstream-derived prompt, making prompt changes and upstream content changes invalidate stale results deterministically instead of leaking them across subtabs.
+- The stricter reuse rule now covers `H2 Body`, `H2 Rate`, `H2 Summ.`, `H1 Body`, `H1 Body HTML`, `Quick Answer`, `Quick Answer HTML`, `Metas/Slug/CTAs`, and `Pro Tip/Red Flag/Key Takeaways`.

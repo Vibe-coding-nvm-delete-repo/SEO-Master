@@ -4,6 +4,10 @@
  */
 
 import type { ProcessedRow } from './types';
+import {
+  OPENROUTER_REQUEST_TIMEOUT_MS,
+  runWithOpenRouterTimeout,
+} from './openRouterTimeout';
 
 export const DEFAULT_KEYWORD_RATING_PROMPT = `You classify a single search keyword relative to the CORE SEMANTIC INTENT of the full keyword set (provided as context).
 
@@ -194,27 +198,32 @@ export async function fetchCoreIntentSummary(
   const maxRetries = 5;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${settings.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
-      },
-      body: JSON.stringify(
-        openRouterBody(
-          model,
-          [
-            { role: 'system', content: DEFAULT_KEYWORD_SUMMARY_SYSTEM },
-            { role: 'user', content: user },
-          ],
-          settings.temperature,
-          settings.maxTokens,
-          settings.reasoningEffort,
-        ),
-      ),
+    const timedResponse = await runWithOpenRouterTimeout({
       signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${settings.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
+        },
+        body: JSON.stringify(
+          openRouterBody(
+            model,
+            [
+              { role: 'system', content: DEFAULT_KEYWORD_SUMMARY_SYSTEM },
+              { role: 'user', content: user },
+            ],
+            settings.temperature,
+            settings.maxTokens,
+            settings.reasoningEffort,
+          ),
+        ),
+        signal: requestSignal,
+      }),
     });
+    const res = timedResponse.result;
     if (res.status === 429) {
       if (attempt < maxRetries) {
         const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
@@ -224,10 +233,18 @@ export async function fetchCoreIntentSummary(
       throw new Error('Rate limited (429) during summary — try again later.');
     }
     if (!res.ok) {
-      const t = await res.text().catch(() => '');
+      const t = (await runWithOpenRouterTimeout({
+        signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async () => res.text().catch(() => ''),
+      }).catch(() => ({ result: '' }))).result;
       throw new Error(`Summary API ${res.status}: ${t.slice(0, 200)}`);
     }
-    const data = await res.json();
+    const data = (await runWithOpenRouterTimeout({
+      signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async () => res.json(),
+    })).result;
     const content = data.choices?.[0]?.message?.content || '';
     const summary = parseCoreIntentSummaryJson(content);
     if (!summary) throw new Error('Model did not return a valid JSON summary.');
@@ -260,24 +277,29 @@ export async function fetchSingleKeywordRating(
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${settings.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
-      },
-      body: JSON.stringify(
-        openRouterBody(
-          model,
-          [{ role: 'user', content: user }],
-          settings.temperature,
-          settings.maxTokens,
-          settings.reasoningEffort,
-        ),
-      ),
+    const timedResponse = await runWithOpenRouterTimeout({
       signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${settings.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
+        },
+        body: JSON.stringify(
+          openRouterBody(
+            model,
+            [{ role: 'user', content: user }],
+            settings.temperature,
+            settings.maxTokens,
+            settings.reasoningEffort,
+          ),
+        ),
+        signal: requestSignal,
+      }),
     });
+    const res = timedResponse.result;
 
     if (res.status === 429) {
       if (attempt < maxRetries) {
@@ -289,11 +311,19 @@ export async function fetchSingleKeywordRating(
     }
 
     if (!res.ok) {
-      const t = await res.text().catch(() => '');
+      const t = (await runWithOpenRouterTimeout({
+        signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async () => res.text().catch(() => ''),
+      }).catch(() => ({ result: '' }))).result;
       throw new Error(`Rating API ${res.status}: ${t.slice(0, 200)}`);
     }
 
-    const data = await res.json();
+    const data = (await runWithOpenRouterTimeout({
+      signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async () => res.json(),
+    })).result;
     const usage = parseOpenRouterUsage(data);
     const content = data.choices?.[0]?.message?.content || '';
     const rating = parseKeywordRatingJson(content);

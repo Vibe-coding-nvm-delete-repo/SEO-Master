@@ -198,6 +198,28 @@ export interface AutoMergeRecommendation {
   reviewedAt?: string;
 }
 
+export interface GroupMergeRecommendationGroup {
+  id: string;
+  name: string;
+  pageCount: number;
+  totalVolume: number;
+  locationSummary: string;
+}
+
+export interface GroupMergeRecommendation {
+  id: string;
+  sourceFingerprint: string;
+  groupA: GroupMergeRecommendationGroup;
+  groupB: GroupMergeRecommendationGroup;
+  similarity: number;
+  exactNameMatch: boolean;
+  sharedPageNameCount: number;
+  locationCompatible: boolean;
+  status: 'pending' | 'dismissed' | 'accepted';
+  createdAt: string;
+  reviewedAt?: string;
+}
+
 export interface ActivityLogEntry {
   id: string;
   timestamp: string;  // ISO 8601

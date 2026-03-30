@@ -101,6 +101,11 @@ All keyword management tabs share a single `TableHeader` component:
 
 Never add state that only lives in React memory. If it matters to the user, it must survive a refresh.
 
+When a feature uses both local fallback data and a Firestore listener, startup must be explicitly guarded:
+- cached fallback must not overwrite authoritative Firestore once Firestore has loaded
+- cache-only empty/missing snapshots must not wipe good local state during bootstrap
+- the first truly authoritative empty state must be distinguished from “Firestore has not caught up yet”
+
 ### UI/Design Rules
 - **Light theme only** — never use dark classes (`bg-zinc-800`, `text-white`)
 - **Match existing patterns** — grep codebase for similar elements before writing new UI

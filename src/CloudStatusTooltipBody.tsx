@@ -2,6 +2,7 @@ import React from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  Clock,
   Cloud,
   Database,
   FolderOpen,
@@ -19,7 +20,7 @@ import { WORKSPACE_FIRESTORE_DATABASE_ID } from './firestoreDbConfig';
 
 /** Panel wrapper for `InlineHelpHint` — matches app cards; no inner padding (body handles layout). */
 export const CLOUD_STATUS_TOOLTIP_PANEL_CLASS =
-  'z-[100] bg-white border border-zinc-200 rounded-xl shadow-md max-w-[min(22rem,calc(100vw-1.5rem))] overflow-hidden pointer-events-none';
+  'z-[100] bg-white border border-zinc-200 rounded-xl shadow-md max-w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden pointer-events-none';
 
 function Row({
   icon: Icon,
@@ -56,24 +57,35 @@ function valueToneClass(tone: 'ok' | 'warn' | 'err' | 'muted'): string {
   }
 }
 
+function formatTimestamp(value: number | null): string {
+  if (value == null) return 'None yet this session';
+  return new Date(value).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 export type CloudStatusTooltipBodyProps = {
   browserOnline: boolean;
   snap: CloudSyncDerived;
   hasActiveProject: boolean;
   activeProjectId: string | null;
   statusLabel: string;
+  statusDetail?: string;
   tone: CloudStatusTone;
 };
 
-/**
- * Rich layout for the app bar connection tooltip — icons, sections, light theme accents.
- */
 export default function CloudStatusTooltipBody({
   browserOnline,
   snap,
   hasActiveProject,
   activeProjectId,
   statusLabel,
+  statusDetail,
   tone,
 }: CloudStatusTooltipBodyProps) {
   const headerAccent =
@@ -94,6 +106,9 @@ export default function CloudStatusTooltipBody({
           ? 'text-amber-600'
           : 'text-indigo-600';
 
+  const projectWritesPending = Math.max(snap.project.flushDepth, snap.project.cloudWritePendingCount);
+  const sharedWritesPending = snap.shared.cloudWritePendingCount;
+
   return (
     <div className="text-left">
       <div
@@ -112,17 +127,25 @@ export default function CloudStatusTooltipBody({
             </span>
           </div>
           <p className="text-[10px] text-zinc-500 mt-0.5 leading-tight">
-            Summary: <span className="text-zinc-800 font-medium">{statusLabel}</span>
+            Summary:{' '}
+            <span className="text-zinc-800 font-medium">
+              {statusLabel}
+              {statusDetail ? <span className="text-zinc-500 font-normal"> {statusDetail}</span> : null}
+            </span>
           </p>
           <p className="text-[9px] text-zinc-400 mt-1 leading-tight flex items-center gap-1">
             <Info className="w-3 h-3 shrink-0" aria-hidden />
-            This browser only — details update live when you open other tabs.
+            This tab only — the headline prioritizes the open project when one is selected.
           </p>
         </div>
       </div>
 
       <div className="px-3 py-2.5 space-y-3 bg-zinc-50/40">
-        <Row icon={browserOnline ? Wifi : WifiOff} label="Network" iconClass={browserOnline ? 'text-emerald-500' : 'text-amber-500'}>
+        <Row
+          icon={browserOnline ? Wifi : WifiOff}
+          label="Network"
+          iconClass={browserOnline ? 'text-emerald-500' : 'text-amber-500'}
+        >
           <span className={valueToneClass(browserOnline ? 'ok' : 'warn')}>
             {browserOnline ? 'Online' : 'Offline'}
           </span>
@@ -130,14 +153,6 @@ export default function CloudStatusTooltipBody({
 
         <Row icon={Database} label="Firestore" iconClass="text-indigo-500">
           <span className="font-mono text-[10px] text-zinc-800">{WORKSPACE_FIRESTORE_DATABASE_ID}</span>
-        </Row>
-
-        <Row icon={Server} label="Server data" iconClass={snap.serverReachable ? 'text-emerald-500' : 'text-amber-500'}>
-          <span className={valueToneClass(snap.serverReachable ? 'ok' : 'warn')}>
-            {snap.serverReachable
-              ? 'Reached (snapshot not cache-only)'
-              : 'Not yet — waiting or offline cache'}
-          </span>
         </Row>
 
         <Row icon={FolderOpen} label="Project workspace" iconClass="text-indigo-400">
@@ -157,49 +172,172 @@ export default function CloudStatusTooltipBody({
         </Row>
 
         <Row
-          icon={snap.projectFlushDepth > 0 ? Loader2 : RefreshCw}
-          label="Cloud save queue"
-          iconClass={snap.projectFlushDepth > 0 ? 'text-amber-500 animate-spin' : 'text-zinc-400'}
+          icon={Server}
+          label="Project server path"
+          iconClass={snap.project.serverReachable ? 'text-emerald-500' : 'text-amber-500'}
         >
-          <span className={valueToneClass(snap.projectFlushDepth > 0 ? 'warn' : 'muted')}>
-            {snap.projectFlushDepth > 0
-              ? `Writing (${snap.projectFlushDepth} active)`
-              : 'Idle'}
+          <span className={valueToneClass(snap.project.serverReachable ? 'ok' : 'warn')}>
+            {snap.project.serverReachable
+              ? 'Reached (project snapshot not cache-only)'
+              : 'Not yet — waiting or cache-only'}
           </span>
         </Row>
 
         <Row
-          icon={hasActiveProject && snap.projectDataWriteFailed ? AlertCircle : CheckCircle2}
-          label="Latest project save"
+          icon={Server}
+          label="Workspace server path"
+          iconClass={snap.shared.serverReachable ? 'text-emerald-500' : 'text-amber-500'}
+        >
+          <span className={valueToneClass(snap.shared.serverReachable ? 'ok' : 'warn')}>
+            {snap.shared.serverReachable
+              ? 'Reached (core workspace snapshot not cache-only)'
+              : 'Not yet — waiting or cache-only'}
+          </span>
+        </Row>
+
+        <Row
+          icon={Server}
+          label="Auxiliary server path"
+          iconClass={snap.auxiliary.serverReachable ? 'text-emerald-500' : 'text-zinc-400'}
+        >
+          <span className={valueToneClass(snap.auxiliary.serverReachable ? 'ok' : 'muted')}>
+            {snap.auxiliary.serverReachable ? 'Reached by at least one auxiliary listener' : 'No auxiliary server snapshot yet'}
+          </span>
+        </Row>
+
+        <Row
+          icon={snap.unsafeToRefresh || snap.local.failed ? AlertCircle : CheckCircle2}
+          label="Refresh safety"
+          iconClass={snap.unsafeToRefresh || snap.local.failed ? 'text-amber-500' : 'text-emerald-500'}
+        >
+          <span className={valueToneClass(snap.unsafeToRefresh || snap.local.failed ? 'warn' : 'ok')}>
+            {snap.local.failed
+              ? 'At risk until a local save succeeds'
+              : snap.unsafeToRefresh
+                ? `Unsafe — ${snap.local.pendingCount} local write pending`
+                : 'Safe to refresh'}
+          </span>
+        </Row>
+
+        <Row
+          icon={snap.local.pendingCount > 0 ? Loader2 : snap.local.failed ? AlertCircle : CheckCircle2}
+          label="Local durability"
           iconClass={
-            !hasActiveProject
-              ? 'text-zinc-400'
-              : snap.projectDataWriteFailed
+            snap.local.pendingCount > 0
+              ? 'text-amber-500 animate-spin'
+              : snap.local.failed
                 ? 'text-rose-500'
                 : 'text-emerald-500'
           }
         >
-          {!hasActiveProject ? (
-            <span className="text-zinc-400">—</span>
-          ) : snap.projectDataWriteFailed ? (
-            <span className={valueToneClass('err')}>Failed — retry when online</span>
+          <div className="space-y-0.5">
+            <div>
+              {snap.local.pendingCount > 0 ? (
+                <span className={valueToneClass('warn')}>Writing ({snap.local.pendingCount} pending)</span>
+              ) : snap.local.failed ? (
+                <span className={valueToneClass('err')}>Failed — refresh may lose changes</span>
+              ) : (
+                <span className={valueToneClass('ok')}>Succeeded</span>
+              )}
+            </div>
+            <div className="text-[9px] text-zinc-500">
+              Last local save: {formatTimestamp(snap.local.lastWriteOkAtMs)}
+            </div>
+          </div>
+        </Row>
+
+        {hasActiveProject ? (
+          <Row
+            icon={projectWritesPending > 0 ? Loader2 : snap.project.writeFailed ? AlertCircle : RefreshCw}
+            label="Project cloud writes"
+            iconClass={
+              projectWritesPending > 0
+                ? 'text-amber-500 animate-spin'
+                : snap.project.writeFailed
+                  ? 'text-rose-500'
+                  : 'text-zinc-400'
+            }
+          >
+            {projectWritesPending > 0 ? (
+              <span className={valueToneClass('warn')}>Writing ({projectWritesPending} pending)</span>
+            ) : snap.project.writeFailed ? (
+              <span className={valueToneClass('err')}>Failed — needs attention</span>
+            ) : (
+              <span className={valueToneClass('ok')}>Idle / succeeded</span>
+            )}
+          </Row>
+        ) : null}
+
+        <Row
+          icon={sharedWritesPending > 0 ? Loader2 : snap.shared.writeFailed ? AlertCircle : RefreshCw}
+          label="Shared-doc writes"
+          iconClass={
+            sharedWritesPending > 0
+              ? 'text-amber-500 animate-spin'
+              : snap.shared.writeFailed
+                ? 'text-rose-500'
+                : 'text-zinc-400'
+          }
+        >
+          {sharedWritesPending > 0 ? (
+            <span className={valueToneClass('warn')}>Writing ({sharedWritesPending} pending)</span>
+          ) : snap.shared.writeFailed ? (
+            <span className={valueToneClass('err')}>Failed — next save required</span>
           ) : (
-            <span className={valueToneClass('ok')}>Succeeded</span>
+            <span className={valueToneClass('ok')}>Idle / succeeded</span>
           )}
         </Row>
 
-        <div className="rounded-lg border border-zinc-200/80 bg-white px-2.5 py-2 shadow-sm">
+        {hasActiveProject ? (
           <Row
-            icon={snap.listenerErrors.length ? AlertCircle : ListTree}
-            label="Listener channels"
-            iconClass={snap.listenerErrors.length ? 'text-rose-500' : 'text-emerald-500'}
+            icon={Clock}
+            label="Last project cloud sync"
+            iconClass={snap.project.lastCloudWriteOkAtMs ? 'text-emerald-500' : 'text-zinc-400'}
           >
-            {snap.listenerErrors.length > 0 ? (
+            <span className={snap.project.lastCloudWriteOkAtMs ? valueToneClass('ok') : 'text-zinc-500'}>
+              {formatTimestamp(snap.project.lastCloudWriteOkAtMs)}
+            </span>
+          </Row>
+        ) : null}
+
+        <Row
+          icon={Clock}
+          label={hasActiveProject ? 'Last shared-doc sync' : 'Last workspace cloud sync'}
+          iconClass={snap.shared.lastCloudWriteOkAtMs ? 'text-emerald-500' : 'text-zinc-400'}
+        >
+          <span className={snap.shared.lastCloudWriteOkAtMs ? valueToneClass('ok') : 'text-zinc-500'}>
+            {formatTimestamp(snap.shared.lastCloudWriteOkAtMs)}
+          </span>
+        </Row>
+
+        <div className="rounded-lg border border-zinc-200/80 bg-white px-2.5 py-2 shadow-sm space-y-2.5">
+          <Row
+            icon={snap.listeners.criticalErrors.length ? AlertCircle : ListTree}
+            label="Critical listeners"
+            iconClass={snap.listeners.criticalErrors.length ? 'text-rose-500' : 'text-emerald-500'}
+          >
+            {snap.listeners.criticalErrors.length > 0 ? (
               <span className={valueToneClass('err')}>
-                {snap.listenerErrors.length} error(s): {snap.listenerErrors.join(', ')}
+                {snap.listeners.criticalErrors.length} error(s):{' '}
+                {snap.listeners.criticalErrors.map((channel) => channel.label).join(', ')}
               </span>
             ) : (
-              <span className={valueToneClass('ok')}>No errors on active subscriptions</span>
+              <span className={valueToneClass('ok')}>No critical listener errors</span>
+            )}
+          </Row>
+
+          <Row
+            icon={snap.listeners.auxiliaryErrors.length ? AlertCircle : ListTree}
+            label="Auxiliary listeners"
+            iconClass={snap.listeners.auxiliaryErrors.length ? 'text-amber-500' : 'text-emerald-500'}
+          >
+            {snap.listeners.auxiliaryErrors.length > 0 ? (
+              <span className={valueToneClass('warn')}>
+                {snap.listeners.auxiliaryErrors.length} error(s):{' '}
+                {snap.listeners.auxiliaryErrors.map((channel) => channel.label).join(', ')}
+              </span>
+            ) : (
+              <span className={valueToneClass('ok')}>No auxiliary listener errors</span>
             )}
           </Row>
         </div>

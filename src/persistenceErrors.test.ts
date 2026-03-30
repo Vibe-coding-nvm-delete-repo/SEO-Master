@@ -11,6 +11,12 @@ describe('persistenceErrors', () => {
     expect(addToast).toHaveBeenCalledWith(
       expect.stringContaining('test op'),
       'error',
+      expect.objectContaining({
+        notification: expect.objectContaining({
+          mode: 'shared',
+          source: 'system',
+        }),
+      }),
     );
     spy.mockRestore();
   });
@@ -19,6 +25,23 @@ describe('persistenceErrors', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     reportPersistFailure(undefined, 'x', new Error('e'));
     expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('uses payload-rejected copy for invalid-argument failures', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const addToast = vi.fn();
+    reportPersistFailure(addToast, 'generate rows', { code: 'invalid-argument' });
+    expect(addToast).toHaveBeenCalledWith(
+      'Cloud sync failed (generate rows) [invalid-argument]. Firestore rejected the data payload.',
+      'error',
+      expect.objectContaining({
+        notification: expect.objectContaining({
+          mode: 'shared',
+          source: 'system',
+        }),
+      }),
+    );
     spy.mockRestore();
   });
 

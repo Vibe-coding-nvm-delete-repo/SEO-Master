@@ -4,7 +4,9 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { ChevronDown, ChevronRight, Play, Square, CheckCircle2, AlertCircle, Loader2, ExternalLink, Copy, Settings, Zap, Search, Download } from 'lucide-react';
 import ModelSelector from './ModelSelector';
+import { OPENROUTER_REQUEST_TIMEOUT_MS, runWithOpenRouterTimeout } from './openRouterTimeout';
 import SettingsControls from './SettingsControls';
+import { CLOUD_SYNC_CHANNELS, makeAppSettingsChannel } from './cloudSyncStatus';
 import {
   AUTO_GROUP_MAX_BATCH_PAGES,
   computeAutoGroupAssignmentMaxTokens,
@@ -44,9 +46,22 @@ import { runCosineSimilarity, trimCosineClusterMismatchPages, DEFAULT_EMBEDDING_
 import type { SimilarityPair, CosineCluster, CosineProgress } from './CosineEngine';
 import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest } from './GroupReviewEngine';
 import { db } from './firebase';
-import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
-import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import { doc, setDoc, getDoc } from 'firebase/firestore';
 import InlineHelpHint from './InlineHelpHint';
+import { useToast } from './ToastContext';
+import {
+  appSettingsIdbKey,
+  cacheStateLocallyBestEffort,
+  loadCachedState,
+  persistAppSettingsDoc,
+  subscribeAppSettingsDoc,
+} from './appSettingsPersistence';
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  normalizePreferredOpenRouterModel,
+} from './modelDefaults';
+import { useLatestPersistQueue } from './useLatestPersistQueue';
+import { reportPersistFailure } from './persistenceErrors';
 
 interface AutoGroupPanelProps {
   effectiveClusters: ClusterSummary[] | null;
@@ -287,6 +302,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   persistedSuggestions,
   onSuggestionsChange,
 }) => {
+  const { addToast } = useToast();
   const [subTab, setSubTab] = useState<'auto-group' | 'cosine-test'>('auto-group');
   const [autoGroupTab, setAutoGroupTab] = useState<'ungrouped' | 'grouped'>('ungrouped');
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
@@ -324,7 +340,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   // Dedicated Auto-Group settings (shared via Firestore)
   const [showSettings, setShowSettings] = useState(false);
   const [agApiKey, setAgApiKey] = useState('');
-  const [agModel, setAgModel] = useState('google/gemini-2.0-flash-001');
+  const [agModel, setAgModel] = useState(DEFAULT_OPENROUTER_MODEL_ID);
   const [agTemperature, setAgTemperature] = useState(0.3);
   const [agConcurrency, setAgConcurrency] = useState(5);
   const [agBatchSize, setAgBatchSize] = useState(5);
@@ -337,10 +353,10 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   const [agModelsLoading, setAgModelsLoading] = useState(false);
   const [agModelSearch, setAgModelSearch] = useState('');
 
-  // Persist auto-group settings to Firestore
-  const saveAgSettings = useCallback(() => {
+  const lastAgSavedRef = useRef('');
+  const persistAgSettings = useCallback(async () => {
     if (!agSettingsHydrated) return;
-    const sharedData = {
+    const sharedData: Record<string, unknown> = {
       apiKey: agApiKey,
       model: agModel,
       temperature: agTemperature,
@@ -350,45 +366,87 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       assignmentPrompt: agAssignmentPrompt,
       qaPrompt: agQaPrompt,
       cosineSummaryPrompt,
-      updatedAt: new Date().toISOString(),
     };
-    setDoc(doc(db, 'app_settings', 'autogroup_settings'), {
-      ...sharedData,
-      updatedAt: new Date().toISOString(),
-    }).catch(() => {});
-  }, [agApiKey, agModel, agTemperature, agConcurrency, agBatchSize, agReasoning, agAssignmentPrompt, agQaPrompt, cosineSummaryPrompt]);
+    // Deduplicate: skip save when values haven't actually changed (breaks the
+    // snapshot → setState → save → snapshot feedback loop).
+    const key = JSON.stringify(sharedData);
+    if (key === lastAgSavedRef.current) return;
+    lastAgSavedRef.current = key;
+    (sharedData as Record<string, unknown>).updatedAt = new Date().toISOString();
+    await persistAppSettingsDoc({
+      docId: 'autogroup_settings',
+      data: sharedData as Record<string, string>,
+      addToast,
+      localContext: 'auto-group settings',
+      cloudContext: 'auto-group settings',
+    });
+  }, [agApiKey, agModel, agTemperature, agConcurrency, agBatchSize, agReasoning, agAssignmentPrompt, agQaPrompt, cosineSummaryPrompt, agSettingsHydrated, addToast]);
+  const { schedule: scheduleAgSettingsPersist } = useLatestPersistQueue(persistAgSettings);
 
   // Auto-save whenever hydrated settings change
-  useEffect(() => { saveAgSettings(); }, [saveAgSettings]);
+  useEffect(() => { scheduleAgSettingsPersist(); }, [scheduleAgSettingsPersist]);
 
   // Load settings from Firestore and keep them live-synced
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'app_settings', 'autogroup_settings'), (snap) => {
-      markListenerSnapshot('autogroup_settings', snap);
-      const d = snap.exists() ? snap.data() : null;
-      if (typeof d?.apiKey === 'string') setAgApiKey(d.apiKey);
-      if (d?.model) setAgModel(d.model);
-      if (d?.temperature !== undefined) setAgTemperature(Number(d.temperature));
-      if (d?.concurrency !== undefined) setAgConcurrency(Math.min(250, Math.max(1, Number(d.concurrency) || 5)));
-      if (d?.batchSize !== undefined) setAgBatchSize(Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))));
-      if (d?.reasoning) {
+    let alive = true;
+    const firestoreLoadedRef = { current: false };
+    void loadCachedState<Record<string, unknown>>({
+      idbKey: appSettingsIdbKey('autogroup_settings'),
+    }).then((d) => {
+      if (!alive || firestoreLoadedRef.current || !d) return;
+      if (typeof d.apiKey === 'string') setAgApiKey(d.apiKey);
+      if (typeof d.model === 'string' && d.model) setAgModel(d.model);
+      if (d.temperature !== undefined) setAgTemperature(Number(d.temperature));
+      if (d.concurrency !== undefined) setAgConcurrency(Math.min(250, Math.max(1, Number(d.concurrency) || 5)));
+      if (d.batchSize !== undefined) setAgBatchSize(Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))));
+      if (d.reasoning) {
         if (d.reasoning === 'off') setAgReasoning(false);
-        else if (['low', 'medium', 'high'].includes(d.reasoning)) setAgReasoning(d.reasoning);
+        else if (d.reasoning === 'low' || d.reasoning === 'medium' || d.reasoning === 'high') setAgReasoning(d.reasoning);
       }
-      if (typeof d?.assignmentPrompt === 'string' && d.assignmentPrompt.trim()) setAgAssignmentPrompt(d.assignmentPrompt);
-      if (typeof d?.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
-      if (typeof d?.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
-      setAgSettingsHydrated(true);
-    }, (err) => {
-      markListenerError('autogroup_settings');
-      console.warn('[AutoGroup] autogroup_settings sync:', err);
+      if (typeof d.assignmentPrompt === 'string' && d.assignmentPrompt.trim()) setAgAssignmentPrompt(d.assignmentPrompt);
+      if (typeof d.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
+      if (typeof d.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
       setAgSettingsHydrated(true);
     });
+    const unsub = subscribeAppSettingsDoc({
+      docId: 'autogroup_settings',
+      channel: CLOUD_SYNC_CHANNELS.autoGroupSettings,
+      onData: (snap) => {
+        const isFromCache = snap.metadata.fromCache;
+        if (!snap.exists() && isFromCache) return;
+        firestoreLoadedRef.current = true;
+        const d = snap.exists() ? snap.data() : null;
+        if (typeof d?.apiKey === 'string') setAgApiKey(d.apiKey);
+        if (d?.model) setAgModel(d.model);
+        if (d?.temperature !== undefined) setAgTemperature(Number(d.temperature));
+        if (d?.concurrency !== undefined) setAgConcurrency(Math.min(250, Math.max(1, Number(d.concurrency) || 5)));
+        if (d?.batchSize !== undefined) setAgBatchSize(Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))));
+        if (d?.reasoning) {
+          if (d.reasoning === 'off') setAgReasoning(false);
+          else if (['low', 'medium', 'high'].includes(d.reasoning)) setAgReasoning(d.reasoning);
+        }
+        if (typeof d?.assignmentPrompt === 'string' && d.assignmentPrompt.trim()) setAgAssignmentPrompt(d.assignmentPrompt);
+        if (typeof d?.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
+        if (typeof d?.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
+        if (d) {
+          cacheStateLocallyBestEffort({
+            idbKey: appSettingsIdbKey('autogroup_settings'),
+            value: d,
+          });
+        }
+        setAgSettingsHydrated(true);
+      },
+      onError: (err) => {
+        reportPersistFailure(addToast, 'auto-group settings sync', err);
+        firestoreLoadedRef.current = true;
+        setAgSettingsHydrated(true);
+      },
+    });
     return () => {
-      clearListenerError('autogroup_settings');
-      if (typeof unsub === 'function') unsub();
+      alive = false;
+      unsub();
     };
-  }, []);
+  }, [addToast]);
 
   // Fetch models when API key changes
   React.useEffect(() => {
@@ -404,6 +462,9 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         .map((m: any) => ({ id: m.id, name: m.name || m.id, pricing: m.pricing }))
         .sort((a: any, b: any) => a.name.localeCompare(b.name));
       setAgModels(models);
+      if (models.length > 0) {
+        setAgModel((current) => normalizePreferredOpenRouterModel(current, models.map((model: any) => model.id)));
+      }
     }).catch(() => {}).finally(() => { if (!cancelled) setAgModelsLoading(false); });
     return () => { cancelled = true; };
   }, [agApiKey]);
@@ -645,35 +706,56 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
   const [cosineSummariesHydrated, setCosineSummariesHydrated] = useState(false);
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'app_settings', cosineSummaryCacheKey), (snap) => {
-      markListenerSnapshot(`cosine_${cosineSummaryCacheKey}`, snap);
-      if (!snap.exists()) {
-        setCosinePageSummaries(new Map());
-        setCosineSummariesHydrated(true);
-        return;
-      }
-      const data = snap.data();
-      setCosinePageSummaries(deserializeSummaryMap(typeof data?.summaries === 'string' ? data.summaries : null));
-      setCosineSummariesHydrated(true);
-    }, (err) => {
-      markListenerError(`cosine_${cosineSummaryCacheKey}`);
-      console.warn('[AutoGroup] cosine summary cache sync:', err);
-      setCosinePageSummaries(new Map());
+    let alive = true;
+    void loadCachedState<{ summaries?: string }>({
+      idbKey: appSettingsIdbKey(cosineSummaryCacheKey),
+    }).then((cached) => {
+      if (!alive || !cached) return;
+      setCosinePageSummaries(deserializeSummaryMap(typeof cached.summaries === 'string' ? cached.summaries : null));
       setCosineSummariesHydrated(true);
     });
+    const unsub = subscribeAppSettingsDoc({
+      docId: cosineSummaryCacheKey,
+      channel: makeAppSettingsChannel('cosine', cosineSummaryCacheKey),
+      onData: (snap) => {
+        if (!snap.exists()) {
+          setCosinePageSummaries(new Map());
+          setCosineSummariesHydrated(true);
+          return;
+        }
+        const data = snap.data();
+        setCosinePageSummaries(deserializeSummaryMap(typeof data?.summaries === 'string' ? data.summaries : null));
+        cacheStateLocallyBestEffort({
+          idbKey: appSettingsIdbKey(cosineSummaryCacheKey),
+          value: data,
+        });
+        setCosineSummariesHydrated(true);
+      },
+      onError: (err) => {
+        reportPersistFailure(addToast, 'cosine summary cache sync', err);
+        setCosinePageSummaries(new Map());
+        setCosineSummariesHydrated(true);
+      },
+    });
     return () => {
-      clearListenerError(`cosine_${cosineSummaryCacheKey}`);
-      if (typeof unsub === 'function') unsub();
+      alive = false;
+      unsub();
     };
-  }, [cosineSummaryCacheKey]);
+  }, [addToast, cosineSummaryCacheKey]);
 
   useEffect(() => {
     if (!cosineSummariesHydrated) return;
-    setDoc(doc(db, 'app_settings', cosineSummaryCacheKey), {
-      summaries: cosinePageSummaries.size > 0 ? serializeSummaryMap(cosinePageSummaries) : '',
-      updatedAt: new Date().toISOString(),
-    }).catch(() => {});
-  }, [cosinePageSummaries, cosineSummaryCacheKey, cosineSummariesHydrated]);
+    void persistAppSettingsDoc({
+      docId: cosineSummaryCacheKey,
+      data: {
+        summaries: cosinePageSummaries.size > 0 ? serializeSummaryMap(cosinePageSummaries) : '',
+        updatedAt: new Date().toISOString(),
+      },
+      addToast,
+      localContext: 'cosine summary cache',
+      cloudContext: 'cosine summary cache',
+    });
+  }, [addToast, cosinePageSummaries, cosineSummaryCacheKey, cosineSummariesHydrated]);
 
   const buildCosineEmbeddingPage = useCallback((
     page: ClusterSummary,
@@ -715,35 +797,48 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
         const batch = pages.slice(batchIdx * batchSize, batchIdx * batchSize + batchSize);
         const { system, user } = buildCosineSummaryPrompt(batch);
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${activeSettings.apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': window.location.origin,
-          },
-          body: JSON.stringify({
-            model: activeSettings.model,
-            messages: [
-              { role: 'system', content: cosineSummaryPrompt || system },
-              { role: 'user', content: user },
-            ],
-            temperature: activeSettings.temperature ?? 0.2,
-            response_format: { type: 'json_object' },
-            max_tokens: computeCosineSummaryMaxTokens(batch.length),
-            ...(activeSettings.reasoning && activeSettings.reasoning !== false
-              ? { reasoning: { effort: activeSettings.reasoning } }
-              : {}),
-          }),
+        const timedResponse = await runWithOpenRouterTimeout({
           signal: controller.signal,
+          timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${activeSettings.apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': window.location.origin,
+            },
+            body: JSON.stringify({
+              model: activeSettings.model,
+              messages: [
+                { role: 'system', content: cosineSummaryPrompt || system },
+                { role: 'user', content: user },
+              ],
+              temperature: activeSettings.temperature ?? 0.2,
+              response_format: { type: 'json_object' },
+              max_tokens: computeCosineSummaryMaxTokens(batch.length),
+              ...(activeSettings.reasoning && activeSettings.reasoning !== false
+                ? { reasoning: { effort: activeSettings.reasoning } }
+                : {}),
+            }),
+            signal: requestSignal,
+          }),
         });
+        const response = timedResponse.result;
 
         if (!response.ok) {
-          const errText = await response.text().catch(() => '');
+          const errText = (await runWithOpenRouterTimeout({
+            signal: controller.signal,
+            timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+            run: async () => response.text().catch(() => ''),
+          }).catch(() => ({ result: '' }))).result;
           throw new Error(`Summary API ${response.status}: ${errText.slice(0, 200)}`);
         }
 
-        const data = await response.json();
+        const data = (await runWithOpenRouterTimeout({
+          signal: controller.signal,
+          timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          run: async () => response.json(),
+        })).result;
         const content = data.choices?.[0]?.message?.content || '';
         const summaries = parseCosineSummaryResponse(content, batch);
         const batchSummaryMap = new Map<string, string>();
@@ -1701,33 +1796,46 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     controller: AbortController
   ) => {
     const { system, user } = buildAutoGroupBatchPrompt({ batch, existingGroupNames });
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${agApiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': window.location.origin,
-      },
-        body: JSON.stringify({
-          model: agModel,
-          messages: [
-            { role: 'system', content: agAssignmentPrompt || system },
-            { role: 'user', content: user },
-          ],
-          temperature: agTemperature,
-          response_format: { type: 'json_object' },
-          max_tokens: computeAutoGroupAssignmentMaxTokens(batch.length),
-          ...(agReasoning && agReasoning !== false ? { reasoning: { effort: agReasoning } } : {}),
-        }),
+    const timedResponse = await runWithOpenRouterTimeout({
       signal: controller.signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${agApiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': window.location.origin,
+        },
+          body: JSON.stringify({
+            model: agModel,
+            messages: [
+              { role: 'system', content: agAssignmentPrompt || system },
+              { role: 'user', content: user },
+            ],
+            temperature: agTemperature,
+            response_format: { type: 'json_object' },
+            max_tokens: computeAutoGroupAssignmentMaxTokens(batch.length),
+            ...(agReasoning && agReasoning !== false ? { reasoning: { effort: agReasoning } } : {}),
+          }),
+        signal: requestSignal,
+      }),
     });
+    const response = timedResponse.result;
 
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
+      const errText = (await runWithOpenRouterTimeout({
+        signal: controller.signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async () => response.text().catch(() => ''),
+      }).catch(() => ({ result: '' }))).result;
       throw new Error(`API ${response.status}: ${errText.slice(0, 200)}`);
     }
 
-    const data = await response.json();
+    const data = (await runWithOpenRouterTimeout({
+      signal: controller.signal,
+      timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+      run: async () => response.json(),
+    })).result;
     const content = data.choices?.[0]?.message?.content || '';
     if (!content.trim()) throw new Error('Empty response from API');
 
@@ -1922,7 +2030,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       setIsComplete(true);
       logAndToast('auto-group', `Auto Group v1 cycle ${cycle} complete`, finalGroups.length, `Cycle ${cycle}: processed ${startingUngrouped} pages -> ${finalGroups.length} groups`, 'success');
     } catch (e: any) {
-      if (e.name === 'AbortError') {
+      if (e.name === 'AbortError' && controller.signal.aborted) {
         setPipelineStage(`Cycle ${cycle} stopped`);
         setPipelineDetail(`Cycle ${cycle} stopped after processing ${processedCount.toLocaleString()} pages. You can start again from the remaining ungrouped pages.`);
       } else {
@@ -1995,7 +2103,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         logAndToast?.('auto-group', `Reconciliation pass ${reconPass + 1}: no duplicates found`, 0, 'No duplicate groups found', 'info');
       }
     } catch (e: any) {
-      if (e.name !== 'AbortError') console.error('Reconciliation error:', e);
+      if (!(e.name === 'AbortError' && controller.signal.aborted)) console.error('Reconciliation error:', e);
     } finally {
       setIsRunningRecon(false);
       setReconComplete(true);

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, type Mock } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useProjectLifecycle } from './useProjectLifecycle';
 import type { Project } from '../types';
@@ -6,10 +6,18 @@ import * as projectStorage from '../projectStorage';
 import * as projectWorkspace from '../projectWorkspace';
 
 const softDeleteProjectInFirestore = vi.spyOn(projectStorage, 'softDeleteProjectInFirestore');
+const firestoreListeners = vi.hoisted(() => ({
+  handlers: new Map<string, (snap: any) => void>(),
+}));
 
 vi.mock('firebase/firestore', () => ({
   collection: vi.fn(() => ({ path: 'projects' })),
-  onSnapshot: vi.fn((_ref: unknown, _onNext: () => void) => () => {}),
+  onSnapshot: vi.fn((ref: { path: string }, onNext: (snap: any) => void) => {
+    firestoreListeners.handlers.set(ref.path, onNext);
+    return () => {
+      firestoreListeners.handlers.delete(ref.path);
+    };
+  }),
 }));
 
 vi.mock('../firebase', () => ({ db: {} }));
@@ -17,8 +25,12 @@ vi.mock('../firebase', () => ({ db: {} }));
 describe('useProjectLifecycle project actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    firestoreListeners.handlers.clear();
     softDeleteProjectInFirestore.mockResolvedValue(undefined);
-    vi.spyOn(projectStorage, 'loadProjectsFromFirestore').mockResolvedValue([]);
+    vi.spyOn(projectStorage, 'loadProjectsBootstrapState').mockResolvedValue({
+      projects: [],
+      source: 'empty',
+    });
     vi.spyOn(projectWorkspace, 'loadSavedWorkspacePrefs').mockResolvedValue({
       activeProjectId: null,
       savedClusters: [],
@@ -82,6 +94,27 @@ describe('useProjectLifecycle project actions', () => {
     confirmSpy.mockRestore();
   });
 
+  it('selectProject clears workspace before loadProject so projects stay visually distinct', async () => {
+    const input = makeInput();
+    const sequence: string[] = [];
+    (input.clearProject as Mock).mockImplementation(() => {
+      sequence.push('clear');
+    });
+    (input.loadProject as Mock).mockImplementation(() => {
+      sequence.push('load');
+      return Promise.resolve();
+    });
+    const { result } = renderHook(() => useProjectLifecycle(input));
+
+    await act(async () => {
+      await result.current.selectProject('p1');
+    });
+
+    expect(sequence).toEqual(['clear', 'load']);
+    expect(input.setActiveProjectId).toHaveBeenCalledWith('p1');
+    expect(input.loadProject).toHaveBeenCalledWith('p1', input.projects);
+  });
+
   it('selectProject does not load when project is soft-deleted', async () => {
     const deleted: Project = {
       id: 'p1',
@@ -100,5 +133,51 @@ describe('useProjectLifecycle project actions', () => {
 
     expect(input.loadProject).not.toHaveBeenCalled();
     expect(input.setActiveProjectId).not.toHaveBeenCalled();
+  });
+
+  it('keeps cached projects visible when the first live snapshot is empty after local-cache bootstrap', async () => {
+    const cachedProjects: Project[] = [
+      {
+        id: 'p1',
+        name: 'Title Loans',
+        description: '',
+        createdAt: '2020-01-01T00:00:00.000Z',
+        uid: 'u',
+        folderId: null,
+        deletedAt: null,
+      },
+      {
+        id: 'p2',
+        name: 'Installment Loans',
+        description: '',
+        createdAt: '2020-01-02T00:00:00.000Z',
+        uid: 'u',
+        folderId: null,
+        deletedAt: null,
+      },
+    ];
+    vi.spyOn(projectStorage, 'loadProjectsBootstrapState').mockResolvedValue({
+      projects: cachedProjects,
+      source: 'local-cache',
+    });
+    const input = makeInput({ projects: [] });
+
+    renderHook(() => useProjectLifecycle(input));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(input.setProjects).toHaveBeenCalledWith(cachedProjects);
+
+    await act(async () => {
+      firestoreListeners.handlers.get('projects')?.({
+        forEach: () => {},
+        metadata: { fromCache: false, hasPendingWrites: false },
+      });
+    });
+
+    expect(input.setProjects).toHaveBeenCalledTimes(1);
+    expect(input.clearProject).not.toHaveBeenCalled();
   });
 });

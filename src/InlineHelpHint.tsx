@@ -24,6 +24,7 @@ export interface InlineHelpHintProps {
   triggerRole?: 'button' | 'group';
   /** Gap between anchor and tooltip (px). Default 8; use 4 for tighter status popovers. */
   tooltipGap?: number;
+  'data-testid'?: string;
 }
 
 type Placement = 'bottom' | 'top';
@@ -44,6 +45,7 @@ export default function InlineHelpHint({
   tooltipClassName,
   triggerRole = 'button',
   tooltipGap = 8,
+  'data-testid': dataTestId,
 }: InlineHelpHintProps) {
   const anchorRef = useRef<HTMLSpanElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
@@ -174,6 +176,7 @@ export default function InlineHelpHint({
       <span
         ref={anchorRef}
         className={className}
+        data-testid={dataTestId}
         tabIndex={0}
         role={triggerRole === 'group' ? 'group' : 'button'}
         aria-label={triggerAria}

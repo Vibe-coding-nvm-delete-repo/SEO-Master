@@ -3,16 +3,27 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, useImperativeHandle, forwardRef } from 'react';
 import { Star, Check, ChevronDown, Search, Eye, EyeOff, Loader2 } from 'lucide-react';
-import { db } from './firebase';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { DEFAULT_SYSTEM_PROMPT } from './GroupReviewEngine';
 import { DEFAULT_AUTO_GROUP_PROMPT } from './AutoGroupEngine';
 import { DEFAULT_KEYWORD_RATING_PROMPT } from './KeywordRatingEngine';
 import { DEFAULT_AUTO_MERGE_PROMPT } from './AutoMergeEngine';
+import { DEFAULT_EMBEDDING_MODEL } from './CosineEngine';
 import type { PersistToastFn } from './persistenceErrors';
 import { reportPersistFailure } from './persistenceErrors';
-import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
 import InlineHelpHint from './InlineHelpHint';
+import {
+  appSettingsIdbKey,
+  cacheStateLocallyBestEffort,
+  loadCachedState,
+  persistAppSettingsDoc,
+  subscribeAppSettingsDoc,
+} from './appSettingsPersistence';
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  normalizePreferredOpenRouterModel,
+} from './modelDefaults';
+import { useLatestPersistQueue } from './useLatestPersistQueue';
+import { CLOUD_SYNC_CHANNELS } from './cloudSyncStatus';
 
 // ============ Types ============
 
@@ -40,6 +51,8 @@ export interface GroupReviewSettingsData {
   autoMergeConcurrency: number;
   autoMergeReasoningEffort: 'none' | 'low' | 'medium' | 'high';
   autoMergePrompt: string;
+  groupAutoMergeEmbeddingModel: string;
+  groupAutoMergeMinSimilarity: number;
 }
 
 interface OpenRouterModel {
@@ -83,7 +96,20 @@ const toSharedSettings = (settings: GroupReviewSettingsData) => ({
   autoMergeConcurrency: settings.autoMergeConcurrency,
   autoMergeReasoningEffort: settings.autoMergeReasoningEffort,
   autoMergePrompt: settings.autoMergePrompt,
+  groupAutoMergeEmbeddingModel: settings.groupAutoMergeEmbeddingModel,
+  groupAutoMergeMinSimilarity: settings.groupAutoMergeMinSimilarity,
 });
+
+function normalizeOptionalOverrideModel(modelId: string, availableModelIds: readonly string[]): string {
+  const trimmed = modelId.trim();
+  if (!trimmed) return '';
+  return normalizePreferredOpenRouterModel(trimmed, availableModelIds);
+}
+
+function isEmbeddingModel(model: OpenRouterModel): boolean {
+  const haystack = `${model.id} ${model.name}`.toLowerCase();
+  return haystack.includes('embed') || haystack.includes('e5-') || haystack.includes('bge-') || haystack.includes('gte-') || haystack.includes('nomic');
+}
 
 const HelpLabel = ({ label, help, trailing }: { label: string; help: string; trailing?: React.ReactNode }) => (
   <div className="flex items-center gap-1 mb-1">
@@ -233,7 +259,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         const parsed = JSON.parse(cached);
         return {
           apiKey: parsed.apiKey || '',
-          selectedModel: parsed.selectedModel || '',
+          selectedModel: parsed.selectedModel || DEFAULT_OPENROUTER_MODEL_ID,
           concurrency: parsed.concurrency ?? 5,
           temperature: parsed.temperature ?? 0.3,
           maxTokens: parsed.maxTokens ?? 0,
@@ -254,12 +280,14 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
           autoMergeConcurrency: parsed.autoMergeConcurrency ?? 5,
           autoMergeReasoningEffort: parsed.autoMergeReasoningEffort || 'none',
           autoMergePrompt: parsed.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
+          groupAutoMergeEmbeddingModel: parsed.groupAutoMergeEmbeddingModel || DEFAULT_EMBEDDING_MODEL,
+          groupAutoMergeMinSimilarity: parsed.groupAutoMergeMinSimilarity ?? 0.88,
         };
       }
     } catch { /* ignore parse errors */ }
     return {
       apiKey: '',
-      selectedModel: '',
+      selectedModel: DEFAULT_OPENROUTER_MODEL_ID,
       concurrency: 5,
       temperature: 0.3,
       maxTokens: 0,
@@ -280,6 +308,8 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
       autoMergeConcurrency: 5,
       autoMergeReasoningEffort: 'none' as const,
       autoMergePrompt: DEFAULT_AUTO_MERGE_PROMPT,
+      groupAutoMergeEmbeddingModel: DEFAULT_EMBEDDING_MODEL,
+      groupAutoMergeMinSimilarity: 0.88,
     };
   });
 
@@ -288,8 +318,29 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   const [showApiKey, setShowApiKey] = useState(false);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [hasHydratedSharedSettings, setHasHydratedSharedSettings] = useState(false);
+  const embeddingModels = useMemo(() => models.filter(isEmbeddingModel), [models]);
 
   const lastSharedSavedRef = useRef(JSON.stringify(toSharedSettings(settings)));
+  const persistSharedSettings = useCallback(async () => {
+    if (!hasHydratedSharedSettings) return;
+    const shared = toSharedSettings(settings);
+    const json = JSON.stringify(shared);
+    if (json === lastSharedSavedRef.current) return;
+    lastSharedSavedRef.current = json;
+    await persistAppSettingsDoc({
+      docId: FS_DOC,
+      data: {
+        ...shared,
+        updatedAt: new Date().toISOString(),
+      },
+      addToast,
+      localContext: 'group review settings',
+      cloudContext: 'group review settings',
+      localStorageKey: LS_SETTINGS_KEY,
+      localStorageValue: json,
+    });
+  }, [addToast, hasHydratedSharedSettings, settings]);
+  const { schedule: scheduleSharedSettingsPersist } = useLatestPersistQueue(persistSharedSettings);
 
   // Expose settings to parent via ref
   const selectedModelObj = useMemo(() => models.find(m => m.id === settings.selectedModel), [models, settings.selectedModel]);
@@ -311,125 +362,93 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
 
   // Persist shared settings to Firestore + localStorage
   useEffect(() => {
-    const shared = toSharedSettings(settings);
-    const json = JSON.stringify(shared);
-    if (json === lastSharedSavedRef.current) return;
-    lastSharedSavedRef.current = json;
-    // Always save to localStorage (sync, reliable, offline-capable)
-    try { localStorage.setItem(LS_SETTINGS_KEY, json); } catch { /* quota */ }
-    // Also persist to Firestore (cloud sync)
-    setDoc(doc(db, 'app_settings', FS_DOC), {
-      ...shared,
-      updatedAt: new Date().toISOString(),
-    }).catch((e) => reportPersistFailure(addToast, 'group review settings', e));
-  }, [settings, addToast]);
+    scheduleSharedSettingsPersist();
+  }, [settings, scheduleSharedSettingsPersist]);
 
   // Load shared settings from Firestore on mount
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'app_settings', FS_DOC), (snap) => {
-      markListenerSnapshot('group_review_settings', snap);
-      const remote = snap.exists() ? snap.data() : null;
-      setSettings(() => {
-        const merged: GroupReviewSettingsData = {
-          apiKey: remote?.apiKey || '',
-          selectedModel: remote?.selectedModel || '',
-          concurrency: remote?.concurrency ?? 5,
-          temperature: remote?.temperature ?? 0.3,
-          maxTokens: remote?.maxTokens ?? 0,
-          systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-          autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
-          reasoningEffort: remote?.reasoningEffort || 'none',
-          keywordRatingModel: remote?.keywordRatingModel || '',
-          keywordRatingTemperature: remote?.keywordRatingTemperature ?? 0.3,
-          keywordRatingMaxTokens: remote?.keywordRatingMaxTokens ?? 0,
-          keywordRatingConcurrency: remote?.keywordRatingConcurrency ?? 5,
-          keywordRatingReasoningEffort: remote?.keywordRatingReasoningEffort || 'none',
-          keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
-          keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
-          keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
-          autoMergeModel: remote?.autoMergeModel || '',
-          autoMergeTemperature: remote?.autoMergeTemperature ?? 0.2,
-          autoMergeMaxTokens: remote?.autoMergeMaxTokens ?? 0,
-          autoMergeConcurrency: remote?.autoMergeConcurrency ?? 5,
-          autoMergeReasoningEffort: remote?.autoMergeReasoningEffort || 'none',
-          autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
+    let alive = true;
+    const firestoreLoadedRef = { current: false };
+    const applyCachedSettings = async () => {
+      const cached = await loadCachedState<Partial<GroupReviewSettingsData>>({
+        idbKey: appSettingsIdbKey(FS_DOC),
+        localStorageKey: LS_SETTINGS_KEY,
+      });
+      if (!alive || firestoreLoadedRef.current || !cached) {
+        setHasHydratedSharedSettings(true);
+        return;
+      }
+      setSettings((prev) => {
+        const merged = {
+          ...prev,
+          ...cached,
+          selectedModel: cached.selectedModel?.trim() || prev.selectedModel || DEFAULT_OPENROUTER_MODEL_ID,
         };
-
-        const mergedSharedJson = JSON.stringify(toSharedSettings(merged));
-        lastSharedSavedRef.current = mergedSharedJson;
-
-        const remoteSharedJson = JSON.stringify(toSharedSettings({
-          apiKey: remote?.apiKey || '',
-          selectedModel: remote?.selectedModel || '',
-          concurrency: remote?.concurrency ?? 5,
-          temperature: remote?.temperature ?? 0.3,
-          maxTokens: remote?.maxTokens ?? 0,
-          systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-          autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
-          reasoningEffort: remote?.reasoningEffort || 'none',
-          keywordRatingModel: remote?.keywordRatingModel || '',
-          keywordRatingTemperature: remote?.keywordRatingTemperature ?? 0.3,
-          keywordRatingMaxTokens: remote?.keywordRatingMaxTokens ?? 0,
-          keywordRatingConcurrency: remote?.keywordRatingConcurrency ?? 5,
-          keywordRatingReasoningEffort: remote?.keywordRatingReasoningEffort || 'none',
-          keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
-          keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
-          keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
-          autoMergeModel: remote?.autoMergeModel || '',
-          autoMergeTemperature: remote?.autoMergeTemperature ?? 0.2,
-          autoMergeMaxTokens: remote?.autoMergeMaxTokens ?? 0,
-          autoMergeConcurrency: remote?.autoMergeConcurrency ?? 5,
-          autoMergeReasoningEffort: remote?.autoMergeReasoningEffort || 'none',
-          autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
-        }));
-
-        if (mergedSharedJson !== remoteSharedJson) {
-          setDoc(doc(db, 'app_settings', FS_DOC), {
-            ...toSharedSettings(merged),
-            updatedAt: new Date().toISOString(),
-          }).catch((e) => reportPersistFailure(addToast, 'group review settings backfill', e));
-        }
-
+        lastSharedSavedRef.current = JSON.stringify(toSharedSettings(merged));
         return merged;
       });
-      // Cache remote settings to localStorage so next load is instant
-      if (remote) {
-        try {
-          localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(toSharedSettings({
-            apiKey: remote.apiKey || '',
-            selectedModel: remote.selectedModel || '',
-            concurrency: remote.concurrency ?? 5,
-            temperature: remote.temperature ?? 0.3,
-            maxTokens: remote.maxTokens ?? 0,
-            systemPrompt: remote.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-            autoGroupPrompt: remote.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
-            reasoningEffort: remote.reasoningEffort || 'none',
-            keywordRatingModel: remote.keywordRatingModel || '',
-            keywordRatingTemperature: remote.keywordRatingTemperature ?? 0.3,
-            keywordRatingMaxTokens: remote.keywordRatingMaxTokens ?? 0,
-            keywordRatingConcurrency: remote.keywordRatingConcurrency ?? 5,
-            keywordRatingReasoningEffort: remote.keywordRatingReasoningEffort || 'none',
-            keywordRatingPrompt: remote.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
-            keywordCoreIntentSummary: remote.keywordCoreIntentSummary || '',
-            keywordCoreIntentSummaryUpdatedAt: remote.keywordCoreIntentSummaryUpdatedAt || '',
-            autoMergeModel: remote.autoMergeModel || '',
-            autoMergeTemperature: remote.autoMergeTemperature ?? 0.2,
-            autoMergeMaxTokens: remote.autoMergeMaxTokens ?? 0,
-            autoMergeConcurrency: remote.autoMergeConcurrency ?? 5,
-            autoMergeReasoningEffort: remote.autoMergeReasoningEffort || 'none',
-            autoMergePrompt: remote.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
-          })));
-        } catch { /* quota */ }
-      }
       setHasHydratedSharedSettings(true);
-    }, (err) => {
-      markListenerError('group_review_settings');
-      reportPersistFailure(addToast, 'group review settings sync', err);
-      setHasHydratedSharedSettings(true);
+    };
+
+    void applyCachedSettings();
+
+    const unsub = subscribeAppSettingsDoc({
+      docId: FS_DOC,
+      channel: CLOUD_SYNC_CHANNELS.groupReviewSettings,
+      onData: (snap) => {
+        const isFromCache = snap.metadata.fromCache;
+        if (!snap.exists() && isFromCache) return;
+        firestoreLoadedRef.current = true;
+        const remote = snap.exists() ? snap.data() : null;
+        setSettings(() => {
+          const merged: GroupReviewSettingsData = {
+            apiKey: remote?.apiKey || '',
+            selectedModel: remote?.selectedModel || DEFAULT_OPENROUTER_MODEL_ID,
+            concurrency: remote?.concurrency ?? 5,
+            temperature: remote?.temperature ?? 0.3,
+            maxTokens: remote?.maxTokens ?? 0,
+            systemPrompt: remote?.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+            autoGroupPrompt: remote?.autoGroupPrompt || DEFAULT_AUTO_GROUP_PROMPT,
+            reasoningEffort: remote?.reasoningEffort || 'none',
+            keywordRatingModel: remote?.keywordRatingModel || '',
+            keywordRatingTemperature: remote?.keywordRatingTemperature ?? 0.3,
+            keywordRatingMaxTokens: remote?.keywordRatingMaxTokens ?? 0,
+            keywordRatingConcurrency: remote?.keywordRatingConcurrency ?? 5,
+            keywordRatingReasoningEffort: remote?.keywordRatingReasoningEffort || 'none',
+            keywordRatingPrompt: remote?.keywordRatingPrompt || DEFAULT_KEYWORD_RATING_PROMPT,
+            keywordCoreIntentSummary: remote?.keywordCoreIntentSummary || '',
+            keywordCoreIntentSummaryUpdatedAt: remote?.keywordCoreIntentSummaryUpdatedAt || '',
+            autoMergeModel: remote?.autoMergeModel || '',
+            autoMergeTemperature: remote?.autoMergeTemperature ?? 0.2,
+            autoMergeMaxTokens: remote?.autoMergeMaxTokens ?? 0,
+            autoMergeConcurrency: remote?.autoMergeConcurrency ?? 5,
+            autoMergeReasoningEffort: remote?.autoMergeReasoningEffort || 'none',
+            autoMergePrompt: remote?.autoMergePrompt || DEFAULT_AUTO_MERGE_PROMPT,
+            groupAutoMergeEmbeddingModel: remote?.groupAutoMergeEmbeddingModel || DEFAULT_EMBEDDING_MODEL,
+            groupAutoMergeMinSimilarity: remote?.groupAutoMergeMinSimilarity ?? 0.88,
+          };
+          const mergedShared = toSharedSettings(merged);
+          const mergedSharedJson = JSON.stringify(mergedShared);
+          lastSharedSavedRef.current = mergedSharedJson;
+          cacheStateLocallyBestEffort({
+            idbKey: appSettingsIdbKey(FS_DOC),
+            value: mergedShared,
+            localStorageKey: LS_SETTINGS_KEY,
+            localStorageValue: mergedSharedJson,
+          });
+          return merged;
+        });
+        setHasHydratedSharedSettings(true);
+      },
+      onError: (err) => {
+        reportPersistFailure(addToast, 'group review settings sync', err);
+        firestoreLoadedRef.current = true;
+        setHasHydratedSharedSettings(true);
+      },
     });
     return () => {
-      clearListenerError('group_review_settings');
-      if (typeof unsub === 'function') unsub();
+      alive = false;
+      unsub();
     };
   }, [addToast]);
 
@@ -451,6 +470,30 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
       }));
       mapped.sort((a, b) => a.name.localeCompare(b.name));
       setModels(mapped);
+      const availableModelIds = mapped.map((model) => model.id);
+      const availableEmbeddingModelIds = mapped.filter(isEmbeddingModel).map((model) => model.id);
+      if (availableModelIds.length > 0) {
+        setSettings((prev) => {
+          const next = {
+            ...prev,
+            selectedModel: normalizePreferredOpenRouterModel(prev.selectedModel, availableModelIds),
+            keywordRatingModel: normalizeOptionalOverrideModel(prev.keywordRatingModel, availableModelIds),
+            autoMergeModel: normalizeOptionalOverrideModel(prev.autoMergeModel, availableModelIds),
+            groupAutoMergeEmbeddingModel: availableEmbeddingModelIds.length > 0
+              ? normalizePreferredOpenRouterModel(prev.groupAutoMergeEmbeddingModel || DEFAULT_EMBEDDING_MODEL, availableEmbeddingModelIds)
+              : (prev.groupAutoMergeEmbeddingModel || DEFAULT_EMBEDDING_MODEL),
+          };
+          if (
+            next.selectedModel === prev.selectedModel &&
+            next.keywordRatingModel === prev.keywordRatingModel &&
+            next.autoMergeModel === prev.autoMergeModel &&
+            next.groupAutoMergeEmbeddingModel === prev.groupAutoMergeEmbeddingModel
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }
     } catch (e) {
       console.warn('Failed to fetch models:', e);
     }
@@ -485,7 +528,7 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         <div>
           <HelpLabel
             label="API Key"
-            help="Shared OpenRouter API key used for Auto Group, Review, QA, Cosine summaries, and other AI actions in this project."
+            help="Shared OpenRouter API key used for Auto Group, Review, QA, group auto-merge embeddings, Cosine summaries, and other AI actions in this project."
           />
           <div className="relative">
             <input
@@ -823,6 +866,38 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
               Reset to default auto merge prompt
             </button>
           )}
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-sky-100 bg-sky-50/50 px-3 py-2 space-y-2">
+        <h4 className="text-xs font-semibold text-zinc-700">Group Auto Merge</h4>
+        <p className="text-[10px] text-zinc-600 leading-relaxed">
+          Used by the <span className="font-medium">Auto Merge</span> tab in keyword management. The app embeds current grouped group names plus top page names, compares every group pair locally, and recommends likely semantic duplicates for manual merge review.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <ModelPicker
+            label="Embedding model"
+            help="Embedding model used to vectorize grouped group names plus page context before all-pairs similarity comparison."
+            value={settings.groupAutoMergeEmbeddingModel}
+            onChange={(modelId) => setSettings(prev => ({ ...prev, groupAutoMergeEmbeddingModel: modelId }))}
+            models={embeddingModels}
+            starredModels={starredModels}
+            onToggleStar={onToggleStar}
+          />
+          <div>
+            <HelpLabel
+              label={`Min similarity (${Math.round(settings.groupAutoMergeMinSimilarity * 100)}%)`}
+              help="Only keep recommendation pairs at or above this cosine similarity score after location guardrails. Higher values improve precision and reduce noise."
+            />
+            <input
+              type="range"
+              min={70}
+              max={99}
+              value={Math.round(settings.groupAutoMergeMinSimilarity * 100)}
+              onChange={(e) => setSettings(prev => ({ ...prev, groupAutoMergeMinSimilarity: parseInt(e.target.value, 10) / 100 }))}
+              className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-sky-600"
+            />
+          </div>
         </div>
       </div>
     </div>

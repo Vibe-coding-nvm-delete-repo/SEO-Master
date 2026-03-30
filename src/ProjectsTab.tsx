@@ -15,7 +15,12 @@ import {
   newFolderId,
   parseProjectFoldersFromFirestore,
 } from './projectFoldersUtils';
-import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import {
+  clearListenerError,
+  CLOUD_SYNC_CHANNELS,
+  markListenerError,
+  markListenerSnapshot,
+} from './cloudSyncStatus';
 import { reportPersistFailure } from './persistenceErrors';
 import ProjectsTabProjectCard, { PROJECT_DRAG_MIME } from './ProjectsTabProjectCard';
 
@@ -84,7 +89,7 @@ export default function ProjectsTab({
     const unsub = onSnapshot(
       doc(db, 'app_settings', PROJECT_FOLDERS_FS_DOC),
       (snap) => {
-        markListenerSnapshot('project_folders', snap);
+        markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectFolders, snap);
         if (!snap.exists()) {
           setProjectFolders([]);
           return;
@@ -93,12 +98,12 @@ export default function ProjectsTab({
         setProjectFolders(parseProjectFoldersFromFirestore(data?.folders));
       },
       (err) => {
-        markListenerError('project_folders');
+        markListenerError(CLOUD_SYNC_CHANNELS.projectFolders);
         reportPersistFailure(addToast, 'project folders sync', err);
       },
     );
     return () => {
-      clearListenerError('project_folders');
+      clearListenerError(CLOUD_SYNC_CHANNELS.projectFolders);
       if (typeof unsub === 'function') unsub();
     };
   }, [addToast]);

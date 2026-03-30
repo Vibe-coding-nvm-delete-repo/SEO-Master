@@ -3,7 +3,7 @@
  * Extracted from App.tsx for useProjectLifecycle and tests.
  */
 
-export type MainTab = 'group' | 'generate' | 'feedback' | 'feature-ideas';
+export type MainTab = 'group' | 'generate' | 'content' | 'feedback' | 'feature-ideas' | 'notifications' | 'updates';
 
 /** Group area sub-routes (under /seo-magic/group/...). */
 export type GroupSubTab = 'data' | 'projects' | 'topics' | 'settings' | 'log';
@@ -52,6 +52,15 @@ export function parseAppPath(pathname: string): ParsedAppLocation {
   }
   if (p === `${base}/generate` || p === '/generate') {
     return { mainTab: 'generate', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${base}/content` || p === '/content') {
+    return { mainTab: 'content', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${base}/notifications` || p === '/notifications') {
+    return { mainTab: 'notifications', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
+  }
+  if (p === `${base}/updates` || p === '/updates') {
+    return { mainTab: 'updates', groupSubTab: null, dataRouteProjectKey: null, settingsSubTab: null };
   }
   if (p === `${base}/log` || p === '/log') {
     return { mainTab: 'group', groupSubTab: 'log', dataRouteProjectKey: null, settingsSubTab: null };
@@ -114,7 +123,10 @@ export function buildMainPath(
 ): string {
   if (tab === 'feedback') return `${APP_BASE_PATH}/feedback`;
   if (tab === 'generate') return `${APP_BASE_PATH}/generate`;
+  if (tab === 'content') return `${APP_BASE_PATH}/content`;
   if (tab === 'feature-ideas') return `${APP_BASE_PATH}/feature-ideas`;
+  if (tab === 'notifications') return `${APP_BASE_PATH}/notifications`;
+  if (tab === 'updates') return `${APP_BASE_PATH}/updates`;
   const g = groupSub ?? 'projects';
   if (g === 'data') {
     if (dataProjectKey) {

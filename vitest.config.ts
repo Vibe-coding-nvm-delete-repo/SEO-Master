@@ -6,8 +6,14 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: [],
+    sequence: {
+      concurrent: false,
+    },
     include: ['src/**/*.test.{ts,tsx}'],
-    exclude: ['src/approvedGroups.test.ts', 'src/uiStructure.test.ts'], // Standalone scripts, not Vitest suites
+    exclude: [
+      'src/approvedGroups.test.ts',
+      'src/uiStructure.test.ts', // Standalone scripts, not Vitest suites
+    ],
   },
   resolve: {
     alias: {

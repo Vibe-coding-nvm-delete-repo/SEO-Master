@@ -4,6 +4,7 @@ import type {
   AutoGroupSuggestion,
   BlockedKeyword,
   ClusterSummary,
+  GroupMergeRecommendation,
   GroupedCluster,
   LabelSection,
   ProcessedRow,
@@ -36,6 +37,7 @@ export interface ProjectViewState {
   tokenMergeRules: TokenMergeRule[];
   autoGroupSuggestions: AutoGroupSuggestion[];
   autoMergeRecommendations: AutoMergeRecommendation[];
+  groupMergeRecommendations: GroupMergeRecommendation[];
   stats: Stats | null;
   datasetStats: unknown | null;
   blockedTokens: string[];
@@ -54,6 +56,7 @@ export const createEmptyProjectViewState = (): ProjectViewState => ({
   tokenMergeRules: [],
   autoGroupSuggestions: [],
   autoMergeRecommendations: [],
+  groupMergeRecommendations: [],
   stats: null,
   datasetStats: null,
   blockedTokens: [],
@@ -99,6 +102,7 @@ export const toProjectViewState = (
     tokenMergeRules: data.tokenMergeRules || [],
     autoGroupSuggestions: data.autoGroupSuggestions || [],
     autoMergeRecommendations: data.autoMergeRecommendations || [],
+    groupMergeRecommendations: data.groupMergeRecommendations || [],
     stats: data.stats || null,
     datasetStats: data.datasetStats || null,
     blockedTokens: data.blockedTokens || [],

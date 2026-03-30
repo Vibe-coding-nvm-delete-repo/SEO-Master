@@ -22,9 +22,9 @@ const FeedbackModalHost = React.memo(function FeedbackModalHost({ authorEmail }:
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="px-3 py-2 text-sm font-medium rounded-md flex items-center gap-1.5 text-zinc-600 hover:text-zinc-800 bg-white border border-zinc-200 shadow-sm"
+        className="px-2.5 py-1 text-xs font-medium rounded-md flex items-center gap-1 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/50 transition-all"
       >
-        <MessageSquare className="w-3.5 h-3.5" />
+        <MessageSquare className="w-3 h-3" />
         Send feedback
       </button>
       {open &&

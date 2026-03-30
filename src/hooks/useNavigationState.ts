@@ -16,6 +16,10 @@ import {
   type GroupSubTab,
   type SettingsSubTab,
 } from '../appRouting';
+import {
+  buildContentPathForRoute,
+  parseContentRouteFromHistoryState,
+} from '../contentSubtabRouting';
 import { projectUrlKey } from '../projectUrlKey';
 
 export interface UseNavigationStateInput {
@@ -39,19 +43,27 @@ export function useNavigationState({ activeProjectIdRef, projectsRef }: UseNavig
 
   const navigateMainTab = useCallback((tab: MainTab) => {
     setMainTab(tab);
+    const existingState = typeof window !== 'undefined' ? window.history.state : null;
+    const nextContentRoute = existingState ? parseContentRouteFromHistoryState(existingState) : null;
     const path =
       tab === 'group'
         ? buildMainPath('group', 'projects')
         : tab === 'generate'
           ? buildMainPath('generate')
+        : tab === 'content'
+          ? (nextContentRoute ? buildContentPathForRoute(nextContentRoute) : buildMainPath('content'))
           : tab === 'feedback'
-            ? buildMainPath('feedback')
-            : buildMainPath('feature-ideas');
+          ? buildMainPath('feedback')
+          : tab === 'notifications'
+            ? buildMainPath('notifications')
+            : tab === 'updates'
+              ? buildMainPath('updates')
+              : buildMainPath('feature-ideas');
     if (typeof window !== 'undefined') {
       const cur = window.location.pathname.replace(/\/$/, '') || '/';
       const next = path.replace(/\/$/, '') || '/';
       if (cur !== next) {
-        window.history.pushState({ kwgMainTab: tab }, '', path);
+        window.history.pushState({ ...(window.history.state ?? {}), kwgMainTab: tab }, '', path);
       }
     }
   }, []);
@@ -70,6 +82,18 @@ export function useNavigationState({ activeProjectIdRef, projectsRef }: UseNavig
     }
     if (p === '/feature-ideas') {
       window.history.replaceState({}, '', `${base}/feature-ideas`);
+      return;
+    }
+    if (p === '/content') {
+      window.history.replaceState({}, '', `${base}/content`);
+      return;
+    }
+    if (p === '/notifications') {
+      window.history.replaceState({}, '', `${base}/notifications`);
+      return;
+    }
+    if (p === '/updates') {
+      window.history.replaceState({}, '', `${base}/updates`);
       return;
     }
     if (p === '/' || p === '') {
@@ -112,7 +136,7 @@ export function useNavigationState({ activeProjectIdRef, projectsRef }: UseNavig
       const cur = window.location.pathname.replace(/\/$/, '') || '/';
       const next = path.replace(/\/$/, '') || '/';
       if (cur !== next) {
-        window.history.pushState({ kwgGroupSub: sub }, '', path);
+        window.history.pushState({ ...(window.history.state ?? {}), kwgGroupSub: sub }, '', path);
       }
     }
   }, [activeProjectIdRef, projectsRef, settingsSubTab]);
@@ -126,7 +150,7 @@ export function useNavigationState({ activeProjectIdRef, projectsRef }: UseNavig
       const cur = window.location.pathname.replace(/\/$/, '') || '/';
       const next = path.replace(/\/$/, '') || '/';
       if (cur !== next) {
-        window.history.pushState({ kwgSettingsSub: st }, '', path);
+        window.history.pushState({ ...(window.history.state ?? {}), kwgSettingsSub: st }, '', path);
       }
     }
   }, []);

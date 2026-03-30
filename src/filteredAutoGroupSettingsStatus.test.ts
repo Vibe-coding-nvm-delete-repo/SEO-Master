@@ -29,6 +29,8 @@ function minimalSettings(overrides: Partial<GroupReviewSettingsData> = {}): Grou
     autoMergeConcurrency: 1,
     autoMergeReasoningEffort: 'none',
     autoMergePrompt: '',
+    groupAutoMergeEmbeddingModel: '',
+    groupAutoMergeMinSimilarity: 0.8,
     ...overrides,
   };
 }

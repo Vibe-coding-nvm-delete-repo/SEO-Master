@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import type { GroupDataTab } from './useKeywordWorkspace';
 
 type ToastKind = 'info' | 'warning' | 'success' | 'error';
 type LogAndToast = (action: any, details: string, affectedRows: number, toastMsg: string, toastType: ToastKind) => void;
@@ -6,8 +7,10 @@ type LogAndToast = (action: any, details: string, affectedRows: number, toastMsg
 export interface UseTokenActionsInput {
   logAndToast: LogAndToast;
   setSelectedMgmtTokens: (next: Set<string>) => void;
-  setTokenMgmtSubTab: (tab: 'current' | 'all' | 'merge' | 'blocked') => void;
+  setTokenMgmtSubTab: (tab: 'current' | 'all' | 'merge' | 'auto-merge' | 'blocked') => void;
   setTokenMgmtPage: (page: number) => void;
+  /** After unblock, land on Pages (Ungrouped) so tokens are visible in the right scope. */
+  switchTab: (tab: GroupDataTab) => void;
   blockTokens: (tokens: string[]) => void;
   unblockTokens: (tokens: string[]) => void;
 }
@@ -18,6 +21,7 @@ export function useTokenActions(input: UseTokenActionsInput) {
     setSelectedMgmtTokens,
     setTokenMgmtSubTab,
     setTokenMgmtPage,
+    switchTab,
     blockTokens,
     unblockTokens,
   } = input;
@@ -46,7 +50,9 @@ export function useTokenActions(input: UseTokenActionsInput) {
     if (tokens.length === 0) return;
     unblockTokens(tokens);
     setSelectedMgmtTokens(new Set());
+    setTokenMgmtSubTab('current');
     setTokenMgmtPage(1);
+    switchTab('pages');
     logAndToast(
       'unblock',
       `Unblocked: ${tokens.join(', ')}`,
@@ -54,7 +60,7 @@ export function useTokenActions(input: UseTokenActionsInput) {
       `Unblocked ${tokens.length} token${tokens.length > 1 ? 's' : ''}: ${tokens.slice(0, 3).join(', ')}`,
       'success',
     );
-  }, [logAndToast, setSelectedMgmtTokens, setTokenMgmtPage, unblockTokens]);
+  }, [logAndToast, setSelectedMgmtTokens, setTokenMgmtPage, setTokenMgmtSubTab, switchTab, unblockTokens]);
 
   return {
     handleBlockSingleToken,

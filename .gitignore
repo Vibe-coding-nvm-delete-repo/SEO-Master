@@ -46,3 +46,12 @@ node_modules/lightningcss/node/index.js.original
 # Test coverage
 coverage/
 .firebase
+
+# Local backup artifacts
+backups/
+
+# Local AI/editor tooling artifacts
+.claude/worktrees/
+.cursor/
+.playwright-cli/
+test-results/

@@ -14,6 +14,7 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 - **Persistence:** All user-facing state is saved to **IndexedDB and Firestore** (3-tier pattern). No “we’ll persist later.”
 - **Ref-before-save:** Update matching `.current` refs **before** any `saveProjectData` / Firestore write so saves never read stale React state. See `CLAUDE.md` for examples.
 - **Snapshots:** Set `suppressSnapshotRef` during writes so `onSnapshot` does not clobber in-flight updates.
+- **Bootstrap guards:** Any feature that combines async local fallback (IndexedDB/localStorage) with a Firestore listener must use an explicit “Firestore is authoritative” guard so an initial empty/missing snapshot cannot wipe good local state during startup.
 - **Multi-user:** Treat Firestore as source of truth for shared projects; design for concurrent editors.
 - **Verification before “done”:** `npx tsc --noEmit`, `npx vitest run`, `npx vite build` — zero new errors/failures.
 - **FEATURES.md:** Update when user-visible behavior changes ([`FEATURES.md`](./FEATURES.md)).
@@ -45,6 +46,7 @@ If a feature touches **Firestore chunk layout** or **IDB schema**, you must upda
 ## Checklist — new feature (e.g. keyword rating, new columns, new AI job)
 
 - [ ] Types in `types.ts`; refs synced before saves; `suppressSnapshotRef` on writes.
+- [ ] If cache fallback + Firestore listener both exist, guard startup so async cache cannot overwrite Firestore and an initial empty/missing snapshot cannot erase cached state.
 - [ ] Settings and per-row fields appear in **IDB + Firestore** (and localStorage only if appropriate for tiny metadata).
 - [ ] Column defs + filters in `tableConstants.ts` if it’s a table column.
 - [ ] LLM calls isolated in a **dedicated module** with tests for parsing and edge cases; concurrency/rate limits aligned with existing engines.

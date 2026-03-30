@@ -28,6 +28,36 @@
    - The `suppressSnapshotRef` flag MUST be set during all Firestore writes to prevent the `onSnapshot` listener from overwriting in-flight state changes
    - When multiple saves can fire in the same render cycle, ensure ALL refs are synced before ANY save
    - Data must be visible to ALL users (not just the current browser) immediately after save -- this is a shared, multi-user app
+
+   **CRITICAL: Firestore-first load guard.** When loading settings/state on mount using both an async cache read (IDB/localStorage) AND a Firestore `onSnapshot` listener, you MUST guard against the cache overwriting authoritative Firestore data. The async IDB read can complete *after* Firestore delivers the real snapshot, causing stale/empty cache to overwrite good data — then the persist effect writes the empty state back to Firestore, destroying it permanently.
+
+   ```typescript
+   // Pattern: firestoreLoadedRef prevents cache fallback from overwriting Firestore data
+   const firestoreLoadedRef = useRef(false);
+
+   const applyCachedSettings = async () => {
+     const cached = await loadCachedState(...); // async — takes 5-50ms
+     if (!alive || firestoreLoadedRef.current) return; // GUARD: Firestore already delivered
+     // ... apply cached/default settings
+   };
+
+   // In onSnapshot callback:
+   if (snap.exists()) {
+     firestoreLoadedRef.current = true; // Mark Firestore as authoritative
+     // ... apply Firestore settings
+   }
+
+   // In persist effect:
+   if (!firestoreLoadedRef.current) return; // Don't write until Firestore confirmed
+   ```
+
+   **Rules:**
+   - ALWAYS use `firestoreLoadedRef` (or equivalent) when combining async cache reads with onSnapshot listeners
+   - NEVER persist settings to Firestore until Firestore has confirmed its own state (prevents writing empty defaults on mount)
+   - NEVER let `applyCachedSettings` fallback run after Firestore has already provided data
+   - NEVER treat the first missing/empty snapshot as authoritative when it is `fromCache`; ignore cache-only empty snapshots so they cannot blank good local state during bootstrap
+   - If Firestore returns an empty collection/doc during bootstrap but local durable cache still has data, preserve the cached view until an authoritative shared snapshot confirms the empty state
+   - This pattern applies to ALL features that load settings from cache + Firestore (Generate tabs, Content tabs, any future settings)
 1. **Use full best practices for every implementation.** No shortcuts. No "good enough." Production-quality code every time.
 2. **Ask follow-up questions if you are not 100% clear on something.** The user will never be annoyed by clarifying questions. Getting it right matters more than speed.
 3. **After every task, stress test BEFORE declaring done.** This is non-negotiable. Follow this exact checklist:
@@ -61,6 +91,17 @@
 6. **Output a clear summary** of all changes made after each task: files modified, why, how it works now, follow-up items.
 7. **Match existing UI patterns before writing new UI.** Grep the codebase for existing elements. Copy exact Tailwind classes. Never invent new color schemes. Light theme only — never use `bg-zinc-800`, `text-white`, etc.
 8. **Use conventional commits.** Format: `<type>(<scope>): <description>`. Types: feat, fix, refactor, chore, test, docs.
+9. **Write a changelog entry after every code-change session.** This is non-negotiable. Before declaring any task complete, add an entry to the `changelog` Firestore collection using the `addChangelogEntry()` function from `src/changelogStorage.ts`. Run this in the browser console or via a script:
+   ```typescript
+   import { addChangelogEntry } from './changelogStorage';
+   await addChangelogEntry({
+     buildName: 'current build name or empty string',
+     timestamp: new Date().toISOString(),
+     summary: 'One-line summary of what was done',
+     changes: ['Specific change 1', 'Specific change 2', '...'],
+   });
+   ```
+   The entry must include: a summary of the work done, and a bullet list of every specific change. If the build name changed, update it via `updateCurrentBuildName()`. Users see these entries in the Updates tab — write them clearly.
 
 ---
 

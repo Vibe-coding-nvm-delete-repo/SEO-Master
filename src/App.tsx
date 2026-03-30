@@ -4,32 +4,45 @@
 import React, { useState, useCallback, useMemo, useEffect, useTransition, useRef } from 'react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check, DollarSign, Inbox } from 'lucide-react';
+import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check, DollarSign, Inbox, Bell } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr, getLabelColor } from './processing';
 import { auth, db, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
 import GenerateTab from './GenerateTab';
+import ContentTab from './ContentTab';
 import FeedbackTab from './FeedbackTab';
 import FeatureIdeasTab from './FeatureIdeasTab';
+import NotificationsTab from './NotificationsTab';
+import UpdatesTab from './UpdatesTab';
 import FeedbackModalHost from './FeedbackModalHost';
 import AppStatusBar from './AppStatusBar';
-import { clearListenerError, clearProjectPersistErrorFlag, getCloudSyncSnapshot, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import {
+  clearListenerError,
+  clearProjectPersistErrorFlag,
+  CLOUD_SYNC_CHANNELS,
+  getCloudSyncSnapshot,
+  markListenerError,
+  markListenerSnapshot,
+} from './cloudSyncStatus';
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
 import { getFilteredAutoGroupSettingsStatus } from './filteredAutoGroupSettingsStatus';
 import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
-import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion, AutoMergeRecommendation } from './types';
-import { executeMergeCascade, computeMergeImpact, applyMergeRulesToTokenArr, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows, computeSignature, mergeTokenArr, refreshGroupsFromClusterSummaries } from './tokenMerge';
+import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, GroupMergeRecommendation, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion, AutoMergeRecommendation } from './types';
+import { computeMergeImpact, applyMergeRulesToTokenArr, computeSignature, mergeTokenArr } from './tokenMerge';
 import MergeConfirmModal from './MergeConfirmModal';
 import { useToast } from './ToastContext';
 import ActivityLog from './ActivityLog';
 import AutoGroupPanel from './AutoGroupPanel';
+import GroupAutoMergePanel from './GroupAutoMergePanel';
+import { OPENROUTER_REQUEST_TIMEOUT_MS, runWithOpenRouterTimeout } from './openRouterTimeout';
 import TopicsSubTab from './TopicsSubTab';
 import ProjectsTab from './ProjectsTab';
 import InlineHelpHint from './InlineHelpHint';
 import TableHeader, { type FilterBag } from './TableHeader';
 import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, BLOCKED_COLUMNS, KEYWORDS_COLUMNS, CELL } from './tableConstants';
+import { buildGroupedClusterFromPages, mergeGroupedClustersByName } from './groupedClusterUtils';
 import {
   groupedTabChildCity,
   groupedTabChildRowKey,
@@ -42,30 +55,8 @@ import {
   volumeCellDisplay,
 } from './clusterExpandChildRows';
 import {
-  addOpenRouterUsage,
-  applyKeywordRatingsToResults,
-  buildKeywordLinesForSummary,
-  countKwRatingBucketsForRows,
-  fetchCoreIntentSummary,
-  fetchSingleKeywordRating,
   formatKeywordRatingDuration,
-  keywordRatingRowKey,
-  runPool,
-  type KeywordRatingSettingsSlice,
-  type OpenRouterUsage,
 } from './KeywordRatingEngine';
-import {
-  addAutoMergeUsage,
-  fetchAutoMergeMatches,
-  type AutoMergeTokenPageContext,
-  selectAutoMergeTokenRows,
-  type AutoMergeSettingsSlice,
-} from './AutoMergeEngine';
-import {
-  markRecommendationApproved,
-  markRecommendationPendingAfterUndo,
-  mergeRecommendationsAfterRerun,
-} from './autoMergeRecommendations';
 import {
   buildProjectDataPayloadFromChunkDocs,
   loadProjectDataFromFirestore,
@@ -82,6 +73,13 @@ import {
   type ProjectViewState,
 } from './projectWorkspace';
 import { useProjectPersistence } from './useProjectPersistence';
+import {
+  appSettingsIdbKey,
+  cacheStateLocallyBestEffort,
+  loadCachedState,
+  persistAppSettingsDoc,
+  subscribeAppSettingsDoc,
+} from './appSettingsPersistence';
 import { parseTokenMgmtSearchTerms, tokenIncludesAnyTerm } from './tokenMgmtSearch';
 import { parseSubClusterKey } from './subClusterKeys';
 import { reportPersistFailure } from './persistenceErrors';
@@ -96,6 +94,11 @@ import { useNavigationState } from './hooks/useNavigationState';
 import { useKeywordWorkspace } from './hooks/useKeywordWorkspace';
 import { useGroupingActions } from './hooks/useGroupingActions';
 import { useTokenActions } from './hooks/useTokenActions';
+import { useKeywordRating } from './hooks/useKeywordRating';
+import { useTokenMerge } from './hooks/useTokenMerge';
+import { useAutoMerge } from './hooks/useAutoMerge';
+import { useGroupAutoMerge } from './hooks/useGroupAutoMerge';
+import { useFilteredTableData } from './hooks/useFilteredTableData';
 
 // Error boundary â€" catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
@@ -150,140 +153,6 @@ interface FilteredAutoGroupJob {
   filterSummary: string;
   settings: GroupReviewSettingsData;
   modelPricing?: { prompt: string; completion: string };
-}
-
-function buildGroupedClusterFromPages(
-  pages: ClusterSummary[],
-  hasReviewApi: boolean,
-  existing?: Partial<GroupedCluster>
-): GroupedCluster {
-  const sortedPages = [...pages].sort((a, b) => b.totalVolume - a.totalVolume);
-  const totalVolume = sortedPages.reduce((sum, page) => sum + page.totalVolume, 0);
-  const keywordCount = sortedPages.reduce((sum, page) => sum + page.keywordCount, 0);
-  let totalKd = 0;
-  let kdCount = 0;
-  let totalKw = 0;
-  let kwCount = 0;
-  for (const page of sortedPages) {
-    if (page.avgKd !== null) {
-      totalKd += page.avgKd * page.keywordCount;
-      kdCount += page.keywordCount;
-    }
-    if (page.avgKwRating != null) {
-      totalKw += page.avgKwRating * page.keywordCount;
-      kwCount += page.keywordCount;
-    }
-  }
-
-  const tokenSig = sortedPages.map(p => p.tokens).slice().sort().join(' ');
-  const existingTokenSig = existing?.clusters
-    ? existing.clusters.map(c => c.tokens).slice().sort().join(' ')
-    : null;
-
-  const existingReviewed =
-    existing?.reviewStatus === 'approve' || existing?.reviewStatus === 'mismatch';
-
-  const tokensSame =
-    existingReviewed && existingTokenSig != null && existingTokenSig === tokenSig;
-
-  // When a merge changes group membership, we keep the last known review result
-  // to avoid badge flicker, but mark it for re-review.
-  const mergeAffected =
-    hasReviewApi && existingReviewed && existingTokenSig != null && !tokensSame;
-
-  const reviewStatus: GroupedCluster['reviewStatus'] | undefined =
-    sortedPages.length === 1
-      ? 'approve'
-      : hasReviewApi
-        ? (existingReviewed ? existing.reviewStatus : 'pending')
-        : existing?.reviewStatus;
-
-  const next: GroupedCluster = {
-    id: existing?.id || `llm_group_${sortedPages[0]?.tokens || Date.now()}`,
-    groupName: sortedPages[0]?.pageName || existing?.groupName || 'Untitled group',
-    clusters: sortedPages,
-    totalVolume,
-    keywordCount,
-    avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null,
-    avgKwRating: kwCount > 0 ? Math.round(totalKw / kwCount) : null,
-    reviewStatus,
-    ...(mergeAffected ? { mergeAffected: true } : {}),
-    ...(existingReviewed ? {
-      reviewMismatchedPages: existing.reviewMismatchedPages,
-      reviewReason: existing.reviewReason,
-      reviewCost: existing.reviewCost,
-      reviewedAt: existing.reviewedAt,
-    } : {}),
-  };
-
-  if (existingReviewed && tokensSame) {
-    delete next.mergeAffected;
-  }
-
-  // If we don't have a previous approved/mismatch result to preserve, clear
-  // stale review fields for consistency.
-  if (next.reviewStatus === 'pending') {
-    delete next.reviewMismatchedPages;
-    delete next.reviewReason;
-    delete next.reviewCost;
-    delete next.reviewedAt;
-    delete next.mergeAffected;
-  }
-
-  return next;
-}
-
-function mergeGroupedClustersByName(
-  existingGroups: GroupedCluster[],
-  incomingGroups: GroupedCluster[],
-  hasReviewApi: boolean
-): GroupedCluster[] {
-  const byName = new Map<
-    string,
-    { template: GroupedCluster; pages: ClusterSummary[]; candidates: GroupedCluster[] }
-  >();
-  const seedGroups = [...existingGroups, ...incomingGroups];
-
-  for (const group of seedGroups) {
-    const key = group.groupName.trim().toLowerCase();
-    const existing = byName.get(key);
-    if (!existing) {
-      byName.set(key, { template: group, pages: [...group.clusters], candidates: [group] });
-      continue;
-    }
-    const mergedPages = [...existing.pages];
-    existing.candidates.push(group);
-    for (const page of group.clusters) {
-      if (!mergedPages.some(item => item.tokens === page.tokens)) mergedPages.push(page);
-    }
-    const preferredTemplate =
-      existing.template.totalVolume >= group.totalVolume ? existing.template : group;
-    byName.set(key, { ...existing, template: preferredTemplate, pages: mergedPages });
-  }
-
-  const clusterTokensSig = (clusters: ClusterSummary[]) =>
-    clusters.map(c => c.tokens).slice().sort().join(' ');
-
-  return [...byName.values()]
-    .map(({ template, pages, candidates }) => {
-      const mergedSig = clusterTokensSig(pages);
-      const reviewedCandidates = candidates.filter(
-        c => c.reviewStatus === 'approve' || c.reviewStatus === 'mismatch'
-      );
-
-      const matchingReviewed = reviewedCandidates.find(
-        c => clusterTokensSig(c.clusters) === mergedSig
-      );
-
-      const preferredTemplate = matchingReviewed
-        ? matchingReviewed
-        : (reviewedCandidates.length > 0
-          ? reviewedCandidates.reduce((best, c) => c.totalVolume > best.totalVolume ? c : best, reviewedCandidates[0])
-          : template);
-
-      return buildGroupedClusterFromPages(pages, hasReviewApi, preferredTemplate);
-    })
-    .sort((a, b) => b.totalVolume - a.totalVolume);
 }
 
 function escapeJsonFromModelResponse(content: string): string | null {
@@ -932,25 +801,42 @@ export default function App() {
     navigateGroupSub,
     navigateSettingsSub,
   } = useNavigationState({ activeProjectIdRef: activeProjectIdNavRef, projectsRef: projectsNavRef });
-  // Starred models â€" shared across Generate tab and Group Review
+  // Starred models â€” shared across Generate tab and Group Review
   const [starredModels, setStarredModels] = useState<Set<string>>(new Set());
   const { addToast } = useToast();
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'app_settings', 'starred_models'), (snap) => {
-      markListenerSnapshot('starred_models', snap);
-      if (!snap.exists()) {
-        setStarredModels(new Set());
-        return;
-      }
-      const ids: string[] = snap.data()?.ids || [];
-      setStarredModels(new Set(ids));
-    }, (err) => {
-      markListenerError('starred_models');
-      reportPersistFailure(addToast, 'starred models sync', err);
+    let alive = true;
+    const firestoreLoadedRef = { current: false };
+
+    void loadCachedState<{ ids?: string[] }>({
+      idbKey: appSettingsIdbKey('starred_models'),
+    }).then((cached) => {
+      if (!alive || firestoreLoadedRef.current || !cached) return;
+      setStarredModels(new Set(Array.isArray(cached.ids) ? cached.ids : []));
+    });
+
+    const unsub = subscribeAppSettingsDoc({
+      docId: 'starred_models',
+      channel: CLOUD_SYNC_CHANNELS.starredModels,
+      onData: (snap) => {
+        const isFromCache = snap.metadata.fromCache;
+        if (!snap.exists() && isFromCache) return;
+        firestoreLoadedRef.current = true;
+        const ids: string[] = snap.exists() && Array.isArray(snap.data()?.ids) ? snap.data()?.ids : [];
+        cacheStateLocallyBestEffort({
+          idbKey: appSettingsIdbKey('starred_models'),
+          value: { ids, updatedAt: new Date().toISOString() },
+        });
+        setStarredModels(new Set(ids));
+      },
+      onError: (err) => {
+        firestoreLoadedRef.current = true;
+        reportPersistFailure(addToast, 'starred models sync', err);
+      },
     });
     return () => {
-      clearListenerError('starred_models');
-      if (typeof unsub === 'function') unsub();
+      alive = false;
+      unsub();
     };
   }, [addToast]);
   const toggleStarModel = useCallback((modelId: string) => {
@@ -959,9 +845,13 @@ export default function App() {
       if (next.has(modelId)) next.delete(modelId);
       else next.add(modelId);
       const arr = [...next];
-      setDoc(doc(db, 'app_settings', 'starred_models'), { ids: arr }).catch((err) =>
-        reportPersistFailure(addToast, 'save starred models', err),
-      );
+      void persistAppSettingsDoc({
+        docId: 'starred_models',
+        data: { ids: arr, updatedAt: new Date().toISOString() },
+        addToast,
+        localContext: 'starred models',
+        cloudContext: 'starred models',
+      });
       return next;
     });
   }, [addToast]);
@@ -972,17 +862,18 @@ export default function App() {
   const {
     results, clusterSummary, tokenSummary, groupedClusters,
     approvedGroups, blockedKeywords, activityLog, stats,
-    datasetStats, autoGroupSuggestions, autoMergeRecommendations, tokenMergeRules,
+    datasetStats, autoGroupSuggestions, autoMergeRecommendations, groupMergeRecommendations, tokenMergeRules,
     blockedTokens, labelSections, fileName,
     activeProjectId, setActiveProjectId,
     loadProject, clearProject, syncFileNameLocal, flushNow,
     removeFromApproved, ungroupPages,
     addActivityEntry,
+    updateGroupMergeRecommendations,
     bulkSet,
     // Transitional setters (will be removed as mutations replace them)
     setResults, setClusterSummary, setTokenSummary, setGroupedClusters,
     setApprovedGroups, setBlockedKeywords, setActivityLog, setStats,
-    setDatasetStats, setAutoGroupSuggestions, setAutoMergeRecommendations, setTokenMergeRules,
+    setDatasetStats, setAutoGroupSuggestions, setAutoMergeRecommendations, setGroupMergeRecommendations, setTokenMergeRules,
     setBlockedTokens, setLabelSections, setFileName,
     refs: persistenceRefs,
   } = persistence;
@@ -1003,6 +894,7 @@ export default function App() {
   const datasetStatsRef = persistenceRefs.datasetStats;
   const autoGroupSuggestionsRef = persistenceRefs.autoGroupSuggestions;
   const autoMergeRecommendationsRef = persistenceRefs.autoMergeRecommendations;
+  const groupMergeRecommendationsRef = persistenceRefs.groupMergeRecommendations;
   const tokenMergeRulesRef = persistenceRefs.tokenMergeRules;
   const blockedTokensRef = persistenceRefs.blockedTokens;
   const labelSectionsRef = persistenceRefs.labelSections;
@@ -1033,74 +925,6 @@ export default function App() {
   const reviewAbortRef = useRef<AbortController | null>(null);
   const reviewProcessingRef = useRef(false);
   const filteredAutoGroupAbortRef = useRef<AbortController | null>(null);
-  const kwRatingAbortRef = useRef<AbortController | null>(null);
-  const autoMergeAbortRef = useRef<AbortController | null>(null);
-  /** Wall-clock start for Rate KWs job (summary + rating). */
-  const kwRatingJobStartRef = useRef(0);
-  const autoMergeJobStartRef = useRef(0);
-  const [kwRatingJob, setKwRatingJob] = useState<{
-    phase: 'idle' | 'summary' | 'rating' | 'done' | 'error';
-    progress: number;
-    done: number;
-    total: number;
-    /** Counts among ratable rows (blocked-token rows excluded) */
-    n1: number;
-    n2: number;
-    n3: number;
-    error: string | null;
-    apiErrors: number;
-    /** Cumulative OpenRouter `usage.cost` (USD) when returned */
-    costUsdTotal: number;
-    costReported: boolean;
-    promptTokens: number;
-    completionTokens: number;
-    /** Summary request + one per keyword rating call */
-    apiCalls: number;
-    elapsedMs: number;
-  }>({
-    phase: 'idle',
-    progress: 0,
-    done: 0,
-    total: 0,
-    n1: 0,
-    n2: 0,
-    n3: 0,
-    error: null,
-    apiErrors: 0,
-    costUsdTotal: 0,
-    costReported: false,
-    promptTokens: 0,
-    completionTokens: 0,
-    apiCalls: 0,
-    elapsedMs: 0,
-  });
-  const [autoMergeJob, setAutoMergeJob] = useState<{
-    phase: 'idle' | 'running' | 'done' | 'error';
-    progress: number;
-    done: number;
-    total: number;
-    recommendations: number;
-    error: string | null;
-    costUsdTotal: number;
-    costReported: boolean;
-    promptTokens: number;
-    completionTokens: number;
-    apiCalls: number;
-    elapsedMs: number;
-  }>({
-    phase: 'idle',
-    progress: 0,
-    done: 0,
-    total: 0,
-    recommendations: 0,
-    error: null,
-    costUsdTotal: 0,
-    costReported: false,
-    promptTokens: 0,
-    completionTokens: 0,
-    apiCalls: 0,
-    elapsedMs: 0,
-  });
   const [autoMergeSortConfig, setAutoMergeSortConfig] = useState<{
     key: 'canonical' | 'mergeTokens' | 'impact' | 'confidence' | 'status';
     direction: 'asc' | 'desc';
@@ -1125,8 +949,6 @@ export default function App() {
   const reReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reReviewGroupIds = useRef<Set<string>>(new Set());
   // Ungrouping: track selected groups and sub-clusters within groups (see useKeywordWorkspace)
-  const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
-  const [mergeModalTokens, setMergeModalTokens] = useState<string[]>([]);
   const [, startTransition] = useTransition();
   const {
     selectedGroups,
@@ -1212,36 +1034,70 @@ export default function App() {
     setExpandedMergeParents,
   } = useKeywordWorkspace({ setSelectedClusters });
 
-  // Universal blocked tokens â€" persists across ALL projects (global, not project-specific)
+  // Universal blocked tokens â€” persists across ALL projects (global, not project-specific)
   const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(new Set<string>());
+  const universalBlockedHydratedRef = useRef(false);
+  const lastUniversalBlockedSavedRef = useRef<string>('');
 
   // Persist universal blocked to Firestore on every change
-  const universalBlockedInitRef = useRef(true);
   useEffect(() => {
-    if (universalBlockedInitRef.current) { universalBlockedInitRef.current = false; return; }
+    if (!universalBlockedHydratedRef.current) return;
     const arr = Array.from(universalBlockedTokens);
-    setDoc(doc(db, 'app_settings', 'universal_blocked'), { tokens: arr, updatedAt: new Date().toISOString() }).catch((err) =>
-      reportPersistFailure(addToast, 'save universal blocked tokens', err),
-    );
+    const payloadJson = JSON.stringify(arr);
+    if (payloadJson === lastUniversalBlockedSavedRef.current) return;
+    lastUniversalBlockedSavedRef.current = payloadJson;
+    void persistAppSettingsDoc({
+      docId: 'universal_blocked',
+      data: { tokens: arr, updatedAt: new Date().toISOString() },
+      addToast,
+      localContext: 'universal blocked tokens',
+      cloudContext: 'universal blocked tokens',
+    });
   }, [universalBlockedTokens, addToast]);
 
   // Load universal blocked from Firestore on mount
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'app_settings', 'universal_blocked'), (snap) => {
-      markListenerSnapshot('universal_blocked', snap);
-      if (!snap.exists()) {
-        setUniversalBlockedTokens(new Set<string>());
+    let alive = true;
+    const firestoreLoadedRef = { current: false };
+
+    void loadCachedState<{ tokens?: string[] }>({
+      idbKey: appSettingsIdbKey('universal_blocked'),
+    }).then((cached) => {
+      if (!alive || firestoreLoadedRef.current || !cached) {
+        universalBlockedHydratedRef.current = true;
         return;
       }
-      const data = snap.data();
-      setUniversalBlockedTokens(new Set<string>(Array.isArray(data?.tokens) ? data.tokens : []));
-    }, (err) => {
-      markListenerError('universal_blocked');
-      reportPersistFailure(addToast, 'universal blocked tokens sync', err);
+      const tokens = Array.isArray(cached.tokens) ? cached.tokens : [];
+      lastUniversalBlockedSavedRef.current = JSON.stringify(tokens);
+      setUniversalBlockedTokens(new Set<string>(tokens));
+      universalBlockedHydratedRef.current = true;
+    });
+
+    const unsub = subscribeAppSettingsDoc({
+      docId: 'universal_blocked',
+      channel: CLOUD_SYNC_CHANNELS.universalBlocked,
+      onData: (snap) => {
+        const isFromCache = snap.metadata.fromCache;
+        if (!snap.exists() && isFromCache) return;
+        firestoreLoadedRef.current = true;
+        const tokens = snap.exists() && Array.isArray(snap.data()?.tokens) ? snap.data()?.tokens : [];
+        lastUniversalBlockedSavedRef.current = JSON.stringify(tokens);
+        cacheStateLocallyBestEffort({
+          idbKey: appSettingsIdbKey('universal_blocked'),
+          value: { tokens, updatedAt: new Date().toISOString() },
+        });
+        setUniversalBlockedTokens(new Set<string>(tokens));
+        universalBlockedHydratedRef.current = true;
+      },
+      onError: (err) => {
+        firestoreLoadedRef.current = true;
+        universalBlockedHydratedRef.current = true;
+        reportPersistFailure(addToast, 'universal blocked tokens sync', err);
+      },
     });
     return () => {
-      clearListenerError('universal_blocked');
-      if (typeof unsub === 'function') unsub();
+      alive = false;
+      unsub();
     };
   }, [addToast]);
 
@@ -1251,6 +1107,12 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [savedClusters, setSavedClusters] = useState<any[]>([]);
+  const [isGenerateBusy, setIsGenerateBusy] = useState(false);
+  const [isContentBusy, setIsContentBusy] = useState(false);
+  const isProjectWorkspaceBusy = isGenerateBusy || isContentBusy;
+  const handleProjectChangeBlocked = useCallback(() => {
+    addToast('Stop or wait for Generate/Content to finish before switching projects.', 'warning');
+  }, [addToast]);
   const { createProject, deleteProject, reviveProject, permanentlyDeleteProject, selectProject } = useProjectLifecycle({
     projects,
     setProjects,
@@ -1274,6 +1136,8 @@ export default function App() {
     setNewProjectDescription,
     setProjectError,
     setIsCreatingProject,
+    canChangeProject: () => !isProjectWorkspaceBusy,
+    onProjectChangeBlocked: handleProjectChangeBlocked,
   });
 
   // Realtime workspace prefs (shared between collaborators).
@@ -1285,11 +1149,10 @@ export default function App() {
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'app_settings', 'user_preferences'), (snap) => {
-      markListenerSnapshot('user_preferences', snap);
+      markListenerSnapshot(CLOUD_SYNC_CHANNELS.userPreferences, snap);
       if (!snap.exists()) return;
       const data = snap.data() as any;
       const remoteSavedClusters = Array.isArray(data?.savedClusters) ? data.savedClusters : [];
-      const remoteActiveProjectId = typeof data?.activeProjectId === 'string' ? data.activeProjectId : null;
 
       const remoteHash = (() => {
         try { return JSON.stringify(remoteSavedClusters); } catch { return ''; }
@@ -1298,24 +1161,18 @@ export default function App() {
       if (remoteHash !== savedClustersHashRef.current) {
         setSavedClusters(remoteSavedClusters);
       }
-      if (remoteActiveProjectId !== activeProjectIdRef.current) {
-        // Preserve selection when prefs arrive before the projects listener settles.
-        // A transient "project not in list yet" state should not clear the active project
-        // and flip UI to "Select Project".
-        if (remoteActiveProjectId && !projects.some((p) => p.id === remoteActiveProjectId)) {
-          return;
-        }
-        setActiveProjectId(remoteActiveProjectId);
-      }
+      // Do not apply `remoteActiveProjectId` from this shared doc: it would let another
+      // collaborator's focus overwrite the local session (see App.shared-projects.integration.test).
+      // Active project is resolved at init (URL + IDB) and pushed to Firestore locally only.
     }, (err) => {
-      markListenerError('user_preferences');
+      markListenerError(CLOUD_SYNC_CHANNELS.userPreferences);
       reportPersistFailure(addToast, 'user preferences sync', err);
     });
     return () => {
-      clearListenerError('user_preferences');
+      clearListenerError(CLOUD_SYNC_CHANNELS.userPreferences);
       if (typeof unsub === 'function') unsub();
     };
-  }, [setActiveProjectId, projects, clearProject, addToast]);
+  }, [addToast]);
 
   const handleLogin = async () => {};
   const handleLogout = async () => {};
@@ -1772,6 +1629,7 @@ export default function App() {
         tokenMergeRules: [],
         autoGroupSuggestions: [],
         autoMergeRecommendations: [],
+        groupMergeRecommendations: [],
         labelSections: []
       });
     } else {
@@ -1783,6 +1641,7 @@ export default function App() {
       setTokenMergeRules([]);
       setAutoGroupSuggestions([]);
       setAutoMergeRecommendations([]);
+      setGroupMergeRecommendations([]);
       setFileName(file.name);
       setStats(statsObj);
       setDatasetStats(datasetStatsObj);
@@ -1797,6 +1656,7 @@ export default function App() {
               setClusterSummary(null);
               setTokenSummary(null);
               setAutoMergeRecommendations([]);
+              setGroupMergeRecommendations([]);
               setStats(null);
               setDatasetStats(null);
               setIsProcessing(false);
@@ -1810,6 +1670,7 @@ export default function App() {
           setClusterSummary(null);
           setTokenSummary(null);
           setAutoMergeRecommendations([]);
+          setGroupMergeRecommendations([]);
           setStats(null);
           setDatasetStats(null);
           setIsProcessing(false);
@@ -1822,6 +1683,7 @@ export default function App() {
         setClusterSummary(null);
         setTokenSummary(null);
         setAutoMergeRecommendations([]);
+        setGroupMergeRecommendations([]);
         setStats(null);
       }
     });
@@ -2035,6 +1897,7 @@ export default function App() {
       setClusterSummary(null);
       setTokenSummary(null);
       setAutoMergeRecommendations([]);
+      setGroupMergeRecommendations([]);
       setStats(null);
       setFileName(null);
       setGroupedClusters([]);
@@ -2073,476 +1936,15 @@ export default function App() {
     return false;
   }, [blockedTokens, universalBlockedTokens]);
 
-  // Restore rating job UI after refresh: kwRating lives on results; job state is not persisted.
-  useEffect(() => {
-    if (!results?.length) return;
-    setKwRatingJob(prev => {
-      if (prev.phase === 'summary' || prev.phase === 'rating' || prev.phase === 'error') return prev;
-      const ratable = results.filter(r => !hasBlockedToken(r.tokenArr));
-      if (ratable.length === 0) return prev;
-      const done = ratable.filter(r => r.kwRating != null).length;
-      const total = ratable.length;
-      const { n1, n2, n3 } = countKwRatingBucketsForRows(results, ratable);
-      if (done === total) {
-        return {
-          phase: 'done',
-          progress: 100,
-          done,
-          total,
-          n1,
-          n2,
-          n3,
-          error: null,
-          apiErrors: 0,
-          costUsdTotal: 0,
-          costReported: false,
-          promptTokens: 0,
-          completionTokens: 0,
-          apiCalls: 0,
-          elapsedMs: 0,
-        };
-      }
-      if (done > 0) {
-        return {
-          ...prev,
-          phase: 'idle',
-          progress: Math.round((done / total) * 100),
-          done,
-          total,
-          n1,
-          n2,
-          n3,
-          error: null,
-          apiErrors: 0,
-          costUsdTotal: 0,
-          costReported: false,
-          promptTokens: 0,
-          completionTokens: 0,
-          apiCalls: 0,
-          elapsedMs: 0,
-        };
-      }
-      return prev;
-    });
-  }, [results, hasBlockedToken]);
-
-  // Live elapsed timer while keyword rating runs (summary is one long request).
-  useEffect(() => {
-    const ph = kwRatingJob.phase;
-    if (ph !== 'summary' && ph !== 'rating') return;
-    const tick = () => {
-      setKwRatingJob(prev => ({
-        ...prev,
-        elapsedMs: Math.round(performance.now() - kwRatingJobStartRef.current),
-      }));
-    };
-    tick();
-    const id = window.setInterval(tick, 400);
-    return () => window.clearInterval(id);
-  }, [kwRatingJob.phase]);
-
-  useEffect(() => {
-    if (autoMergeJob.phase !== 'running') return;
-    const timer = setInterval(() => {
-      setAutoMergeJob(prev => ({
-        ...prev,
-        elapsedMs: Math.round(performance.now() - autoMergeJobStartRef.current),
-      }));
-    }, 250);
-    return () => clearInterval(timer);
-  }, [autoMergeJob.phase]);
+  const {
+    kwRatingJob, setKwRatingJob, runKeywordRating, handleCancelKeywordRating,
+  } = useKeywordRating({
+    resultsRef, groupedClustersRef, approvedGroupsRef, clusterSummaryRef,
+    groupReviewSettingsRef, groupReviewSettingsSnapshot,
+    results, hasBlockedToken, addToast, bulkSet: persistence.bulkSet, activeProjectId, flushNow,
+  });
 
   // Effective results: filter out keywords whose tokens contain a blocked token
-  const effectiveResults = useMemo(() => {
-    if (!results || blockedTokens.size === 0) return results;
-    return results.filter(r => !hasBlockedToken(r.tokenArr));
-  }, [results, blockedTokens, hasBlockedToken]);
-
-  // Effective clusters: filter out clusters whose tokens contain a blocked token
-  // Ungrouped pages = all clusters MINUS those already in groups or approved
-  const effectiveClusters = useMemo(() => {
-    if (!clusterSummary) return clusterSummary;
-    // Collect all token signatures that are in grouped or approved
-    const groupedTokens = new Set<string>();
-    for (const g of groupedClusters) {
-      for (const c of g.clusters) {
-        groupedTokens.add(c.tokens);
-      }
-    }
-    for (const g of approvedGroups) {
-      for (const c of g.clusters) {
-        groupedTokens.add(c.tokens);
-      }
-    }
-    for (const token of pendingFilteredAutoGroupTokens) {
-      groupedTokens.add(token);
-    }
-    let filtered = clusterSummary.filter(c => !groupedTokens.has(c.tokens));
-    if (blockedTokens.size > 0) {
-      filtered = filtered.filter(c => !hasBlockedToken(c.tokenArr));
-    }
-    return filtered;
-  }, [clusterSummary, groupedClusters, approvedGroups, pendingFilteredAutoGroupTokens, blockedTokens, hasBlockedToken]);
-
-  // Effective grouped: filter out sub-clusters with blocked tokens, remove empty groups
-  const effectiveGrouped = useMemo(() => {
-    if (blockedTokens.size === 0) return groupedClusters;
-    return groupedClusters.map(g => {
-      const remaining = g.clusters.filter(c => !hasBlockedToken(c.tokenArr));
-      if (remaining.length === 0) return null;
-      return {
-        ...g,
-        clusters: remaining,
-        keywordCount: remaining.reduce((sum, c) => sum + c.keywordCount, 0),
-        totalVolume: remaining.reduce((sum, c) => sum + c.totalVolume, 0),
-        avgKd: (() => { let total = 0, count = 0; remaining.forEach(c => { if (c.avgKd !== null) { total += c.avgKd; count++; } }); return count > 0 ? Math.round(total / count) : null; })(),
-        avgKwRating: (() => { let total = 0, count = 0; remaining.forEach(c => { if (c.avgKwRating != null) { total += c.avgKwRating; count++; } }); return count > 0 ? Math.round(total / count) : null; })(),
-      };
-    }).filter(Boolean) as GroupedCluster[];
-  }, [groupedClusters, blockedTokens, hasBlockedToken]);
-
-  // Keywords blocked by token blocking (for the Blocked tab)
-  const tokenBlockedKeywords = useMemo((): BlockedKeyword[] => {
-    if (!results || blockedTokens.size === 0) return [];
-    const blocked: BlockedKeyword[] = [];
-    for (const r of results) {
-      const matchedTokens = r.tokenArr.filter(t => blockedTokens.has(t));
-      if (matchedTokens.length > 0) {
-        blocked.push({
-          keyword: r.keyword,
-          volume: r.searchVolume,
-          kd: r.kd,
-          kwRating: r.kwRating ?? undefined,
-          reason: `Token: ${matchedTokens.join(', ')}`,
-          tokenArr: r.tokenArr,
-        });
-      }
-    }
-    blocked.sort((a, b) => b.volume - a.volume);
-    return blocked;
-  }, [results, blockedTokens]);
-
-  // Combined blocked keywords (foreign + token-blocked)
-  const allBlockedKeywords = useMemo(() => {
-    return [...blockedKeywords, ...tokenBlockedKeywords].sort((a, b) => b.volume - a.volume);
-  }, [blockedKeywords, tokenBlockedKeywords]);
-
-  const { min, max, hasMin, hasMax } = useMemo(() => {
-    const mn = parseInt(minClusterCount, 10);
-    const mx = parseInt(maxClusterCount, 10);
-    return { min: mn, max: mx, hasMin: !isNaN(mn), hasMax: !isNaN(mx) };
-  }, [minClusterCount, maxClusterCount]);
-
-  const validClusterCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    if (effectiveClusters) {
-      for (const c of effectiveClusters) {
-        counts.set(c.pageName, c.keywordCount);
-      }
-    }
-    return counts;
-  }, [effectiveClusters]);
-
-  const clusterByTokens = useMemo(() => {
-    const map = new Map<string, ClusterSummary>();
-    if (clusterSummary) {
-      for (const c of clusterSummary) {
-        map.set(c.tokens, c);
-      }
-    }
-    return map;
-  }, [clusterSummary]);
-
-  const labelCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    if (!isLabelDropdownOpen) return counts;
-    
-    const data = activeTab === 'pages' ? clusterSummary : tokenSummary;
-    if (!data) return counts;
-
-    const searchLower = debouncedSearchQuery.toLowerCase();
-    const tokensArr = Array.from(selectedTokens) as string[];
-    const hasTokens = tokensArr.length > 0;
-    const len = data.length;
-    
-    for (let i = 0; i < len; i++) {
-      const item = data[i];
-      
-      // Apply other filters
-      if (activeTab === 'pages') {
-        const c = item as ClusterSummary;
-        if (hasMin && c.keywordCount < min) continue;
-        if (hasMax && c.keywordCount > max) continue;
-        if (hasTokens) {
-          let hasAll = true;
-          const cTokens = c.tokenArr;
-          for (let j = 0; j < tokensArr.length; j++) {
-            if (!cTokens.includes(tokensArr[j])) { hasAll = false; break; }
-          }
-          if (!hasAll) continue;
-        }
-        if (searchLower && !c.pageNameLower.includes(searchLower)) continue;
-      } else {
-        const t = item as TokenSummary;
-        const minL = minTokenLen ? parseInt(minTokenLen, 10) : 0;
-        const maxL = maxTokenLen ? parseInt(maxTokenLen, 10) : Infinity;
-        if (!isNaN(minL) && t.length < minL) continue;
-        if (!isNaN(maxL) && t.length > maxL) continue;
-        if (hasTokens) {
-          let hasAll = true;
-          for (let j = 0; j < tokensArr.length; j++) {
-            if (t.token !== tokensArr[j]) { hasAll = false; break; }
-          }
-          if (!hasAll) continue;
-        }
-        if (searchLower && !t.token.toLowerCase().includes(searchLower)) continue;
-      }
-
-      // Count labels
-      const labels = item.labelArr;
-      for (let j = 0; j < labels.length; j++) {
-        const l = labels[j];
-        counts[l] = (counts[l] || 0) + 1;
-      }
-    }
-    return counts;
-  }, [activeTab, clusterSummary, tokenSummary, debouncedSearchQuery, min, max, hasMin, hasMax, minTokenLen, maxTokenLen, selectedTokens, isLabelDropdownOpen]);
-
-  const filteredClusters = useMemo(() => {
-    if (!effectiveClusters) return [];
-    const tokensArr = Array.from(selectedTokens) as string[];
-    const hasTokens = tokensArr.length > 0;
-    const searchLower = debouncedSearchQuery.toLowerCase();
-    const hasExcluded = excludedLabels.size > 0;
-    
-    // Column-level filters
-    const cityLower = filterCity.toLowerCase();
-    const stateLower = filterState.toLowerCase();
-    const lenMin = minLen ? parseInt(minLen, 10) : NaN;
-    const lenMax = maxLen ? parseInt(maxLen, 10) : NaN;
-    const kwMin = minKwInCluster ? parseInt(minKwInCluster, 10) : NaN;
-    const kwMax = maxKwInCluster ? parseInt(maxKwInCluster, 10) : NaN;
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMin = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
-    
-    const filtered: ClusterSummary[] = [];
-    const len = effectiveClusters.length;
-
-    for (let i = 0; i < len; i++) {
-      const c = effectiveClusters[i];
-      if (hasMin && c.keywordCount < min) continue;
-      if (hasMax && c.keywordCount > max) continue;
-      
-      // Column-level filters
-      if (!isNaN(lenMin) && c.pageNameLen < lenMin) continue;
-      if (!isNaN(lenMax) && c.pageNameLen > lenMax) continue;
-      if (!isNaN(kwMin) && c.keywordCount < kwMin) continue;
-      if (!isNaN(kwMax) && c.keywordCount > kwMax) continue;
-      if (!isNaN(volMin) && c.totalVolume < volMin) continue;
-      if (!isNaN(volMax) && c.totalVolume > volMax) continue;
-      if (!isNaN(kdMin) && (c.avgKd === null || c.avgKd < kdMin)) continue;
-      if (!isNaN(kdMax) && (c.avgKd === null || c.avgKd > kdMax)) continue;
-      if (!isNaN(ratingMin) && (c.avgKwRating == null || c.avgKwRating < ratingMin)) continue;
-      if (!isNaN(ratingMax) && (c.avgKwRating == null || c.avgKwRating > ratingMax)) continue;
-      if (cityLower && !(c.locationCity || '').toLowerCase().includes(cityLower)) continue;
-      if (stateLower && !(c.locationState || '').toLowerCase().includes(stateLower)) continue;
-      
-      if (hasExcluded) {
-        let isExcluded = false;
-        const labels = c.labelArr;
-        for (let j = 0; j < labels.length; j++) {
-          if (excludedLabels.has(labels[j])) {
-            isExcluded = true;
-            break;
-          }
-        }
-        if (isExcluded) continue;
-      }
-      
-      if (hasTokens) {
-        let hasAll = true;
-        const cTokens = c.tokenArr;
-        for (let j = 0; j < tokensArr.length; j++) {
-          if (!cTokens.includes(tokensArr[j])) { hasAll = false; break; }
-        }
-        if (!hasAll) continue;
-      }
-      
-      if (searchLower && !c.pageNameLower.includes(searchLower)) continue;
-      
-      filtered.push(c);
-    }
-    
-    return filtered;
-  }, [effectiveClusters, debouncedSearchQuery, min, max, hasMin, hasMax, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
-
-  // Deselect clusters that are no longer visible due to filters
-  useEffect(() => {
-    if (selectedClusters.size === 0) return;
-    const visibleTokens = new Set(filteredClusters.map(c => c.tokens));
-    let changed = false;
-    const newSelected = new Set<string>();
-    for (const t of selectedClusters) {
-      if (visibleTokens.has(t)) {
-        newSelected.add(t);
-      } else {
-        changed = true;
-      }
-    }
-    if (changed) {
-      setSelectedClusters(newSelected);
-      // Also update group name to highest volume in remaining selection
-      if (newSelected.size > 0) {
-        let highest: ClusterSummary | null = null;
-        for (const tokens of newSelected) {
-          const c = clusterByTokens.get(tokens);
-          if (c && (!highest || c.totalVolume > highest.totalVolume)) {
-            highest = c;
-          }
-        }
-        if (highest) setGroupNameInput(highest.pageName);
-      } else {
-        setGroupNameInput('');
-      }
-    }
-  }, [filteredClusters]);
-
-  const filteredResultsData = useMemo(() => {
-    if (!effectiveResults) return { filtered: [], totalVolume: 0 };
-    const tokensArr = Array.from(selectedTokens) as string[];
-    const hasTokens = tokensArr.length > 0;
-    const searchLower = debouncedSearchQuery.toLowerCase();
-    const hasExcluded = excludedLabels.size > 0;
-    
-    // Column-level filters
-    const cityLower = filterCity.toLowerCase();
-    const stateLower = filterState.toLowerCase();
-    const lenMin = minLen ? parseInt(minLen, 10) : NaN;
-    const lenMax = maxLen ? parseInt(maxLen, 10) : NaN;
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMinVal = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMaxVal = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
-    
-    const filtered: ProcessedRow[] = [];
-    let totalVolume = 0;
-    const len = effectiveResults.length;
-
-    for (let i = 0; i < len; i++) {
-      const r = effectiveResults[i];
-      
-      // Filter by cluster count
-      if (hasMin || hasMax) {
-        const count = validClusterCounts.get(r.pageName) || 0;
-        if (hasMin && count < min) continue;
-        if (hasMax && count > max) continue;
-      }
-      
-      // Column-level filters
-      if (!isNaN(lenMin) && r.pageNameLen < lenMin) continue;
-      if (!isNaN(lenMax) && r.pageNameLen > lenMax) continue;
-      if (!isNaN(volMin) && r.searchVolume < volMin) continue;
-      if (!isNaN(volMax) && r.searchVolume > volMax) continue;
-      if (!isNaN(kdMinVal) && (r.kd === null || r.kd < kdMinVal)) continue;
-      if (!isNaN(kdMaxVal) && (r.kd === null || r.kd > kdMaxVal)) continue;
-      if (!isNaN(ratingMin) && (r.kwRating == null || r.kwRating < ratingMin)) continue;
-      if (!isNaN(ratingMax) && (r.kwRating == null || r.kwRating > ratingMax)) continue;
-      if (cityLower && !(r.locationCity || '').toLowerCase().includes(cityLower)) continue;
-      if (stateLower && !(r.locationState || '').toLowerCase().includes(stateLower)) continue;
-      
-      // Filter by labels
-      if (hasExcluded) {
-        let isExcluded = false;
-        const labels = r.labelArr;
-        for (let j = 0; j < labels.length; j++) {
-          if (excludedLabels.has(labels[j])) {
-            isExcluded = true;
-            break;
-          }
-        }
-        if (isExcluded) continue;
-      }
-      
-      // Filter by tokens
-      if (hasTokens) {
-        let hasAllTokens = true;
-        const rowTokens = r.tokenArr;
-        for (let j = 0; j < tokensArr.length; j++) {
-          if (!rowTokens.includes(tokensArr[j])) {
-            hasAllTokens = false;
-            break;
-          }
-        }
-        if (!hasAllTokens) continue;
-      }
-      
-      // Filter by search query
-      if (searchLower) {
-        if (!(r.keywordLower.includes(searchLower) || r.pageNameLower.includes(searchLower))) continue;
-      }
-      
-      filtered.push(r);
-      totalVolume += r.searchVolume;
-    }
-    
-    return { filtered, totalVolume };
-  }, [effectiveResults, debouncedSearchQuery, min, max, hasMin, hasMax, validClusterCounts, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
-
-  const filteredResults = filteredResultsData.filtered;
-
-  const sortedKeywordRows = useMemo(() => {
-    if (activeTab !== 'keywords') return filteredResults;
-    const rows = [...filteredResults];
-    const getVal = (row: ProcessedRow, key: string): string | number => {
-      switch (key) {
-        case 'pageName': return row.pageNameLower;
-        case 'tokens': return row.tokens;
-        case 'pageNameLen': return row.pageNameLen;
-        case 'keyword': return row.keywordLower;
-        case 'searchVolume': return row.searchVolume;
-        case 'kd': return row.kd ?? -1;
-        case 'kwRating': return row.kwRating ?? -1;
-        case 'label': return row.label;
-        case 'locationCity': return (row.locationCity || '').toLowerCase();
-        case 'locationState': return (row.locationState || '').toLowerCase();
-        default: return '';
-      }
-    };
-    rows.sort((a, b) => {
-      for (const { key, direction } of keywordsSortConfig) {
-        const av = getVal(a, key);
-        const bv = getVal(b, key);
-        const na = typeof av === 'number';
-        const nb = typeof bv === 'number';
-        let cmp: number;
-        if (na && nb) cmp = (av as number) - (bv as number);
-        else cmp = String(av).localeCompare(String(bv));
-        if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
-      }
-      return 0;
-    });
-    return rows;
-  }, [activeTab, filteredResults, keywordsSortConfig]);
-
-  const sortedClusters = useMemo(() => {
-    if (sortConfig.length === 0) return filteredClusters;
-    return [...filteredClusters].sort((a, b) => {
-      for (const { key, direction } of sortConfig) {
-        const aVal = a[key] ?? (direction === 'asc' ? Infinity : -Infinity);
-        const bVal = b[key] ?? (direction === 'asc' ? Infinity : -Infinity);
-        if (aVal < bVal) return direction === 'asc' ? -1 : 1;
-        if (aVal > bVal) return direction === 'asc' ? 1 : -1;
-      }
-      return 0;
-    });
-  }, [filteredClusters, sortConfig]);
-
   // Multi-sort handler: regular click = replace sort, Shift+click = add/toggle secondary sort
   const handleSort = useCallback((key: keyof ClusterSummary, additive?: boolean) => {
     setSortConfig(current => {
@@ -2648,604 +2050,36 @@ export default function App() {
     setCurrentPage(1);
   }, []);
 
-  const handleCancelKeywordRating = useCallback(() => {
-    kwRatingAbortRef.current?.abort();
-  }, []);
 
-  const handleCancelAutoMerge = useCallback(() => {
-    autoMergeAbortRef.current?.abort();
-  }, []);
+  const filteredData = useFilteredTableData({
+    results, clusterSummary, tokenSummary, groupedClusters, approvedGroups,
+    blockedKeywords, blockedTokens, labelSections,
+    hasBlockedToken, pendingFilteredAutoGroupTokens, selectedTokens,
+    debouncedSearchQuery, activeTab, isLabelDropdownOpen,
+    minClusterCount, maxClusterCount,
+    minLen, maxLen, minKwInCluster, maxKwInCluster,
+    minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating,
+    filterCity, filterState, excludedLabels,
+    minTokenLen, maxTokenLen,
+    sortConfig, tokenSortConfig, keywordsSortConfig, blockedSortConfig,
+    currentPage, itemsPerPage,
+  });
 
-  const runKeywordRating = useCallback(async () => {
-    const gs = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
-    if (!gs?.apiKey || gs.apiKey.trim().length < 10) {
-      addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
-      return;
-    }
-    const raw = resultsRef.current;
-    if (!raw || raw.length === 0) {
-      addToast('No keywords loaded.', 'error');
-      return;
-    }
-    const rows = raw.filter(r => !hasBlockedToken(r.tokenArr));
-    if (rows.length === 0) {
-      addToast('No keywords to rate after token blocks.', 'error');
-      return;
-    }
-    kwRatingAbortRef.current?.abort();
-    const ac = new AbortController();
-    kwRatingAbortRef.current = ac;
-    kwRatingJobStartRef.current = performance.now();
-    let usageAcc: OpenRouterUsage = { promptTokens: 0, completionTokens: 0, costUsd: null };
-    let costReported = false;
-    let apiCalls = 0;
-    const mergeUsage = (u: OpenRouterUsage) => {
-      usageAcc = addOpenRouterUsage(usageAcc, u);
-      if (u.costUsd != null) costReported = true;
-    };
-    const slice: KeywordRatingSettingsSlice = {
-      apiKey: gs.apiKey,
-      keywordRatingModel: gs.keywordRatingModel,
-      fallbackModel: gs.selectedModel,
-      temperature: gs.keywordRatingTemperature,
-      maxTokens: gs.keywordRatingMaxTokens,
-      reasoningEffort: gs.keywordRatingReasoningEffort,
-      ratingPrompt: gs.keywordRatingPrompt,
-    };
-    setKwRatingJob({
-      phase: 'summary',
-      progress: 0,
-      done: 0,
-      total: rows.length,
-      n1: 0,
-      n2: 0,
-      n3: 0,
-      error: null,
-      apiErrors: 0,
-      costUsdTotal: 0,
-      costReported: false,
-      promptTokens: 0,
-      completionTokens: 0,
-      apiCalls: 0,
-      elapsedMs: 0,
-    });
-    try {
-      const lines = buildKeywordLinesForSummary(rows);
-      const { summary, usage: summaryUsage } = await fetchCoreIntentSummary(slice, lines, ac.signal);
-      mergeUsage(summaryUsage);
-      apiCalls += 1;
-      const nowIso = new Date().toISOString();
-      const gsFresh = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
-      if (gsFresh) {
-        groupReviewSettingsRef.current?.updateSettings({
-          ...gsFresh,
-          keywordCoreIntentSummary: summary,
-          keywordCoreIntentSummaryUpdatedAt: nowIso,
-        });
-      }
-      const ratingMap = new Map<string, 1 | 2 | 3>();
-      const concurrency = Math.max(1, Math.min(500, gs.keywordRatingConcurrency || 5));
-      let done = 0;
-      /** Ref updates one frame after bulkSet; keep last merged snapshot so we never clobber with stale ref. */
-      let lastMerged: ProcessedRow[] | null = null;
-      const elapsedNow = () => Math.round(performance.now() - kwRatingJobStartRef.current);
-      setKwRatingJob({
-        phase: 'rating',
-        progress: 0,
-        done: 0,
-        total: rows.length,
-        n1: 0,
-        n2: 0,
-        n3: 0,
-        error: null,
-        apiErrors: 0,
-        costUsdTotal: usageAcc.costUsd ?? 0,
-        costReported,
-        promptTokens: usageAcc.promptTokens,
-        completionTokens: usageAcc.completionTokens,
-        apiCalls,
-        elapsedMs: elapsedNow(),
-      });
-      for (let i = 0; i < rows.length; i += concurrency) {
-        if (ac.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-        const batch = rows.slice(i, i + concurrency);
-        const ratings = await Promise.all(
-          batch.map(row => fetchSingleKeywordRating(slice, summary, row.keyword, ac.signal)),
-        );
-        apiCalls += batch.length;
-        for (let j = 0; j < batch.length; j++) {
-          ratingMap.set(keywordRatingRowKey(batch[j]), ratings[j].rating);
-          mergeUsage(ratings[j].usage);
-        }
-        const base = resultsRef.current ?? lastMerged;
-        if (!base || base.length === 0) {
-          throw new Error('Keyword data was cleared while rating was in progress.');
-        }
-        const merged = applyKeywordRatingsToResults(base, ratingMap);
-        const newClusterSummary = rebuildClustersFromRows(merged);
-        const { groupedClusters: nextGrouped, approvedGroups: nextApproved } = refreshGroupsFromClusterSummaries(
-          groupedClustersRef.current,
-          approvedGroupsRef.current,
-          newClusterSummary,
-        );
-        // Ref-before-save: next batch reads refs immediately
-        resultsRef.current = merged;
-        clusterSummaryRef.current = newClusterSummary;
-        groupedClustersRef.current = nextGrouped;
-        approvedGroupsRef.current = nextApproved;
-        bulkSet({
-          results: merged,
-          clusterSummary: newClusterSummary,
-          groupedClusters: nextGrouped,
-          approvedGroups: nextApproved,
-        });
-        lastMerged = merged;
-        done += batch.length;
-        const batchBuckets = countKwRatingBucketsForRows(merged, rows);
-        setKwRatingJob({
-          phase: 'rating',
-          progress: Math.round((done / rows.length) * 100),
-          done,
-          total: rows.length,
-          n1: batchBuckets.n1,
-          n2: batchBuckets.n2,
-          n3: batchBuckets.n3,
-          error: null,
-          apiErrors: 0,
-          costUsdTotal: usageAcc.costUsd ?? 0,
-          costReported,
-          promptTokens: usageAcc.promptTokens,
-          completionTokens: usageAcc.completionTokens,
-          apiCalls,
-          elapsedMs: elapsedNow(),
-        });
-      }
-      const finalMerged = lastMerged ?? resultsRef.current;
-      const doneBuckets = finalMerged
-        ? countKwRatingBucketsForRows(finalMerged, rows)
-        : { n1: 0, n2: 0, n3: 0 };
-      const finalElapsed = Math.round(performance.now() - kwRatingJobStartRef.current);
-      setKwRatingJob({
-        phase: 'done',
-        progress: 100,
-        done: rows.length,
-        total: rows.length,
-        n1: doneBuckets.n1,
-        n2: doneBuckets.n2,
-        n3: doneBuckets.n3,
-        error: null,
-        apiErrors: 0,
-        costUsdTotal: usageAcc.costUsd ?? 0,
-        costReported,
-        promptTokens: usageAcc.promptTokens,
-        completionTokens: usageAcc.completionTokens,
-        apiCalls,
-        elapsedMs: finalElapsed,
-      });
-      const costToast =
-        costReported && usageAcc.costUsd != null ? ` · $${usageAcc.costUsd.toFixed(4)}` : '';
-      await flushNow();
-      const cloud = getCloudSyncSnapshot();
-      if (activeProjectId && cloud.projectDataWriteFailed) {
-        addToast(
-          `Keyword rating complete locally, but cloud sync failed. Check Cloud status. ${doneBuckets.n1} / ${doneBuckets.n2} / ${doneBuckets.n3}${costToast}`,
-          'warning',
-        );
-      } else {
-        addToast(
-          `Keyword rating synced: ${doneBuckets.n1} relevant (1), ${doneBuckets.n2} unsure (2), ${doneBuckets.n3} not relevant (3) · ${formatKeywordRatingDuration(finalElapsed)}${costToast}`,
-          'success',
-        );
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      const isAbort =
-        (e instanceof DOMException && e.name === 'AbortError') ||
-        (e instanceof Error && e.name === 'AbortError');
-      if (isAbort) {
-        setKwRatingJob({
-          phase: 'idle',
-          progress: 0,
-          done: 0,
-          total: 0,
-          n1: 0,
-          n2: 0,
-          n3: 0,
-          error: null,
-          apiErrors: 0,
-          costUsdTotal: 0,
-          costReported: false,
-          promptTokens: 0,
-          completionTokens: 0,
-          apiCalls: 0,
-          elapsedMs: 0,
-        });
-        addToast('Keyword rating cancelled.', 'info');
-        return;
-      }
-      setKwRatingJob({
-        phase: 'error',
-        progress: 0,
-        done: 0,
-        total: rows.length,
-        n1: 0,
-        n2: 0,
-        n3: 0,
-        error: msg,
-        apiErrors: 0,
-        costUsdTotal: usageAcc.costUsd ?? 0,
-        costReported,
-        promptTokens: usageAcc.promptTokens,
-        completionTokens: usageAcc.completionTokens,
-        apiCalls,
-        elapsedMs: Math.round(performance.now() - kwRatingJobStartRef.current),
-      });
-      addToast(msg, 'error');
-    }
-  }, [addToast, bulkSet, groupReviewSettingsSnapshot, hasBlockedToken]);
+  const {
+    effectiveResults, effectiveClusters, effectiveGrouped,
+    tokenBlockedKeywords, allBlockedKeywords,
+    min, max, hasMin, hasMax, validClusterCounts, clusterByTokens,
+    labelCounts, filteredClusters, filteredResultsData, filteredResults,
+    sortedKeywordRows, sortedClusters, filteredTokens, sortedTokens,
+    displayedValid, displayedClusters, displayedTokens, displayedVolume,
+    labelColorMap, labelSectionStats, filteredTokenCounts,
+    paginatedResults, paginatedClusters, paginatedTokens,
+    filteredSortedGrouped, paginatedGroupedClusters,
+    filteredApprovedGroups, filteredBlocked, sortedBlocked,
+    groupedStats, approvedPageCount, keywordGroupingProgress,
+  } = filteredData;
 
-  const tokenTopPagesMap = useMemo(() => {
-    const AUTO_MERGE_PAGE_CONTEXT_LIMIT = 5;
-    const rows = (results || []) as ProcessedRow[];
-    const byToken = new Map<string, Map<string, { pageName: string; keywordCount: number; totalVolume: number; kdSum: number; kdCount: number }>>();
-    for (const row of rows) {
-      const uniqueTokens = Array.from(new Set(row.tokenArr || []));
-      for (const token of uniqueTokens) {
-        let pageMap = byToken.get(token);
-        if (!pageMap) {
-          pageMap = new Map();
-          byToken.set(token, pageMap);
-        }
-        const pageKey = row.pageName || row.tokens;
-        const prev = pageMap.get(pageKey) || { pageName: row.pageName || row.tokens, keywordCount: 0, totalVolume: 0, kdSum: 0, kdCount: 0 };
-        prev.keywordCount += 1;
-        prev.totalVolume += Number.isFinite(row.searchVolume) ? row.searchVolume : 0;
-        if (row.kd != null && Number.isFinite(row.kd)) {
-          prev.kdSum += row.kd;
-          prev.kdCount += 1;
-        }
-        pageMap.set(pageKey, prev);
-      }
-    }
-
-    const out = new Map<string, AutoMergeTokenPageContext[]>();
-    for (const [token, pageMap] of byToken.entries()) {
-      const topPages = Array.from(pageMap.values())
-        .map((p): AutoMergeTokenPageContext => ({
-          pageName: p.pageName,
-          keywordCount: p.keywordCount,
-          totalVolume: p.totalVolume,
-          avgKd: p.kdCount > 0 ? Math.round((p.kdSum / p.kdCount) * 10) / 10 : null,
-        }))
-        .sort((a, b) => {
-          if (a.totalVolume !== b.totalVolume) return b.totalVolume - a.totalVolume;
-          if (a.keywordCount !== b.keywordCount) return b.keywordCount - a.keywordCount;
-          return a.pageName.localeCompare(b.pageName);
-        })
-        .slice(0, AUTO_MERGE_PAGE_CONTEXT_LIMIT);
-      out.set(token, topPages);
-    }
-    return out;
-  }, [results]);
-
-  const tokenPagesTooltip = useCallback((token: string) => {
-    const pages = tokenTopPagesMap.get(token) || [];
-    if (pages.length === 0) return `${token}\nNo page context found.`;
-    const lines = pages.map(
-      (p, idx) => `${idx + 1}. ${p.pageName} | Vol ${p.totalVolume.toLocaleString()} | KD ${p.avgKd ?? '-'} | KWs ${p.keywordCount}`,
-    );
-    return `${token}\nTop ${pages.length} pages:\n${lines.join('\n')}`;
-  }, [tokenTopPagesMap]);
-
-  const buildAutoMergeRecommendations = useCallback((
-    tokenRows: TokenSummary[],
-    allRows: ProcessedRow[],
-    responseMap: Map<string, { matches: string[]; confidence: number; reason: string }>,
-  ): AutoMergeRecommendation[] => {
-    if (tokenRows.length === 0) return [];
-    const tokenSet = new Set(tokenRows.map(t => t.token));
-    const statsByToken = new Map(tokenRows.map(t => [t.token, t]));
-    const adj = new Map<string, Set<string>>();
-    tokenRows.forEach(t => adj.set(t.token, new Set()));
-    for (const [source, resp] of responseMap.entries()) {
-      if (!tokenSet.has(source)) continue;
-      for (const match of resp.matches) {
-        if (!tokenSet.has(match) || match === source) continue;
-        adj.get(source)!.add(match);
-        adj.get(match)!.add(source);
-      }
-    }
-
-    const visited = new Set<string>();
-    const recs: AutoMergeRecommendation[] = [];
-    const now = new Date().toISOString();
-    for (const token of tokenSet) {
-      if (visited.has(token)) continue;
-      const stack = [token];
-      const component: string[] = [];
-      visited.add(token);
-      while (stack.length > 0) {
-        const cur = stack.pop()!;
-        component.push(cur);
-        for (const nxt of adj.get(cur) || []) {
-          if (visited.has(nxt)) continue;
-          visited.add(nxt);
-          stack.push(nxt);
-        }
-      }
-      if (component.length < 2) continue;
-      const sorted = [...component].sort((a, b) => {
-        const av = statsByToken.get(a)?.totalVolume ?? 0;
-        const bv = statsByToken.get(b)?.totalVolume ?? 0;
-        if (av !== bv) return bv - av;
-        const af = statsByToken.get(a)?.frequency ?? 0;
-        const bf = statsByToken.get(b)?.frequency ?? 0;
-        if (af !== bf) return bf - af;
-        return a.localeCompare(b);
-      });
-      const canonicalToken = sorted[0];
-      // Prevent transitive chain pollution (A~B~C) from auto-merging C with A
-      // unless C is directly connected to the chosen canonical token.
-      const canonicalNeighbors = adj.get(canonicalToken) || new Set<string>();
-      const mergeTokens = sorted.slice(1).filter(t => canonicalNeighbors.has(t));
-      if (mergeTokens.length === 0) continue;
-      const allInvolved = new Set([canonicalToken, ...mergeTokens]);
-      const affectedRows = allRows.filter(r => r.tokenArr.some(t => allInvolved.has(t)));
-      const affectedKeywords = Array.from(new Set(affectedRows.map(r => r.keyword))).slice(0, 30);
-      const affectedPageCount = new Set(affectedRows.map(r => r.tokens)).size;
-      let confAcc = 0;
-      let confN = 0;
-      const reasonBits = new Set<string>();
-      for (const t of component) {
-        const rr = responseMap.get(t);
-        if (!rr) continue;
-        confAcc += rr.confidence;
-        confN += 1;
-        if (rr.reason) reasonBits.add(rr.reason);
-      }
-      const confidence = confN > 0 ? Math.max(0, Math.min(1, confAcc / confN)) : 0.5;
-      recs.push({
-        id: `auto_merge_${sorted.join('__')}`,
-        sourceToken: token,
-        canonicalToken,
-        mergeTokens,
-        confidence,
-        reason: Array.from(reasonBits).slice(0, 2).join(' | '),
-        affectedKeywordCount: affectedRows.length,
-        affectedPageCount,
-        affectedKeywords,
-        status: 'pending',
-        createdAt: now,
-      });
-    }
-    return recs.sort((a, b) => b.affectedKeywordCount - a.affectedKeywordCount);
-  }, []);
-
-  const runAutoMergeRecommendations = useCallback(async (samplePercent: number = 100) => {
-    const gs = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
-    if (!gs?.apiKey || gs.apiKey.trim().length < 10) {
-      addToast('Add an OpenRouter API key in Group Review settings first.', 'error');
-      return;
-    }
-    const allEligibleTokenRows: TokenSummary[] = ((tokenSummaryRef.current || []) as TokenSummary[])
-      .filter(t => !blockedTokensRef.current.has(t.token) && !universalBlockedTokens.has(t.token));
-    const rows = resultsRef.current || [];
-    if (allEligibleTokenRows.length < 2 || rows.length === 0) {
-      addToast('Need at least 2 non-blocked tokens with loaded keywords.', 'error');
-      return;
-    }
-    const tokenRows = selectAutoMergeTokenRows(allEligibleTokenRows, samplePercent);
-    const tokenContextByToken = new Map<string, AutoMergeTokenPageContext[]>();
-    for (const t of tokenRows) {
-      tokenContextByToken.set(t.token, tokenTopPagesMap.get(t.token) || []);
-    }
-    const isTestRun = samplePercent < 100;
-    if (isTestRun) {
-      addToast(
-        `Auto Merge test mode: running ${tokenRows.length.toLocaleString()} of ${allEligibleTokenRows.length.toLocaleString()} tokens (${Math.min(100, Math.max(1, Math.floor(samplePercent)))}%).`,
-        'info',
-      );
-    }
-
-    autoMergeAbortRef.current?.abort();
-    const ac = new AbortController();
-    autoMergeAbortRef.current = ac;
-    autoMergeJobStartRef.current = performance.now();
-
-    const slice: AutoMergeSettingsSlice = {
-      apiKey: gs.apiKey,
-      model: gs.autoMergeModel,
-      fallbackModel: gs.selectedModel,
-      temperature: gs.autoMergeTemperature,
-      maxTokens: gs.autoMergeMaxTokens,
-      reasoningEffort: gs.autoMergeReasoningEffort,
-      prompt: gs.autoMergePrompt,
-    };
-
-    let usageAcc: OpenRouterUsage = { promptTokens: 0, completionTokens: 0, costUsd: null };
-    let costReported = false;
-    let apiCalls = 0;
-    const mergeUsage = (u: OpenRouterUsage) => {
-      usageAcc = addAutoMergeUsage(usageAcc, u);
-      if (u.costUsd != null) costReported = true;
-    };
-    const elapsedNow = () => Math.round(performance.now() - autoMergeJobStartRef.current);
-    setAutoMergeJob({
-      phase: 'running',
-      progress: 1,
-      done: 0,
-      total: tokenRows.length,
-      recommendations: 0,
-      error: null,
-      costUsdTotal: 0,
-      costReported: false,
-      promptTokens: 0,
-      completionTokens: 0,
-      apiCalls: 0,
-      elapsedMs: 0,
-    });
-    try {
-      // Yield once so the "running" state paints before heavier loops.
-      await Promise.resolve();
-      const responseMap = new Map<string, { matches: string[]; confidence: number; reason: string }>();
-      const concurrency = Math.max(1, Math.min(500, gs.autoMergeConcurrency || 5));
-      const allowedTokens = tokenRows.map(t => t.token);
-      const allowedSet = new Set(allowedTokens);
-      let done = 0;
-      const previewEvery = Math.max(1, Math.floor(tokenRows.length / 40));
-      await runPool(
-        tokenRows,
-        concurrency,
-        async (row) => {
-          const chunkSize = 200;
-          const mergedMatches = new Set<string>();
-          let confidenceAcc = 0;
-          let confidenceN = 0;
-          let firstReason = '';
-          let chunk: string[] = [];
-          for (const candidate of allowedTokens) {
-            if (candidate === row.token) continue;
-            chunk.push(candidate);
-            if (chunk.length < chunkSize) continue;
-            const candidateTopPagesByToken: Record<string, AutoMergeTokenPageContext[]> = {};
-            for (const candidateToken of chunk) {
-              candidateTopPagesByToken[candidateToken] = tokenContextByToken.get(candidateToken) || [];
-            }
-            const r = await fetchAutoMergeMatches(
-              slice,
-              row.token,
-              chunk,
-              ac.signal,
-              {
-                sourceTopPages: tokenContextByToken.get(row.token) || [],
-                candidateTopPagesByToken,
-              },
-            );
-            mergeUsage(r.usage);
-            apiCalls += 1;
-            confidenceAcc += r.result.confidence;
-            confidenceN += 1;
-            if (!firstReason && r.result.reason) firstReason = r.result.reason;
-            for (const m of r.result.matches) {
-              if (m !== row.token && allowedSet.has(m)) mergedMatches.add(m);
-            }
-            chunk = [];
-          }
-          if (chunk.length > 0) {
-            const candidateTopPagesByToken: Record<string, AutoMergeTokenPageContext[]> = {};
-            for (const candidateToken of chunk) {
-              candidateTopPagesByToken[candidateToken] = tokenContextByToken.get(candidateToken) || [];
-            }
-            const r = await fetchAutoMergeMatches(
-              slice,
-              row.token,
-              chunk,
-              ac.signal,
-              {
-                sourceTopPages: tokenContextByToken.get(row.token) || [],
-                candidateTopPagesByToken,
-              },
-            );
-            mergeUsage(r.usage);
-            apiCalls += 1;
-            confidenceAcc += r.result.confidence;
-            confidenceN += 1;
-            if (!firstReason && r.result.reason) firstReason = r.result.reason;
-            for (const m of r.result.matches) {
-              if (m !== row.token && allowedSet.has(m)) mergedMatches.add(m);
-            }
-          }
-          responseMap.set(row.token, {
-            matches: Array.from(mergedMatches),
-            confidence: confidenceN > 0 ? Math.max(0, Math.min(1, confidenceAcc / confidenceN)) : 0,
-            reason: firstReason,
-          });
-          done += 1;
-          const shouldPreview = done === 1 || done === tokenRows.length || done % previewEvery === 0;
-          setAutoMergeJob(prev => ({
-            ...prev,
-            progress: Math.max(1, Math.round((done / tokenRows.length) * 100)),
-            done,
-            recommendations: shouldPreview ? buildAutoMergeRecommendations(tokenRows, rows, responseMap).length : prev.recommendations,
-            costUsdTotal: usageAcc.costUsd ?? 0,
-            costReported,
-            promptTokens: usageAcc.promptTokens,
-            completionTokens: usageAcc.completionTokens,
-            apiCalls,
-            elapsedMs: elapsedNow(),
-          }));
-          return null;
-        },
-        ac.signal,
-      );
-      const recs = buildAutoMergeRecommendations(tokenRows, rows, responseMap);
-      const nextRecs = mergeRecommendationsAfterRerun(autoMergeRecommendationsRef.current, recs);
-      autoMergeRecommendationsRef.current = nextRecs;
-      persistence.updateAutoMergeRecommendations(nextRecs);
-      setAutoMergeJob({
-        phase: 'done',
-        progress: 100,
-        done: tokenRows.length,
-        total: tokenRows.length,
-        recommendations: nextRecs.filter(r => r.status !== 'declined').length,
-        error: null,
-        costUsdTotal: usageAcc.costUsd ?? 0,
-        costReported,
-        promptTokens: usageAcc.promptTokens,
-        completionTokens: usageAcc.completionTokens,
-        apiCalls,
-        elapsedMs: elapsedNow(),
-      });
-      setTokenMgmtSubTab('auto-merge');
-      setTokenMgmtPage(1);
-      const visible = nextRecs.filter(r => r.status !== 'declined').length;
-      await flushNow();
-      const cloud = getCloudSyncSnapshot();
-      if (activeProjectId && cloud.projectDataWriteFailed) {
-        addToast(
-          `${isTestRun ? 'Auto Merge test complete locally' : 'Auto Merge complete locally'}, but cloud sync failed. Check Cloud status.`,
-          'warning',
-        );
-      } else {
-        addToast(
-          `${isTestRun ? 'Auto Merge test synced' : 'Auto Merge synced'}: ${visible} recommendation${visible === 1 ? '' : 's'}.`,
-          'success',
-        );
-      }
-    } catch (e) {
-      const isAbort =
-        (e instanceof DOMException && e.name === 'AbortError') ||
-        (e instanceof Error && e.name === 'AbortError');
-      if (isAbort) {
-        setAutoMergeJob({
-          phase: 'idle',
-          progress: 0,
-          done: 0,
-          total: 0,
-          recommendations: 0,
-          error: null,
-          costUsdTotal: 0,
-          costReported: false,
-          promptTokens: 0,
-          completionTokens: 0,
-          apiCalls: 0,
-          elapsedMs: 0,
-        });
-        addToast('Auto Merge cancelled.', 'info');
-        return;
-      }
-      const msg = e instanceof Error ? e.message : String(e);
-      setAutoMergeJob(prev => ({
-        ...prev,
-        phase: 'error',
-        error: msg,
-        elapsedMs: elapsedNow(),
-      }));
-      addToast(msg, 'error');
-    }
-  }, [addToast, buildAutoMergeRecommendations, groupReviewSettingsSnapshot, persistence, setTokenMgmtPage, setTokenMgmtSubTab, tokenTopPagesMap, universalBlockedTokens]);
-
-  // Shared filter bag for TableHeader â€" single object passed to all tabs
+  // Shared filter bag for TableHeader — single object passed to all tabs
   const filterBag = useMemo((): FilterBag => ({
     minLen, setMinLen, maxLen, setMaxLen,
     minKwInCluster, setMinKwInCluster, maxKwInCluster, setMaxKwInCluster,
@@ -3263,288 +2097,6 @@ export default function App() {
     return tokenSortConfig.direction === 'asc' ? <ArrowUp className="w-4 h-4 text-indigo-600" /> : <ArrowDown className="w-4 h-4 text-indigo-600" />;
   };
 
-  const filteredTokens = useMemo(() => {
-    if (!tokenSummary) return [];
-    const minL = minTokenLen ? parseInt(minTokenLen, 10) : 0;
-    const maxL = maxTokenLen ? parseInt(maxTokenLen, 10) : Infinity;
-    const searchLower = debouncedSearchQuery.toLowerCase();
-    const tokensArr = Array.from(selectedTokens) as string[];
-    const hasTokens = tokensArr.length > 0;
-    const hasExcluded = excludedLabels.size > 0;
-
-    const filtered: TokenSummary[] = [];
-    const len = tokenSummary.length;
-    
-    for (let i = 0; i < len; i++) {
-      const t = tokenSummary[i];
-      if (blockedTokens.has(t.token)) continue;
-      if (!isNaN(minL) && t.length < minL) continue;
-      if (!isNaN(maxL) && t.length > maxL) continue;
-      
-      if (hasExcluded) {
-        let isExcluded = false;
-        const labels = t.labelArr;
-        for (let j = 0; j < labels.length; j++) {
-          if (excludedLabels.has(labels[j])) {
-            isExcluded = true;
-            break;
-          }
-        }
-        if (isExcluded) continue;
-      }
-      
-      if (hasTokens) {
-        let hasAll = true;
-        for (let j = 0; j < tokensArr.length; j++) {
-          if (t.token !== tokensArr[j]) { hasAll = false; break; }
-        }
-        if (!hasAll) continue;
-      }
-      
-      if (searchLower && !t.token.toLowerCase().includes(searchLower)) continue;
-      
-      filtered.push(t);
-    }
-    
-    return filtered;
-  }, [tokenSummary, debouncedSearchQuery, minTokenLen, maxTokenLen, excludedLabels, selectedTokens, blockedTokens]);
-
-  const sortedTokens = useMemo(() => {
-    return [...filteredTokens].sort((a, b) => {
-      const aVal = a[tokenSortConfig.key] ?? (tokenSortConfig.direction === 'asc' ? Infinity : -Infinity);
-      const bVal = b[tokenSortConfig.key] ?? (tokenSortConfig.direction === 'asc' ? Infinity : -Infinity);
-      if (aVal < bVal) return tokenSortConfig.direction === 'asc' ? -1 : 1;
-      if (aVal > bVal) return tokenSortConfig.direction === 'asc' ? 1 : -1;
-      return 0;
-    });
-  }, [filteredTokens, tokenSortConfig]);
-
-  const displayedValid = (debouncedSearchQuery || minClusterCount || maxClusterCount || excludedLabels.size > 0 || selectedTokens.size > 0) ? filteredResults.length : effectiveResults?.length || 0;
-  const displayedClusters = (debouncedSearchQuery || minClusterCount || maxClusterCount || excludedLabels.size > 0 || selectedTokens.size > 0) ? filteredClusters.length : effectiveClusters?.length || 0;
-  const displayedTokens = (debouncedSearchQuery || minTokenLen || maxTokenLen || excludedLabels.size > 0 || selectedTokens.size > 0) ? filteredTokens.length : tokenSummary?.length || 0;
-  
-  const displayedVolume = useMemo(() => {
-    return (debouncedSearchQuery || minClusterCount || maxClusterCount || excludedLabels.size > 0 || selectedTokens.size > 0) 
-      ? filteredResultsData.totalVolume 
-      : results?.reduce((sum, row) => sum + row.searchVolume, 0) || 0;
-  }, [filteredResultsData.totalVolume, results, debouncedSearchQuery, minClusterCount, maxClusterCount, excludedLabels, selectedTokens]);
-
-  // Memoize pagination slices to avoid re-slicing on unrelated state changes
-  // Label color map: token â†' { colorIndex, border, bg, text, sectionName }
-  const labelColorMap = useMemo(() => {
-    const map = new Map<string, { border: string; bg: string; text: string; sectionName: string }>();
-    labelSections.forEach(section => {
-      const colors = getLabelColor(section.colorIndex);
-      section.tokens.forEach(token => {
-        if (!map.has(token)) {
-          map.set(token, { ...colors, sectionName: section.name });
-        }
-      });
-    });
-    return map;
-  }, [labelSections]);
-
-  // Label section stats: sectionId â†' { totalVol, avgKd }
-  const labelSectionStats = useMemo(() => {
-    const statsMap = new Map<string, { totalVol: number; avgKd: number | null }>();
-    if (!tokenSummary) return statsMap;
-    const tokenMap = new Map<string, TokenSummary>(tokenSummary.map(t => [t.token, t]));
-    labelSections.forEach(section => {
-      let totalVol = 0, totalKd = 0, kdCount = 0;
-      section.tokens.forEach(token => {
-        const ts = tokenMap.get(token);
-        if (ts) {
-          totalVol += ts.totalVolume;
-          if (ts.avgKd !== null) { totalKd += ts.avgKd; kdCount++; }
-        }
-      });
-      statsMap.set(section.id, { totalVol, avgKd: kdCount > 0 ? Math.round(totalKd / kdCount) : null });
-    });
-    return statsMap;
-  }, [labelSections, tokenSummary]);
-
-  // Count how many times each token appears in the currently filtered keyword results
-  const filteredTokenCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    if (!filteredResults) return counts;
-    for (const row of filteredResults) {
-      for (const token of row.tokenArr) {
-        counts.set(token, (counts.get(token) || 0) + 1);
-      }
-    }
-    return counts;
-  }, [filteredResults]);
-
-  const paginatedResults = useMemo(
-    () => sortedKeywordRows.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage),
-    [sortedKeywordRows, currentPage, itemsPerPage],
-  );
-  const paginatedClusters = useMemo(() => sortedClusters.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [sortedClusters, currentPage, itemsPerPage]);
-  const paginatedTokens = useMemo(() => sortedTokens.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [sortedTokens, currentPage, itemsPerPage]);
-  // Filtered + sorted grouped clusters
-  const filteredSortedGrouped = useMemo(() => {
-    let groups = effectiveGrouped;
-    // Filter by unified search (searches group name / page names)
-    if (debouncedSearchQuery) {
-      const q = debouncedSearchQuery.toLowerCase();
-      groups = groups.filter(g =>
-        g.groupName.toLowerCase().includes(q) ||
-        g.clusters.some(c => c.pageNameLower.includes(q))
-      );
-    }
-    // Column-level filters â€" same as Pages (Ungrouped) but applied at group aggregate level
-    const kwMin = minKwInCluster ? parseInt(minKwInCluster, 10) : NaN;
-    const kwMax = maxKwInCluster ? parseInt(maxKwInCluster, 10) : NaN;
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMin = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
-    const cityLower = filterCity.toLowerCase();
-    const stateLower = filterState.toLowerCase();
-    const hasExcluded = excludedLabels.size > 0;
-    const tokensArr = Array.from(selectedTokens) as string[];
-    const hasTokenFilter = tokensArr.length > 0;
-    const hasColumnFilters = !isNaN(kwMin) || !isNaN(kwMax) || !isNaN(volMin) || !isNaN(volMax) || !isNaN(kdMin) || !isNaN(kdMax) || !isNaN(ratingMin) || !isNaN(ratingMax) || cityLower || stateLower || hasExcluded || hasTokenFilter;
-    if (hasColumnFilters) {
-      groups = groups.filter(g => {
-        if (!isNaN(kwMin) && g.keywordCount < kwMin) return false;
-        if (!isNaN(kwMax) && g.keywordCount > kwMax) return false;
-        if (!isNaN(volMin) && g.totalVolume < volMin) return false;
-        if (!isNaN(volMax) && g.totalVolume > volMax) return false;
-        if (!isNaN(kdMin) && (g.avgKd === null || g.avgKd < kdMin)) return false;
-        if (!isNaN(kdMax) && (g.avgKd === null || g.avgKd > kdMax)) return false;
-        if (!isNaN(ratingMin) && (g.avgKwRating == null || g.avgKwRating < ratingMin)) return false;
-        if (!isNaN(ratingMax) && (g.avgKwRating == null || g.avgKwRating > ratingMax)) return false;
-        if (cityLower) {
-          const hasCityMatch = g.clusters.some(c => (c.locationCity || '').toLowerCase().includes(cityLower));
-          if (!hasCityMatch) return false;
-        }
-        if (stateLower) {
-          const hasStateMatch = g.clusters.some(c => (c.locationState || '').toLowerCase().includes(stateLower));
-          if (!hasStateMatch) return false;
-        }
-        if (hasExcluded) {
-          const allLabels = new Set<string>();
-          g.clusters.forEach(c => c.labelArr.forEach(l => allLabels.add(l)));
-          const allExcluded = allLabels.size > 0 && Array.from(allLabels).every(l => excludedLabels.has(l));
-          if (allExcluded) return false;
-        }
-        if (hasTokenFilter) {
-          const groupTokens = new Set<string>();
-          g.clusters.forEach(c => (c.tokenArr || c.tokens.split(' ')).forEach(t => groupTokens.add(t)));
-          if (!tokensArr.every(t => groupTokens.has(t))) return false;
-        }
-        return true;
-      });
-    }
-    return [...groups].sort((a, b) => {
-      if (b.totalVolume !== a.totalVolume) return b.totalVolume - a.totalVolume;
-      if (b.keywordCount !== a.keywordCount) return b.keywordCount - a.keywordCount;
-      return a.groupName.localeCompare(b.groupName);
-    });
-  }, [effectiveGrouped, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating, filterCity, filterState, excludedLabels, selectedTokens]);
-
-  const paginatedGroupedClusters = useMemo(() => filteredSortedGrouped.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [filteredSortedGrouped, currentPage, itemsPerPage]);
-
-  // Filtered approved groups â€" same column-level filters as grouped tab
-  const filteredApprovedGroups = useMemo(() => {
-    let groups = approvedGroups as GroupedCluster[];
-    if (debouncedSearchQuery) {
-      const q = debouncedSearchQuery.toLowerCase();
-      groups = groups.filter(g =>
-        g.groupName.toLowerCase().includes(q) ||
-        g.clusters.some(c => c.pageNameLower.includes(q))
-      );
-    }
-    const kwMin = minKwInCluster ? parseInt(minKwInCluster, 10) : NaN;
-    const kwMax = maxKwInCluster ? parseInt(maxKwInCluster, 10) : NaN;
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMin = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
-    const cityLower = filterCity.toLowerCase();
-    const stateLower = filterState.toLowerCase();
-    const hasExcluded = excludedLabels.size > 0;
-    const tokensArr = Array.from(selectedTokens) as string[];
-    const hasTokenFilter = tokensArr.length > 0;
-    const hasColumnFilters = !isNaN(kwMin) || !isNaN(kwMax) || !isNaN(volMin) || !isNaN(volMax) || !isNaN(kdMin) || !isNaN(kdMax) || !isNaN(ratingMin) || !isNaN(ratingMax) || cityLower || stateLower || hasExcluded || hasTokenFilter;
-    if (hasColumnFilters) {
-      groups = groups.filter(g => {
-        if (!isNaN(kwMin) && g.keywordCount < kwMin) return false;
-        if (!isNaN(kwMax) && g.keywordCount > kwMax) return false;
-        if (!isNaN(volMin) && g.totalVolume < volMin) return false;
-        if (!isNaN(volMax) && g.totalVolume > volMax) return false;
-        if (!isNaN(kdMin) && (g.avgKd === null || g.avgKd < kdMin)) return false;
-        if (!isNaN(kdMax) && (g.avgKd === null || g.avgKd > kdMax)) return false;
-        if (!isNaN(ratingMin) && (g.avgKwRating == null || g.avgKwRating < ratingMin)) return false;
-        if (!isNaN(ratingMax) && (g.avgKwRating == null || g.avgKwRating > ratingMax)) return false;
-        if (cityLower && !g.clusters.some(c => (c.locationCity || '').toLowerCase().includes(cityLower))) return false;
-        if (stateLower && !g.clusters.some(c => (c.locationState || '').toLowerCase().includes(stateLower))) return false;
-        if (hasExcluded) {
-          const allLabels = new Set<string>();
-          g.clusters.forEach(c => c.labelArr.forEach(l => allLabels.add(l)));
-          if (allLabels.size > 0 && Array.from(allLabels).every(l => excludedLabels.has(l))) return false;
-        }
-        if (hasTokenFilter) {
-          const groupTokens = new Set<string>();
-          g.clusters.forEach(c => (c.tokenArr || c.tokens.split(' ')).forEach(t => groupTokens.add(t)));
-          if (!tokensArr.every(t => groupTokens.has(t))) return false;
-        }
-        return true;
-      });
-    }
-    return groups;
-  }, [approvedGroups, debouncedSearchQuery, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating, filterCity, filterState, excludedLabels, selectedTokens]);
-
-  // Filtered blocked keywords (search + column filters)
-  const filteredBlocked = useMemo(() => {
-    const q = debouncedSearchQuery.toLowerCase();
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMin = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
-    return allBlockedKeywords.filter(b => {
-      if (q && !b.keyword.toLowerCase().includes(q)) return false;
-      if (!isNaN(volMin) && b.volume < volMin) return false;
-      if (!isNaN(volMax) && b.volume > volMax) return false;
-      if (!isNaN(kdMin) && (b.kd === null || b.kd < kdMin)) return false;
-      if (!isNaN(kdMax) && (b.kd === null || b.kd > kdMax)) return false;
-      if (!isNaN(ratingMin) && (b.kwRating == null || b.kwRating < ratingMin)) return false;
-      if (!isNaN(ratingMax) && (b.kwRating == null || b.kwRating > ratingMax)) return false;
-      return true;
-    });
-  }, [allBlockedKeywords, debouncedSearchQuery, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
-
-  const sortedBlocked = useMemo(() => {
-    const { key, direction } = blockedSortConfig;
-    const arr = [...filteredBlocked];
-    const mul = direction === 'asc' ? 1 : -1;
-    const cmpNum = (a: number | null | undefined, b: number | null | undefined) => {
-      const av = a ?? -1e9;
-      const bv = b ?? -1e9;
-      return (av - bv) * mul;
-    };
-    arr.sort((a, b) => {
-      if (key === 'keyword') return a.keyword.localeCompare(b.keyword) * mul;
-      if (key === 'tokens') {
-        const as = (a.tokenArr || []).join(' ');
-        const bs = (b.tokenArr || []).join(' ');
-        return as.localeCompare(bs) * mul;
-      }
-      if (key === 'volume') return cmpNum(a.volume, b.volume);
-      if (key === 'kd') return cmpNum(a.kd, b.kd);
-      if (key === 'kwRating') return cmpNum(a.kwRating, b.kwRating);
-      if (key === 'reason') return a.reason.localeCompare(b.reason) * mul;
-      return 0;
-    });
-    return arr;
-  }, [filteredBlocked, blockedSortConfig]);
 
   type MergeTokenStats = { frequency: number; totalVolume: number; avgKd: number | null };
   type MergeRuleRow = {
@@ -3847,6 +2399,67 @@ export default function App() {
     addToast(toastMsg, toastType);
   }, [addActivityEntry, addToast]);
 
+  const {
+    isMergeModalOpen, setIsMergeModalOpen,
+    mergeModalTokens, setMergeModalTokens,
+    handleOpenMergeModal,
+    handleMergeTokens,
+    handleUndoMergeChild,
+    handleUndoMergeParent,
+  } = useTokenMerge({
+    results, clusterSummary, groupedClusters, approvedGroups,
+    tokenMergeRules, selectedMgmtTokens, selectedTokens,
+    resultsRef, groupedClustersRef, approvedGroupsRef, clusterSummaryRef, tokenSummaryRef,
+    logAndToast,
+    applyMergeCascade: persistence.applyMergeCascade,
+    undoMerge: persistence.undoMerge,
+    setSelectedTokens, setSelectedMgmtTokens,
+  });
+
+  const {
+    autoMergeJob, setAutoMergeJob, handleCancelAutoMerge,
+    runAutoMergeRecommendations, buildAutoMergeRecommendations,
+    applyAutoMergeRecommendation,
+    declineAutoMergeRecommendation,
+    applyAllAutoMergeRecommendations,
+    undoAutoMergeRecommendation,
+    tokenTopPagesMap, tokenPagesTooltip,
+  } = useAutoMerge({
+    results, tokenMergeRules,
+    resultsRef, tokenSummaryRef, groupedClustersRef, approvedGroupsRef, clusterSummaryRef,
+    autoMergeRecommendationsRef, blockedTokensRef, universalBlockedTokens,
+    groupReviewSettingsRef, groupReviewSettingsSnapshot,
+    addToast, logAndToast,
+    updateAutoMergeRecommendations: persistence.updateAutoMergeRecommendations,
+    applyMergeCascade: persistence.applyMergeCascade,
+    activeProjectId, flushNow,
+    setTokenMgmtSubTab, setTokenMgmtPage,
+    handleUndoMergeParent,
+  });
+
+  const {
+    job: groupAutoMergeJob,
+    recommendationsAreStale: groupAutoMergeRecommendationsAreStale,
+    runRecommendations: runGroupAutoMergeRecommendations,
+    cancelRun: cancelGroupAutoMerge,
+    dismissRecommendations: dismissGroupAutoMergeRecommendations,
+    applyRecommendations: applyGroupAutoMergeRecommendations,
+  } = useGroupAutoMerge({
+    groupedClusters,
+    groupedClustersRef,
+    groupMergeRecommendations,
+    groupMergeRecommendationsRef,
+    groupReviewSettingsRef,
+    groupReviewSettingsSnapshot,
+    updateGroupMergeRecommendations,
+    bulkSet,
+    addToast,
+    logAndToast: (action, details, count, toastMsg, toastType) => {
+      logAndToast(action, details, count, toastMsg, toastType);
+    },
+    flushNow,
+  });
+
   const exportTokensCSV = useCallback(() => {
     if (!tokenSummary || tokenSummary.length === 0) return;
 
@@ -3902,263 +2515,6 @@ export default function App() {
     }, 5000);
   }, [logAndToast, persistence.updateGroups]);
 
-  // Token merge handlers
-  const handleOpenMergeModal = useCallback(() => {
-    if (selectedMgmtTokens.size < 2) return;
-    setMergeModalTokens(Array.from(selectedMgmtTokens));
-    setIsMergeModalOpen(true);
-  }, [selectedMgmtTokens]);
-
-  const handleMergeTokens = useCallback((parentToken: string) => {
-    if (!results || !clusterSummary) return;
-    const childTokens = mergeModalTokens.filter(t => t !== parentToken);
-    if (childTokens.length === 0) return;
-
-    // Run the cascade — use refs to avoid stale closures
-    const cascade = executeMergeCascade(resultsRef.current, groupedClustersRef.current, approvedGroupsRef.current, parentToken, childTokens);
-
-    // Create merge rule
-    const newRule: TokenMergeRule = {
-      id: `merge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      parentToken,
-      childTokens,
-      createdAt: new Date().toISOString(),
-    };
-
-    // Update selected token filters â€" replace children with parent
-    const newSelectedTokens = new Set(selectedTokens);
-    let filterChanged = false;
-    for (const child of childTokens) {
-      if (newSelectedTokens.has(child)) {
-        newSelectedTokens.delete(child);
-        newSelectedTokens.add(parentToken);
-        filterChanged = true;
-      }
-    }
-
-    // persistence.applyMergeCascade atomically updates latest ref + state + saves.
-    // No separate startTransition/setState calls needed (they would conflict).
-    persistence.applyMergeCascade(cascade, newRule);
-    if (filterChanged) setSelectedTokens(newSelectedTokens);
-    setSelectedMgmtTokens(new Set());
-
-    const details = `Merged ${childTokens.join(', ')} \u2192 ${parentToken}`;
-    logAndToast('merge', details, childTokens.length,
-      `Merged ${childTokens.length} token${childTokens.length > 1 ? 's' : ''} into '${parentToken}' \u2014 ${cascade.pagesAffected} pages affected`, 'info');
-
-    if (cascade.unapprovedGroups.length > 0) {
-      logAndToast('merge', `Auto-unapproved ${cascade.unapprovedGroups.length} group(s) due to merge`, cascade.unapprovedGroups.length,
-        `${cascade.unapprovedGroups.length} approved group${cascade.unapprovedGroups.length > 1 ? 's' : ''} moved back for re-review`, 'warning');
-    }
-
-    setIsMergeModalOpen(false);
-    setMergeModalTokens([]);
-  }, [results, clusterSummary, groupedClusters, approvedGroups, mergeModalTokens, selectedTokens, activeProjectId, logAndToast, startTransition]);
-
-  const handleUndoMergeChild = useCallback((ruleId: string, childToken: string) => {
-    if (!results) return;
-
-    // Update the rule
-    const updatedRules = tokenMergeRules.map(r => {
-      if (r.id !== ruleId) return r;
-      return { ...r, childTokens: r.childTokens.filter(t => t !== childToken) };
-    }).filter(r => r.childTokens.length > 0); // Remove rules with no children
-
-    // Restore originalTokenArr on all rows, then re-apply all remaining rules
-    const restoredResults = results.map(row => {
-      if (!row.originalTokenArr) return row;
-      // Start from original tokens
-      let tokenArr = [...row.originalTokenArr];
-      // Re-apply all remaining rules
-      for (const rule of updatedRules) {
-        const childSet = new Set(rule.childTokens);
-        if (tokenArr.some(t => childSet.has(t))) {
-          let hasParent = false;
-          const merged: string[] = [];
-          for (const t of tokenArr) {
-            if (childSet.has(t)) { if (!hasParent) { merged.push(rule.parentToken); hasParent = true; } }
-            else if (t === rule.parentToken) { if (!hasParent) { merged.push(rule.parentToken); hasParent = true; } }
-            else merged.push(t);
-          }
-          tokenArr = merged.sort();
-        }
-      }
-      const newSig = [...new Set(tokenArr)].sort().join(' ');
-      // If no rules remain and tokens match original, clear originalTokenArr
-      const stillMerged = updatedRules.length > 0 && newSig !== [...row.originalTokenArr].sort().join(' ');
-      return {
-        ...row,
-        tokenArr,
-        tokens: newSig,
-        originalTokenArr: stillMerged ? row.originalTokenArr : undefined,
-      };
-    });
-
-    // Rebuild everything from the restored results
-    const newClusters = rebuildClustersFromRows(restoredResults);
-    const newClusterMap = new Map(newClusters.map(c => [c.tokens, c]));
-
-    // Update groups with new cluster data
-    const updateGroupList = (groups: GroupedCluster[]) => groups.map(group => {
-      const newGroupClusters = group.clusters.map(c => newClusterMap.get(c.tokens) || c).filter((c, i, arr) => arr.findIndex(x => x.tokens === c.tokens) === i);
-      if (newGroupClusters.length === 0) return null;
-      const totalVolume = newGroupClusters.reduce((s, c) => s + c.totalVolume, 0);
-      const keywordCount = newGroupClusters.reduce((s, c) => s + c.keywordCount, 0);
-      return { ...group, clusters: newGroupClusters, totalVolume, keywordCount };
-    }).filter((g): g is GroupedCluster => g !== null);
-
-    const updatedGroups = updateGroupList(groupedClusters);
-    const updatedApproved = updateGroupList(approvedGroups);
-    const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
-
-    const rule = tokenMergeRules.find(r => r.id === ruleId);
-    logAndToast('unmerge', `Unmerged '${childToken}' from '${rule?.parentToken || 'parent'}'`, 1,
-      `Unmerged '${childToken}'`, 'success');
-
-    persistence.undoMerge({ results: restoredResults, clusterSummary: newClusters, tokenSummary: newTokenSummary, groupedClusters: updatedGroups, approvedGroups: updatedApproved, tokenMergeRules: updatedRules });
-  }, [results, tokenMergeRules, groupedClusters, approvedGroups, activeProjectId, logAndToast, startTransition]);
-
-  const handleUndoMergeParent = useCallback((ruleId: string) => {
-    if (!results) return;
-
-    const ruleToRemove = tokenMergeRules.find(r => r.id === ruleId);
-    const updatedRules = tokenMergeRules.filter(r => r.id !== ruleId);
-
-    // Restore originalTokenArr on all rows, then re-apply all remaining rules
-    const restoredResults = results.map(row => {
-      if (!row.originalTokenArr) return row;
-
-      let tokenArr = [...row.originalTokenArr];
-      for (const rule of updatedRules) {
-        const childSet = new Set(rule.childTokens);
-        if (tokenArr.some(t => childSet.has(t))) {
-          let hasParent = false;
-          const merged: string[] = [];
-          for (const t of tokenArr) {
-            if (childSet.has(t)) {
-              if (!hasParent) { merged.push(rule.parentToken); hasParent = true; }
-            } else if (t === rule.parentToken) {
-              if (!hasParent) { merged.push(rule.parentToken); hasParent = true; }
-            } else {
-              merged.push(t);
-            }
-          }
-          tokenArr = merged.sort();
-        }
-      }
-
-      const newSig = [...new Set(tokenArr)].sort().join(' ');
-      const stillMerged = updatedRules.length > 0 && newSig !== [...row.originalTokenArr].sort().join(' ');
-      return {
-        ...row,
-        tokenArr,
-        tokens: newSig,
-        originalTokenArr: stillMerged ? row.originalTokenArr : undefined,
-      };
-    });
-
-    // Rebuild clusters
-    const newClusters = rebuildClustersFromRows(restoredResults);
-    const newClusterMap = new Map(newClusters.map(c => [c.tokens, c]));
-
-    // Update groups with new cluster data
-    const updateGroupList = (groups: GroupedCluster[]) => groups.map(group => {
-      const newGroupClusters = group.clusters.map(c => newClusterMap.get(c.tokens) || c).filter((c, i, arr) => arr.findIndex(x => x.tokens === c.tokens) === i);
-      if (newGroupClusters.length === 0) return null;
-      const totalVolume = newGroupClusters.reduce((s, c) => s + c.totalVolume, 0);
-      const keywordCount = newGroupClusters.reduce((s, c) => s + c.keywordCount, 0);
-      return { ...group, clusters: newGroupClusters, totalVolume, keywordCount };
-    }).filter((g): g is GroupedCluster => g !== null);
-
-    const updatedGroups = updateGroupList(groupedClusters);
-    const updatedApproved = updateGroupList(approvedGroups);
-    const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
-
-    logAndToast(
-      'unmerge',
-      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
-      ruleToRemove?.childTokens.length ?? 0,
-      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
-      'success'
-    );
-
-    persistence.undoMerge({
-      results: restoredResults,
-      clusterSummary: newClusters,
-      tokenSummary: newTokenSummary,
-      groupedClusters: updatedGroups,
-      approvedGroups: updatedApproved,
-      tokenMergeRules: updatedRules,
-    });
-  }, [results, tokenMergeRules, groupedClusters, approvedGroups, logAndToast]);
-
-  const applyAutoMergeRecommendation = useCallback((recommendationId: string) => {
-    const recs = autoMergeRecommendationsRef.current;
-    const rec = recs.find(r => r.id === recommendationId && r.status === 'pending');
-    const currentResults = resultsRef.current;
-    if (!rec) {
-      addToast('That merge recommendation is no longer pending.', 'info');
-      return;
-    }
-    if (!currentResults) {
-      addToast('Keyword data is not loaded yet.', 'error');
-      return;
-    }
-    const childTokens = rec.mergeTokens.filter(t => t !== rec.canonicalToken);
-    if (childTokens.length === 0) {
-      addToast('Nothing to merge for this row (tokens already match canonical).', 'info');
-      return;
-    }
-    const cascade = executeMergeCascade(
-      currentResults,
-      groupedClustersRef.current,
-      approvedGroupsRef.current,
-      rec.canonicalToken,
-      childTokens,
-    );
-    const newRule: TokenMergeRule = {
-      id: `merge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      parentToken: rec.canonicalToken,
-      childTokens,
-      createdAt: new Date().toISOString(),
-      source: 'auto-merge',
-      recommendationId: rec.id,
-    };
-    resultsRef.current = cascade.results;
-    clusterSummaryRef.current = cascade.clusterSummary;
-    tokenSummaryRef.current = cascade.tokenSummary;
-    groupedClustersRef.current = cascade.groupedClusters;
-    approvedGroupsRef.current = cascade.approvedGroups;
-    persistence.applyMergeCascade(cascade, newRule);
-    const nextRecs = markRecommendationApproved(recs, rec.id, new Date().toISOString());
-    autoMergeRecommendationsRef.current = nextRecs;
-    persistence.updateAutoMergeRecommendations(nextRecs);
-    setTokenMgmtSubTab('merge');
-    setTokenMgmtPage(1);
-    logAndToast('merge', `Auto-merged ${childTokens.join(', ')} → ${rec.canonicalToken}`, childTokens.length, `Auto-merged into '${rec.canonicalToken}'`, 'success');
-  }, [addToast, logAndToast, persistence, setTokenMgmtPage, setTokenMgmtSubTab]);
-
-  const declineAutoMergeRecommendation = useCallback((recommendationId: string) => {
-    const recs = autoMergeRecommendationsRef.current;
-    const next = recs.map(r => r.id === recommendationId ? { ...r, status: 'declined' as const, reviewedAt: new Date().toISOString() } : r);
-    autoMergeRecommendationsRef.current = next;
-    persistence.updateAutoMergeRecommendations(next);
-  }, [persistence]);
-
-  const applyAllAutoMergeRecommendations = useCallback(() => {
-    const pending = autoMergeRecommendationsRef.current.filter(r => r.status === 'pending');
-    pending.forEach(r => applyAutoMergeRecommendation(r.id));
-  }, [applyAutoMergeRecommendation]);
-
-  const undoAutoMergeRecommendation = useCallback((recommendationId: string) => {
-    const rule = tokenMergeRules.find(r => r.recommendationId === recommendationId);
-    if (!rule) return;
-    handleUndoMergeParent(rule.id);
-    const next = markRecommendationPendingAfterUndo(autoMergeRecommendationsRef.current, recommendationId);
-    autoMergeRecommendationsRef.current = next;
-    persistence.updateAutoMergeRecommendations(next);
-  }, [handleUndoMergeParent, tokenMergeRules, persistence]);
-
   const {
     handleBlockSingleToken,
     handleBlockTokens,
@@ -4168,39 +2524,11 @@ export default function App() {
     setSelectedMgmtTokens,
     setTokenMgmtSubTab,
     setTokenMgmtPage,
+    switchTab,
     blockTokens: persistence.blockTokens,
     unblockTokens: persistence.unblockTokens,
   });
 
-  // Memoize grouped stats to avoid 5 reduce() calls on every render
-  const groupedStats = useMemo(() => {
-    const pagesGrouped = effectiveGrouped.reduce((sum, g) => sum + g.clusters.length, 0);
-    const groupedKeywords = effectiveGrouped.reduce((sum, g) => sum + g.keywordCount, 0);
-    const groupedVolume = effectiveGrouped.reduce((sum, g) => sum + g.totalVolume, 0);
-    const totalPagesAll = (effectiveClusters?.length || 0) + pagesGrouped;
-    const pctGrouped = totalPagesAll > 0 ? ((pagesGrouped / totalPagesAll) * 100).toFixed(2) : '0.00';
-    return { pagesGrouped, groupedKeywords, groupedVolume, totalPagesAll, pctGrouped };
-  }, [effectiveGrouped, effectiveClusters]);
-
-  const approvedPageCount = useMemo(
-    () => approvedGroups.reduce((sum, g) => sum + g.clusters.length, 0),
-    [approvedGroups]
-  );
-
-  const keywordGroupingProgress = useMemo(() => {
-    const groupedPageCount = effectiveGrouped.reduce((sum, g) => sum + g.clusters.length, 0);
-    const completedPages = groupedPageCount + approvedPageCount;
-    const ungroupedPages = effectiveClusters?.length || 0;
-    const totalPages = completedPages + ungroupedPages;
-    const percent = totalPages > 0 ? (completedPages / totalPages) * 100 : 0;
-    return {
-      completedPages,
-      ungroupedPages,
-      totalPages,
-      percent,
-      percentLabel: `${percent.toFixed(1)}%`,
-    };
-  }, [effectiveGrouped, approvedPageCount, effectiveClusters]);
 
   // AI Group Review â€" process pending groups automatically
   useEffect(() => {
@@ -4533,35 +2861,48 @@ FAILURE CONDITIONS TO AVOID:
         job.settings.autoGroupPrompt
       );
 
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${job.settings.apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': window.location.origin,
-        },
-        body: JSON.stringify({
-          model: job.settings.selectedModel,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-          temperature: job.settings.temperature,
-          ...(job.settings.maxTokens > 0 ? { max_tokens: job.settings.maxTokens } : {}),
-          ...(job.settings.reasoningEffort && job.settings.reasoningEffort !== 'none'
-            ? { reasoning: { effort: job.settings.reasoningEffort } }
-            : {}),
-          response_format: { type: 'json_object' },
-        }),
+      const timedResponse = await runWithOpenRouterTimeout({
         signal: controller.signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async (requestSignal) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${job.settings.apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': window.location.origin,
+          },
+          body: JSON.stringify({
+            model: job.settings.selectedModel,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: user },
+            ],
+            temperature: job.settings.temperature,
+            ...(job.settings.maxTokens > 0 ? { max_tokens: job.settings.maxTokens } : {}),
+            ...(job.settings.reasoningEffort && job.settings.reasoningEffort !== 'none'
+              ? { reasoning: { effort: job.settings.reasoningEffort } }
+              : {}),
+            response_format: { type: 'json_object' },
+          }),
+          signal: requestSignal,
+        }),
       });
+      const res = timedResponse.result;
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => '');
+        const errText = (await runWithOpenRouterTimeout({
+          signal: controller.signal,
+          timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+          run: async () => res.text().catch(() => ''),
+        }).catch(() => ({ result: '' }))).result;
         throw new Error(`API ${res.status}: ${errText.slice(0, 200)}`);
       }
 
-      const data = await res.json();
+      const data = (await runWithOpenRouterTimeout({
+        signal: controller.signal,
+        timeoutMs: OPENROUTER_REQUEST_TIMEOUT_MS,
+        run: async () => res.json(),
+      })).result;
       const content = data.choices?.[0]?.message?.content || '';
       const parsedGroups = parseFilteredAutoGroupResponse(content, pagesToReview);
       if (parsedGroups.length === 0) throw new Error('Model returned no usable groups');
@@ -4797,10 +3138,16 @@ FAILURE CONDITIONS TO AVOID:
     return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, approveSelectedGrouped, handleRunFilteredAutoGroup, filteredClusters.length, isFilteredAutoGroupFilterActive]);
 
+  const pendingGroupMergeRecommendationsCount = groupMergeRecommendations.filter(
+    (recommendation) => recommendation.status === 'pending',
+  ).length;
+  const totalGroupMergeRecommendationsCount = groupMergeRecommendations.length;
+
   const totalPages = Math.max(1, Math.ceil(
     (activeTab === 'pages' ? sortedClusters.length :
      activeTab === 'keywords' ? sortedKeywordRows.length :
      activeTab === 'grouped' ? filteredSortedGrouped.length :
+     activeTab === 'group-auto-merge' ? 1 :
      activeTab === 'approved' ? approvedGroups.length :
      sortedBlocked.length) / itemsPerPage
   ));
@@ -4813,12 +3160,14 @@ FAILURE CONDITIONS TO AVOID:
   const filteredCount = activeTab === 'pages' ? sortedClusters.length :
                        activeTab === 'keywords' ? sortedKeywordRows.length :
                        activeTab === 'grouped' ? filteredSortedGrouped.length :
+                       activeTab === 'group-auto-merge' ? pendingGroupMergeRecommendationsCount :
                        activeTab === 'approved' ? filteredApprovedGroups.length :
                        sortedBlocked.length;
 
   const totalCount = activeTab === 'pages' ? (effectiveClusters?.length || 0) :
                     activeTab === 'keywords' ? (effectiveResults?.length || 0) :
                     activeTab === 'grouped' ? effectiveGrouped.length :
+                    activeTab === 'group-auto-merge' ? totalGroupMergeRecommendationsCount :
                     activeTab === 'approved' ? approvedGroups.length :
                     allBlockedKeywords.length;
 
@@ -4855,9 +3204,15 @@ FAILURE CONDITIONS TO AVOID:
                     ? 'Group'
                     : mainTab === 'generate'
                       ? 'Generate'
-                      : mainTab === 'feedback'
-                        ? 'Feedback'
-                        : 'Feature ideas'}
+                      : mainTab === 'content'
+                        ? 'Content'
+                        : mainTab === 'feedback'
+                          ? 'Feedback'
+                          : mainTab === 'notifications'
+                            ? 'Notifications'
+                          : mainTab === 'updates'
+                            ? 'Updates'
+                            : 'Feature ideas'}
                 </span>
                 {mainTab === 'group' && (
                   <>
@@ -4971,6 +3326,14 @@ FAILURE CONDITIONS TO AVOID:
                 </button>
                 <button
                   type="button"
+                  onClick={() => navigateMainTab('content')}
+                  className={`${mainTabBtnBase} ${mainTab === 'content' ? mainTabBtnActive : mainTabBtnInactive}`}
+                >
+                  <FileText className="w-3 h-3 shrink-0" aria-hidden />
+                  Content
+                </button>
+                <button
+                  type="button"
                   onClick={() => navigateMainTab('feedback')}
                   className={`${mainTabBtnBase} ${mainTab === 'feedback' ? mainTabBtnActive : mainTabBtnInactive}`}
                 >
@@ -4984,6 +3347,22 @@ FAILURE CONDITIONS TO AVOID:
                 >
                   <Lightbulb className="w-3 h-3 shrink-0" aria-hidden />
                   Feature ideas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab('notifications')}
+                  className={`${mainTabBtnBase} ${mainTab === 'notifications' ? mainTabBtnActive : mainTabBtnInactive}`}
+                >
+                  <Bell className="w-3 h-3 shrink-0" aria-hidden />
+                  Notifications
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab('updates')}
+                  className={`${mainTabBtnBase} ${mainTab === 'updates' ? mainTabBtnActive : mainTabBtnInactive}`}
+                >
+                  <RefreshCw className="w-3 h-3 shrink-0" aria-hidden />
+                  Updates
                 </button>
               </div>
             </div>
@@ -5464,6 +3843,15 @@ FAILURE CONDITIONS TO AVOID:
                       {(() => { const mc = groupedClusters.filter(g => g.reviewStatus === 'mismatch').length; return mc > 0 ? <span className="ml-1 px-1 py-0.5 text-[9px] font-bold bg-red-100 text-red-700 rounded-full">{mc}</span> : null; })()}
                     </button>
                     <button
+                      onClick={() => switchTab('group-auto-merge')}
+                      className={`${stateTabBtnBase} ${activeTab === 'group-auto-merge' ? 'bg-sky-50 shadow-sm text-sky-700 border border-sky-200' : mainTabBtnInactive}`}
+                    >
+                      <Sparkles className="w-3 h-3" />Auto Merge
+                      {pendingGroupMergeRecommendationsCount > 0 && (
+                        <span className="text-sky-600 ml-0.5">({pendingGroupMergeRecommendationsCount.toLocaleString()})</span>
+                      )}
+                    </button>
+                    <button
                       onClick={() => switchTab('approved')}
                       className={`${stateTabBtnBase} ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : mainTabBtnInactive}`}
                     >
@@ -5477,7 +3865,7 @@ FAILURE CONDITIONS TO AVOID:
                     </button>
                   </div>
                   <div className="ml-auto flex items-center gap-1.5">
-                    {(activeTab === 'pages' || activeTab === 'grouped' || activeTab === 'keywords') && (
+                    {(activeTab === 'pages' || activeTab === 'grouped' || activeTab === 'group-auto-merge' || activeTab === 'keywords') && (
                       <button
                         onClick={() => setShowGroupReviewSettings(!showGroupReviewSettings)}
                         className={`p-1.5 rounded-lg border transition-colors ${showGroupReviewSettings ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'border-zinc-200 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-50'}`}
@@ -5595,7 +3983,9 @@ FAILURE CONDITIONS TO AVOID:
                 
                 {/* Row 2: Token filter badges (compact height) */}
                 <div className="h-5 flex items-center">
-                  {selectedTokens.size > 0 ? (
+                  {activeTab === 'group-auto-merge' ? (
+                    <span className="text-xs text-zinc-400">Recommendations are generated only from the current Grouped groups.</span>
+                  ) : selectedTokens.size > 0 ? (
                     <div className="flex flex-wrap gap-1">
                       {Array.from(selectedTokens).map(token => (
                         <button
@@ -5623,7 +4013,7 @@ FAILURE CONDITIONS TO AVOID:
                   {/* Active results count â€" fixed position, never shifts */}
                   <span className="text-[11px] text-zinc-400 tabular-nums whitespace-nowrap shrink-0 min-w-[100px]">
                     {filteredCount.toLocaleString()} / {totalCount.toLocaleString()}{' '}
-                    {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'items'}
+                    {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'group-auto-merge' ? 'recommendations' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'items'}
                   </span>
 
                   {/* Selection count â€" fixed min-width so it doesn't shift other elements */}
@@ -5643,6 +4033,8 @@ FAILURE CONDITIONS TO AVOID:
                     })()}
                   </span>
 
+                  {activeTab !== 'group-auto-merge' && (
+                    <>
                   {/* Search */}
                   <div className="relative w-52 shrink-0">
                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
@@ -5756,8 +4148,10 @@ FAILURE CONDITIONS TO AVOID:
                       </>
                     )}
                   </div>
+                    </>
+                  )}
                 </div>
-                {activeTab !== 'auto-group' && (
+                {activeTab !== 'auto-group' && activeTab !== 'group-auto-merge' && (
                   <div
                     className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md border border-zinc-200/90 bg-zinc-50 px-2 py-0.5 text-[10px] leading-tight text-zinc-600"
                     title={
@@ -5857,7 +4251,7 @@ FAILURE CONDITIONS TO AVOID:
               </div>
 
               {/* AI Group Review Settings Panel â€" mounted for both Pages and Grouped because Pages Auto Group uses the same settings */}
-              <div className={activeTab === 'grouped' || activeTab === 'pages' || activeTab === 'keywords' ? 'px-4' : 'hidden'}>
+              <div className={activeTab === 'grouped' || activeTab === 'group-auto-merge' || activeTab === 'pages' || activeTab === 'keywords' ? 'px-4' : 'hidden'}>
                 <GroupReviewSettings
                   ref={groupReviewSettingsRef}
                   isOpen={showGroupReviewSettings}
@@ -5870,7 +4264,7 @@ FAILURE CONDITIONS TO AVOID:
                 />
               </div>
 
-              <div className="overflow-auto flex-1 rounded-b-2xl" style={activeTab === 'auto-group' ? { display: 'none' } : undefined}>
+              <div className="overflow-auto flex-1 rounded-b-2xl" style={activeTab === 'auto-group' || activeTab === 'group-auto-merge' ? { display: 'none' } : undefined}>
 
                 <table className="text-left text-sm relative w-full table-fixed">
                   {/* Shared TableHeader â€" single source of truth for all tab headers */}
@@ -6254,7 +4648,20 @@ FAILURE CONDITIONS TO AVOID:
                 />
               )}
 
-              <div className="px-4 py-2 border-t border-zinc-200 bg-zinc-50 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0" style={activeTab === 'auto-group' ? { display: 'none' } : undefined}>
+              {activeTab === 'group-auto-merge' && (
+                <GroupAutoMergePanel
+                  groupedClusters={groupedClusters}
+                  recommendations={groupMergeRecommendations}
+                  recommendationsAreStale={groupAutoMergeRecommendationsAreStale}
+                  job={groupAutoMergeJob}
+                  onRun={runGroupAutoMergeRecommendations}
+                  onCancel={cancelGroupAutoMerge}
+                  onDismiss={dismissGroupAutoMergeRecommendations}
+                  onApply={applyGroupAutoMergeRecommendations}
+                />
+              )}
+
+              <div className="px-4 py-2 border-t border-zinc-200 bg-zinc-50 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0" style={activeTab === 'auto-group' || activeTab === 'group-auto-merge' ? { display: 'none' } : undefined}>
                 <div className="flex items-center gap-2 text-sm text-zinc-500">
                   <span>Show</span>
                   <select 
@@ -6281,7 +4688,7 @@ FAILURE CONDITIONS TO AVOID:
                         Page {currentPage} of {Math.max(1, totalPages)}
                         <span className="ml-2 px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold border border-indigo-100 shadow-sm">
                           {filteredCount.toLocaleString()} / {totalCount.toLocaleString()}{' '}
-                          {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : activeTab}
+                          {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'group-auto-merge' ? 'recommendations' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : activeTab}
                         </span>
                       </span>
                       <button 
@@ -7227,10 +5634,39 @@ FAILURE CONDITIONS TO AVOID:
           </div>
         )}
 
-        {/* GenerateTab stays mounted always â€" prevents generation from stopping when switching tabs */}
+        {mainTab === 'notifications' && (
+          <div className="max-w-4xl mx-auto mt-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <NotificationsTab />
+          </div>
+        )}
+
+        {mainTab === 'updates' && (
+          <div className="max-w-4xl mx-auto mt-2 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <UpdatesTab />
+          </div>
+        )}
+
+        {/* GenerateTab stays mounted always — prevents generation from stopping when switching tabs */}
         <div style={mainTab === 'generate' ? undefined : { display: 'none' }}>
           <ErrorBoundary fallbackLabel="The Generate tab encountered an error. Your data has been saved.">
-            <GenerateTab />
+            <GenerateTab
+              activeProjectId={activeProjectId}
+              starredModels={starredModels}
+              onToggleStar={toggleStarModel}
+              onBusyStateChange={setIsGenerateBusy}
+            />
+          </ErrorBoundary>
+        </div>
+
+        {/* ContentTab stays mounted always — prevents generation from stopping when switching tabs */}
+        <div style={mainTab === 'content' ? undefined : { display: 'none' }}>
+          <ErrorBoundary fallbackLabel="The Content tab encountered an error. Your data has been saved.">
+            <ContentTab
+              activeProjectId={activeProjectId}
+              starredModels={starredModels}
+              onToggleStar={toggleStarModel}
+              onBusyStateChange={setIsContentBusy}
+            />
           </ErrorBoundary>
         </div>
 

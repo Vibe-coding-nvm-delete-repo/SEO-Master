@@ -285,6 +285,7 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
           blockedChunkCount: 0,
           suggestionChunkCount: 0,
           autoMergeChunkCount: 1,
+          groupMergeChunkCount: 0,
           updatedAt: new Date().toISOString(),
         }),
       },
@@ -444,6 +445,54 @@ describe('buildProjectDataPayloadFromChunkDocs', () => {
     expect(payload).not.toBeNull();
     expect(payload?.autoMergeRecommendations?.map(r => r.id)).toEqual(['in', 'out']);
   });
+
+  it('reconstructs group auto-merge recommendations from group_merge chunks', () => {
+    const payload = buildProjectDataPayloadFromChunkDocs([
+      {
+        data: () => ({
+          type: 'meta',
+          stats: null,
+          datasetStats: null,
+          tokenSummary: [],
+          groupedClusterCount: 0,
+          approvedGroupCount: 0,
+          blockedTokens: [],
+          labelSections: [],
+          activityLog: [],
+          tokenMergeRules: [],
+          resultChunkCount: 0,
+          clusterChunkCount: 0,
+          blockedChunkCount: 0,
+          suggestionChunkCount: 0,
+          autoMergeChunkCount: 0,
+          groupMergeChunkCount: 1,
+          updatedAt: new Date().toISOString(),
+        }),
+      },
+      {
+        data: () => ({
+          type: 'group_merge',
+          index: 0,
+          data: [{
+            id: 'g1__g2',
+            sourceFingerprint: 'fp_1',
+            groupA: { id: 'g1', name: 'Car Loans', pageCount: 2, totalVolume: 1000, locationSummary: 'National / non-local' },
+            groupB: { id: 'g2', name: 'Auto Loans', pageCount: 3, totalVolume: 1500, locationSummary: 'National / non-local' },
+            similarity: 0.95,
+            exactNameMatch: false,
+            sharedPageNameCount: 1,
+            locationCompatible: true,
+            status: 'pending',
+            createdAt: '2026-03-30T00:00:00.000Z',
+          }],
+        }),
+      },
+    ]);
+
+    expect(payload).not.toBeNull();
+    expect(payload?.groupMergeRecommendations).toHaveLength(1);
+    expect(payload?.groupMergeRecommendations?.[0].id).toBe('g1__g2');
+  });
 });
 
 describe('pickNewerProjectPayload', () => {
@@ -462,6 +511,7 @@ describe('pickNewerProjectPayload', () => {
     tokenMergeRules: [],
     autoGroupSuggestions: [],
     autoMergeRecommendations: [],
+    groupMergeRecommendations: [],
     updatedAt: '2025-01-01T00:00:00.000Z',
   });
 
@@ -496,7 +546,7 @@ describe('pickNewerProjectPayload', () => {
     expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
   });
 
-  it('prefers Firestore when IDB has higher saveId but fewer groups (legacy saveId 0)', () => {
+  it('prefers IDB when it has a valid saveId and Firestore is legacy (saveId 0) even with fewer groups', () => {
     const idb = {
       ...emptyPayload(),
       lastSaveId: 20,
@@ -509,25 +559,151 @@ describe('pickNewerProjectPayload', () => {
       groupedClusters: [{ id: 'a' } as any, { id: 'b' } as any],
       approvedGroups: [],
     };
-    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+    // IDB has data (1 group) and a valid saveId; Firestore is legacy — trust IDB.
+    expect(pickNewerProjectPayload(idb, fs)).toBe(idb);
   });
 
-  it('adjacent saveIds: prefers more grouped pages over higher lastSaveId (refresh data-loss fix)', () => {
+  it('prefers IDB when lastSaveId is ahead even with fewer grouped pages (ungroup before cloud flush)', () => {
     const mkCluster = (n: number) =>
       Array.from({ length: n }, (_, i) => ({ tokens: `t${i}`, pageName: `p${i}` }));
     const idb = {
       ...emptyPayload(),
-      lastSaveId: 100,
-      groupedClusters: [{ id: 'bad', clusters: mkCluster(30) } as any],
+      lastSaveId: 101,
+      updatedAt: '2025-06-02T12:00:00.000Z',
+      groupedClusters: [{ id: 'g1', clusters: mkCluster(10) } as any],
       approvedGroups: [],
     };
     const fs = {
       ...emptyPayload(),
       lastSaveId: 99,
-      groupedClusters: [{ id: 'good', clusters: mkCluster(350) } as any],
+      updatedAt: '2025-06-01T00:00:00.000Z',
+      groupedClusters: [{ id: 'g1', clusters: mkCluster(350) } as any],
       approvedGroups: [],
     };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(idb);
+  });
+
+  it('REGRESSION: ungroup + unblock + refresh — IDB with higher saveId but fewer groups MUST win over Firestore', () => {
+    const mkCluster = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ tokens: `t${i}`, pageName: `p${i}` }));
+    const idb = {
+      ...emptyPayload(),
+      lastSaveId: 56,
+      updatedAt: '2025-06-02T12:01:00.000Z',
+      groupedClusters: [{ id: 'g1', clusters: mkCluster(5) } as any],
+      approvedGroups: [],
+      blockedTokens: [],
+    };
+    const fs = {
+      ...emptyPayload(),
+      lastSaveId: 50,
+      updatedAt: '2025-06-02T12:00:00.000Z',
+      groupedClusters: [
+        { id: 'g1', clusters: mkCluster(50) } as any,
+        { id: 'g2', clusters: mkCluster(30) } as any,
+        { id: 'g3', clusters: mkCluster(20) } as any,
+      ],
+      approvedGroups: [],
+      blockedTokens: ['tok1', 'tok2'],
+    };
+    // IDB has higher saveId (user did 6 mutations: ungroup + unblock + activity entries).
+    // It intentionally has fewer groups and fewer blocked tokens. Must win.
+    expect(pickNewerProjectPayload(idb, fs)).toBe(idb);
+  });
+
+  it('prefers Firestore when IDB is legacy (saveId 0) and empty but Firestore has data', () => {
+    const idb = {
+      ...emptyPayload(),
+      lastSaveId: undefined,
+      results: [],
+      clusterSummary: [],
+    };
+    const fs = {
+      ...emptyPayload(),
+      lastSaveId: 10,
+      results: [{ tokens: 'a' } as any],
+      clusterSummary: [],
+    };
     expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+
+  it('both sides saveId 0: uses timestamp tiebreaker (Firestore newer wins)', () => {
+    const idb = { ...emptyPayload(), lastSaveId: undefined, updatedAt: '2025-01-01T00:00:00.000Z' };
+    const fs = { ...emptyPayload(), lastSaveId: undefined, updatedAt: '2025-06-01T00:00:00.000Z' };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+
+  it('both sides saveId 0: uses timestamp tiebreaker (IDB newer wins)', () => {
+    const idb = { ...emptyPayload(), lastSaveId: undefined, updatedAt: '2025-09-01T00:00:00.000Z' };
+    const fs = { ...emptyPayload(), lastSaveId: undefined, updatedAt: '2025-01-01T00:00:00.000Z' };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(idb);
+  });
+
+  it('both sides saveId 0 and identical timestamps: Firestore wins as shared source of truth', () => {
+    const ts = '2025-05-15T12:00:00.000Z';
+    const idb = { ...emptyPayload(), lastSaveId: undefined, updatedAt: ts };
+    const fs = { ...emptyPayload(), lastSaveId: undefined, updatedAt: ts };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+
+  it('equal saveId but Firestore has newer timestamp: Firestore wins', () => {
+    const idb = { ...emptyPayload(), lastSaveId: 50, updatedAt: '2025-01-01T00:00:00.000Z' };
+    const fs = { ...emptyPayload(), lastSaveId: 50, updatedAt: '2025-06-01T00:00:00.000Z' };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+
+  it('equal saveId but IDB has newer timestamp: IDB wins', () => {
+    const idb = { ...emptyPayload(), lastSaveId: 50, updatedAt: '2025-09-01T00:00:00.000Z' };
+    const fs = { ...emptyPayload(), lastSaveId: 50, updatedAt: '2025-01-01T00:00:00.000Z' };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(idb);
+  });
+
+  it('equal saveId and identical timestamps: Firestore wins', () => {
+    const ts = '2025-05-15T12:00:00.000Z';
+    const idb = { ...emptyPayload(), lastSaveId: 50, updatedAt: ts };
+    const fs = { ...emptyPayload(), lastSaveId: 50, updatedAt: ts };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+
+  it('IDB has data but legacy saveId; Firestore is empty but has saveId: IDB wins', () => {
+    const idb = {
+      ...emptyPayload(),
+      lastSaveId: undefined,
+      results: [{ tokens: 'a' } as any],
+      groupedClusters: [{ id: 'g1' } as any],
+    };
+    const fs = { ...emptyPayload(), lastSaveId: 5 };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(idb);
+  });
+
+  it('Firestore higher saveId wins when both sides have data', () => {
+    const idb = {
+      ...emptyPayload(),
+      lastSaveId: 10,
+      results: Array.from({ length: 1000 }, (_, i) => ({ tokens: `t${i}` } as any)),
+    };
+    const fs = {
+      ...emptyPayload(),
+      lastSaveId: 20,
+      results: [{ tokens: 'fewer' } as any],
+    };
+    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+  });
+
+  it('REGRESSION: never prefer empty data over real data regardless of saveId (clearProject race)', () => {
+    // IDB was corrupted by a clearProject race — empty with high saveId.
+    // Firestore has the real data with a lower saveId.
+    const idb = { ...emptyPayload(), lastSaveId: 438 };
+    const fs = {
+      ...emptyPayload(),
+      lastSaveId: 200,
+      results: Array.from({ length: 7175 }, (_, i) => ({ tokens: `t${i}` } as any)),
+      clusterSummary: Array.from({ length: 4082 }, (_, i) => ({ token: `c${i}` } as any)),
+    };
+    // Must prefer Firestore because IDB is completely empty — corrupt artifact.
+    expect(pickNewerProjectPayload(idb, fs)).toBe(fs);
+    // And the reverse: empty Firestore should not beat IDB with data.
+    expect(pickNewerProjectPayload(fs, idb)).toBe(fs);
   });
 });
 
@@ -543,6 +719,24 @@ describe('sanitizeJsonForFirestore', () => {
       a: 1,
       nested: { keep: 'x' },
       arr: [{ ok: true }],
+    });
+  });
+
+  it('normalizes non-finite numbers so Firestore-safe payloads do not contain NaN', () => {
+    const dirty = {
+      cost: Number.NaN,
+      nested: {
+        promptTokens: Number.POSITIVE_INFINITY,
+        completionTokens: Number.NEGATIVE_INFINITY,
+      },
+    };
+    const clean = sanitizeJsonForFirestore(dirty);
+    expect(clean).toEqual({
+      cost: null,
+      nested: {
+        promptTokens: null,
+        completionTokens: null,
+      },
     });
   });
 });

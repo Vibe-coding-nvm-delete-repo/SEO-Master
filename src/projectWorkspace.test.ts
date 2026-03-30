@@ -18,6 +18,7 @@ describe('toProjectViewState', () => {
       tokenMergeRules: [],
       autoGroupSuggestions: [],
       autoMergeRecommendations: [],
+      groupMergeRecommendations: [],
       updatedAt: '2026-03-25T00:00:00.000Z',
     }, {
       id: 'proj-1',
@@ -101,11 +102,24 @@ describe('toProjectViewState', () => {
         status: 'pending',
         createdAt: '2026-03-26T00:00:00.000Z',
       }],
+      groupMergeRecommendations: [{
+        id: 'group_1',
+        sourceFingerprint: 'fp_1',
+        groupA: { id: 'g1', name: 'HVAC Repair', pageCount: 2, totalVolume: 1000, locationSummary: 'National / non-local' },
+        groupB: { id: 'g2', name: 'Heating Repair', pageCount: 1, totalVolume: 500, locationSummary: 'National / non-local' },
+        similarity: 0.92,
+        exactNameMatch: false,
+        sharedPageNameCount: 0,
+        locationCompatible: true,
+        status: 'pending',
+        createdAt: '2026-03-26T00:00:00.000Z',
+      }],
       updatedAt: '2026-03-26T00:00:00.000Z',
     }, null);
 
     expect(view.clusterSummary).toHaveLength(1);
     expect(view.clusterSummary![0].avgKwRating).toBe(2);
     expect(view.autoMergeRecommendations).toHaveLength(1);
+    expect(view.groupMergeRecommendations).toHaveLength(1);
   });
 });

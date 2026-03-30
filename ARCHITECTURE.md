@@ -60,6 +60,11 @@ Load: IDB (fast) → if empty → Firestore → cache to IDB
 Delete: localStorage + IDB + Firestore (all chunks)
 ```
 
+Bootstrap rule:
+- if a surface loads from local durable cache and also subscribes to Firestore, it must track when Firestore has become authoritative
+- async cache fallback must stop once Firestore has loaded
+- cache-only empty snapshots (`metadata.fromCache === true` with no doc/data) must not blank a non-empty cached view during startup
+
 ### Firestore Document Structure
 ```
 projects/{id}/

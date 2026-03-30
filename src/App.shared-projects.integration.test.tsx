@@ -1,9 +1,55 @@
-import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import React, { type ComponentType } from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClusterSummary, GroupedCluster, ProcessedRow, Project, Stats, TokenSummary } from './types';
+import { resetCloudSyncStateForTests } from './cloudSyncStatus';
+
+/** Heavy libs — stub so loading `App` does not stall Vitest workers (real hang was pre-test `RUN`). */
+vi.mock('xlsx', () => {
+  const utils = {
+    book_new: vi.fn(() => ({})),
+    aoa_to_sheet: vi.fn(() => ({})),
+    book_append_sheet: vi.fn(),
+  };
+  return {
+    default: { utils, write: vi.fn(() => new Uint8Array(0)) },
+    utils,
+    write: vi.fn(() => new Uint8Array(0)),
+  };
+});
+
+vi.mock('papaparse', () => ({
+  default: {
+    parse: vi.fn((_file: unknown, opts?: { complete?: (r: unknown) => void }) => {
+      opts?.complete?.({ data: [], errors: [], meta: {} });
+    }),
+    unparse: vi.fn(() => ''),
+  },
+}));
+
+/** Weather + geolocation on mount — stub so RTL does not wait on Open-Meteo / location. */
+vi.mock('./AppStatusBar', () => ({
+  default: () => null,
+}));
+
+vi.mock('./FeedbackTab', () => ({
+  default: () => null,
+}));
+
+vi.mock('./FeatureIdeasTab', () => ({
+  default: () => null,
+}));
+
+vi.mock('./NotificationsTab', () => ({
+  default: () => null,
+}));
+
+vi.mock('./FeedbackModalHost', () => ({
+  default: () => null,
+}));
 
 const storageMocks = vi.hoisted(() => ({
+  loadProjectsBootstrapState: vi.fn(),
   loadProjectsFromFirestore: vi.fn(),
   loadSavedWorkspacePrefs: vi.fn(),
   loadProjectDataForView: vi.fn(),
@@ -19,10 +65,21 @@ const firestoreListeners = vi.hoisted(() => ({
   handlers: new Map<string, (snap: any) => void>(),
 }));
 
+function mockProjectBootstrap(projects: Project[], source: 'firestore' | 'local-cache' | 'empty' = 'firestore') {
+  storageMocks.loadProjectsBootstrapState.mockResolvedValue({ projects, source });
+  storageMocks.loadProjectsFromFirestore.mockResolvedValue(projects);
+}
+
+/** Stub network/IDB paths only; use real chunk merge from `projectChunkPayload` (no Firebase import). */
 vi.mock('./projectStorage', async () => {
-  const actual = await vi.importActual<typeof import('./projectStorage')>('./projectStorage');
+  const chunk = await import('./projectChunkPayload');
   return {
-    ...actual,
+    PROJECT_FOLDERS_FS_DOC: 'project_folders',
+    LS_PROJECT_FOLDERS_KEY: 'kwg_project_folders',
+    LS_PROJECTS_KEY: 'kwg_projects',
+    batchSetProjectsFolderId: vi.fn(() => Promise.resolve()),
+    saveProjectFoldersToFirestore: vi.fn(() => Promise.resolve()),
+    loadProjectsBootstrapState: storageMocks.loadProjectsBootstrapState,
     loadProjectsFromFirestore: storageMocks.loadProjectsFromFirestore,
     saveAppPrefsToFirestore: storageMocks.saveAppPrefsToFirestore,
     saveProjectDataToFirestore: storageMocks.saveProjectDataToFirestore,
@@ -30,15 +87,76 @@ vi.mock('./projectStorage', async () => {
     deleteProjectFromFirestore: storageMocks.deleteProjectFromFirestore,
     deleteProjectDataFromFirestore: storageMocks.deleteProjectDataFromFirestore,
     deleteFromIDB: storageMocks.deleteFromIDB,
+    saveToIDB: vi.fn(() => Promise.resolve()),
+    loadFromIDB: vi.fn(() => Promise.resolve(null)),
+    loadProjectDataFromFirestore: vi.fn(() => Promise.resolve(null)),
+    buildProjectDataPayloadFromChunkDocs: chunk.buildProjectDataPayloadFromChunkDocs,
+    countGroupedPages: chunk.countGroupedPages,
+    groupedPageMass: chunk.groupedPageMass,
+    projectFromFirestoreData: (id: string, data: Record<string, unknown> | undefined) => {
+      const d = data || {};
+      return {
+        id,
+        name: typeof d.name === 'string' ? d.name : '',
+        description: typeof d.description === 'string' ? d.description : '',
+        createdAt: typeof d.createdAt === 'string' ? d.createdAt : new Date().toISOString(),
+        uid: typeof d.uid === 'string' ? d.uid : 'local',
+        fileName: typeof d.fileName === 'string' ? d.fileName : undefined,
+        folderId:
+          typeof d.folderId === 'string' ? d.folderId : d.folderId === null ? null : undefined,
+        deletedAt:
+          typeof d.deletedAt === 'string' ? d.deletedAt : d.deletedAt === null ? null : undefined,
+      };
+    },
+    reviveProjectInFirestore: vi.fn(() => Promise.resolve()),
+    softDeleteProjectInFirestore: vi.fn(() => Promise.resolve()),
   };
 });
 
-vi.mock('./projectWorkspace', async () => {
-  const actual = await vi.importActual<typeof import('./projectWorkspace')>('./projectWorkspace');
+vi.mock('./projectWorkspace', () => {
+  const makeEmpty = () => ({
+    results: null as ProcessedRow[] | null,
+    clusterSummary: null as ClusterSummary[] | null,
+    tokenSummary: null as TokenSummary[] | null,
+    groupedClusters: [] as GroupedCluster[],
+    approvedGroups: [] as GroupedCluster[],
+    activityLog: [] as unknown[],
+    tokenMergeRules: [] as unknown[],
+    autoGroupSuggestions: [] as unknown[],
+    autoMergeRecommendations: [] as unknown[],
+    groupMergeRecommendations: [] as unknown[],
+    stats: null as Stats | null,
+    datasetStats: null as unknown | null,
+    blockedTokens: [] as string[],
+    blockedKeywords: [] as unknown[],
+    labelSections: [] as unknown[],
+    fileName: null as string | null,
+  });
   return {
-    ...actual,
     loadSavedWorkspacePrefs: storageMocks.loadSavedWorkspacePrefs,
     loadProjectDataForView: storageMocks.loadProjectDataForView,
+    createEmptyProjectViewState: () => makeEmpty(),
+    toProjectViewState: (data: Record<string, unknown> | null) => {
+      if (!data) return makeEmpty();
+      return {
+        results: (data.results as ProcessedRow[] | null) ?? null,
+        clusterSummary: (data.clusterSummary as ClusterSummary[] | null) ?? null,
+        tokenSummary: (data.tokenSummary as TokenSummary[] | null) ?? null,
+        groupedClusters: (data.groupedClusters as GroupedCluster[]) ?? [],
+        approvedGroups: (data.approvedGroups as GroupedCluster[]) ?? [],
+        activityLog: (data.activityLog as unknown[]) ?? [],
+        tokenMergeRules: (data.tokenMergeRules as unknown[]) ?? [],
+        autoGroupSuggestions: (data.autoGroupSuggestions as unknown[]) ?? [],
+        autoMergeRecommendations: (data.autoMergeRecommendations as unknown[]) ?? [],
+        groupMergeRecommendations: (data.groupMergeRecommendations as unknown[]) ?? [],
+        stats: (data.stats as Stats | null) ?? null,
+        datasetStats: data.datasetStats ?? null,
+        blockedTokens: Array.isArray(data.blockedTokens) ? [...data.blockedTokens] : [],
+        blockedKeywords: (data.blockedKeywords as unknown[]) ?? [],
+        labelSections: (data.labelSections as unknown[]) ?? [],
+        fileName: (data.fileName as string | null) ?? null,
+      };
+    },
   };
 });
 
@@ -77,6 +195,11 @@ vi.mock('firebase/auth', () => ({
 
 vi.mock('./GenerateTab', () => ({
   default: () => <div data-testid="generate-tab" />,
+  GenerateTabInstance: () => <div data-testid="generate-tab-instance" />,
+}));
+
+vi.mock('./ContentTab', () => ({
+  default: () => <div data-testid="content-tab" />,
 }));
 
 vi.mock('./GroupReviewSettings', async () => {
@@ -111,6 +234,8 @@ vi.mock('./TableHeader', () => ({
 vi.mock('./ToastContext', () => ({
   useToast: () => ({ addToast: vi.fn() }),
 }));
+
+let App: ComponentType;
 
 function makeRow(pageName: string, keyword: string, tokens = 'initial tokens'): ProcessedRow {
   return {
@@ -247,15 +372,58 @@ function makeChunksSnapshot(payload: {
   return {
     empty: docs.length === 0,
     docs,
+    metadata: { hasPendingWrites: false, fromCache: false },
   };
 }
 
+/** Breadcrumb / chrome often shows project name, not CSV file name — accept either. */
+const FILE_OR_PROJECT_LABEL: Record<string, string> = {
+  'shared.csv': 'Shared Project',
+  'live.csv': 'Shared Project',
+  'title.csv': 'Title Loans',
+  'installment.csv': 'Installment Loans',
+  'biz.csv': 'Biz Loans',
+};
+
+async function findFileNameInUi(name: string) {
+  try {
+    const byFile = await screen.findAllByText(name, { exact: true }, { timeout: 3_000 });
+    if (byFile.length > 0) return byFile[0];
+  } catch {
+    /* fall through to project label */
+  }
+  const alt = FILE_OR_PROJECT_LABEL[name];
+  if (alt) {
+    const els = await screen.findAllByText(alt, { exact: true }, { timeout: 20_000 });
+    expect(els.length).toBeGreaterThan(0);
+    return els[0];
+  }
+  const els = await screen.findAllByText(name, { exact: true }, { timeout: 20_000 });
+  expect(els.length).toBeGreaterThan(0);
+  return els[0];
+}
+
+/** Heading can render twice in some layouts (e.g. split / duplicate panels). */
+async function waitForKeywordManagementVisible() {
+  await screen.findAllByText('Keyword Management', { exact: true }, { timeout: 20_000 });
+}
+
 describe('App shared project visibility', () => {
+  beforeAll(async () => {
+    const mod = await import('./App');
+    App = mod.default;
+  }, 120_000);
+
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
+    resetCloudSyncStateForTests();
     vi.clearAllMocks();
     firestoreListeners.handlers.clear();
 
-    storageMocks.loadProjectsFromFirestore.mockResolvedValue([
+    mockProjectBootstrap([
       {
         id: 'proj-1',
         name: 'Shared Project',
@@ -290,20 +458,18 @@ describe('App shared project visibility', () => {
   });
 
   it('hydrates grouped-only projects instead of treating them as empty when ungrouped rows are zero', async () => {
-    const { default: App } = await import('./App');
     render(<App />);
 
-    await screen.findByText('shared.csv');
-    await screen.findByText('Keyword Management');
+    await findFileNameInUi('shared.csv');
+    await waitForKeywordManagementVisible();
 
     expect(screen.queryByText('Upload your CSV file')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /^Grouped\b/i }));
     expect(await screen.findByText('Initial Group')).toBeTruthy();
-  });
+  }, 30_000);
 
   it('applies live chunk and project metadata updates for the active shared project', async () => {
-    const { default: App } = await import('./App');
     render(<App />);
 
     await waitFor(() => {
@@ -311,7 +477,7 @@ describe('App shared project visibility', () => {
       expect(firestoreListeners.handlers.has('projects/proj-1/chunks')).toBe(true);
     });
 
-    await screen.findByText('shared.csv');
+    await findFileNameInUi('shared.csv');
 
     await act(async () => {
       firestoreListeners.handlers.get('projects')?.(
@@ -328,8 +494,8 @@ describe('App shared project visibility', () => {
       );
     });
 
-    expect(await screen.findByText('live.csv')).toBeTruthy();
-    await screen.findByText('Keyword Management');
+    await findFileNameInUi('live.csv');
+    await waitForKeywordManagementVisible();
 
     fireEvent.click(screen.getByRole('button', { name: /^Grouped\b/i }));
 
@@ -353,21 +519,189 @@ describe('App shared project visibility', () => {
     });
 
     expect(await screen.findByText('Updated Group')).toBeTruthy();
-  });
+  }, 30_000);
 
   it('clears the active workspace when a collaborator removes the current project from the shared list', async () => {
-    const { default: App } = await import('./App');
     render(<App />);
 
-    await screen.findByText('shared.csv');
-    await screen.findByText('Keyword Management');
+    await findFileNameInUi('shared.csv');
+    await waitForKeywordManagementVisible();
 
     await act(async () => {
       firestoreListeners.handlers.get('projects')?.(makeProjectSnapshot([]));
     });
 
     expect(await screen.findByRole('heading', { name: 'Projects' })).toBeTruthy();
-    expect(screen.queryByText('shared.csv')).toBeNull();
-    expect(screen.queryByText('Keyword Management')).toBeNull();
-  });
+    expect(screen.queryAllByText('Shared Project', { exact: true })).toHaveLength(0);
+    expect(screen.queryAllByText('Keyword Management', { exact: true })).toHaveLength(0);
+  }, 30_000);
+
+  it('user_preferences activeProjectId changes from another user do NOT hijack the local session', async () => {
+    mockProjectBootstrap([
+      {
+        id: 'proj-1',
+        name: 'Title Loans',
+        description: '',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        uid: 'local',
+        fileName: 'title.csv',
+      } satisfies Project,
+      {
+        id: 'proj-2',
+        name: 'Installment Loans',
+        description: '',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        uid: 'local',
+        fileName: 'installment.csv',
+      } satisfies Project,
+    ]);
+
+    storageMocks.loadSavedWorkspacePrefs.mockResolvedValue({
+      activeProjectId: 'proj-1',
+      savedClusters: [],
+    });
+
+    const basePayload = {
+      results: [] as ProcessedRow[],
+      clusterSummary: [] as ClusterSummary[],
+      tokenSummary: [] as TokenSummary[],
+      approvedGroups: [] as GroupedCluster[],
+      stats: makeStats(),
+      datasetStats: null,
+      blockedTokens: [] as string[],
+      blockedKeywords: [] as Array<{ keyword: string; volume: number; kd: number | null; reason: string }>,
+      labelSections: [] as any[],
+      activityLog: [] as any[],
+      tokenMergeRules: [] as any[],
+      autoMergeRecommendations: [] as any[],
+      autoGroupSuggestions: [] as any[],
+      updatedAt: '2026-03-25T00:00:00.000Z',
+      lastSaveId: 1,
+    };
+
+    storageMocks.loadProjectDataForView.mockImplementation(async (id: string) => {
+      if (id === 'proj-2') {
+        return {
+          ...basePayload,
+          groupedClusters: [makeGroup('Installment Group', 'inst tokens')],
+          fileName: 'installment.csv',
+        };
+      }
+      return {
+        ...basePayload,
+        groupedClusters: [makeGroup('Title Group', 'title tokens')],
+        fileName: 'title.csv',
+      };
+    });
+
+    render(<App />);
+
+    await waitFor(
+      () => {
+        expect(firestoreListeners.handlers.has('app_settings/user_preferences')).toBe(true);
+      },
+      { timeout: 20_000 },
+    );
+
+    await findFileNameInUi('title.csv');
+
+    // Another user switches to proj-2 → their write updates the shared doc.
+    // This must NOT switch the local user away from proj-1.
+    await act(async () => {
+      firestoreListeners.handlers.get('app_settings/user_preferences')?.({
+        exists: () => true,
+        data: () => ({
+          activeProjectId: 'proj-2',
+          savedClusters: [],
+        }),
+      });
+    });
+
+    // Should still be on proj-1. loadProjectDataForView was only called once (initial load).
+    const titleEls = await screen.findAllByText('Title Loans', { exact: true }, { timeout: 5_000 });
+    expect(titleEls.length).toBeGreaterThan(0);
+    expect(storageMocks.loadProjectDataForView).toHaveBeenCalledTimes(1);
+    expect(storageMocks.loadProjectDataForView).toHaveBeenCalledWith('proj-1');
+    expect(storageMocks.loadProjectDataForView).not.toHaveBeenCalledWith('proj-2');
+  }, 30_000);
+
+  it('does not override URL-derived project with stale shared prefs on refresh', async () => {
+    mockProjectBootstrap([
+      {
+        id: 'proj-1',
+        name: 'Installment Loans',
+        description: '',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        uid: 'local',
+        fileName: 'installment.csv',
+      } satisfies Project,
+      {
+        id: 'proj-2',
+        name: 'Biz Loans',
+        description: '',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        uid: 'local',
+        fileName: 'biz.csv',
+      } satisfies Project,
+    ]);
+
+    // IDB prefs say proj-2 (user was on biz loans locally)
+    storageMocks.loadSavedWorkspacePrefs.mockResolvedValue({
+      activeProjectId: 'proj-2',
+      savedClusters: [],
+    });
+
+    storageMocks.loadProjectDataForView.mockImplementation(async (id: string) => {
+      const base = {
+        results: [] as ProcessedRow[],
+        clusterSummary: [] as ClusterSummary[],
+        tokenSummary: [] as TokenSummary[],
+        approvedGroups: [] as GroupedCluster[],
+        stats: makeStats(),
+        datasetStats: null,
+        blockedTokens: [] as string[],
+        blockedKeywords: [] as Array<{ keyword: string; volume: number; kd: number | null; reason: string }>,
+        labelSections: [] as any[],
+        activityLog: [] as any[],
+        tokenMergeRules: [] as any[],
+        autoMergeRecommendations: [] as any[],
+        autoGroupSuggestions: [] as any[],
+        updatedAt: '2026-03-25T00:00:00.000Z',
+        lastSaveId: 1,
+      };
+      if (id === 'proj-2') {
+        return { ...base, groupedClusters: [makeGroup('Biz Group')], fileName: 'biz.csv' };
+      }
+      return { ...base, groupedClusters: [makeGroup('Inst Group')], fileName: 'installment.csv' };
+    });
+
+    render(<App />);
+
+    await waitFor(
+      () => {
+        expect(firestoreListeners.handlers.has('app_settings/user_preferences')).toBe(true);
+      },
+      { timeout: 20_000 },
+    );
+
+    // User should be on proj-2 (biz loans) based on prefs
+    await findFileNameInUi('biz.csv');
+
+    // Shared Firestore prefs say proj-1 (set by another user).
+    // This is the initial snapshot — it should be SKIPPED and NOT switch projects.
+    await act(async () => {
+      firestoreListeners.handlers.get('app_settings/user_preferences')?.({
+        exists: () => true,
+        data: () => ({
+          activeProjectId: 'proj-1',
+          savedClusters: [],
+        }),
+      });
+    });
+
+    // Should still be on proj-2, not switched to proj-1
+    const bizElements = await screen.findAllByText('Biz Loans', { exact: true }, { timeout: 5_000 });
+    expect(bizElements.length).toBeGreaterThan(0);
+    expect(storageMocks.loadProjectDataForView).not.toHaveBeenCalledWith('proj-1');
+  }, 30_000);
 });

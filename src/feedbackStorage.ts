@@ -11,7 +11,12 @@ import {
 import { signInAnonymously } from 'firebase/auth';
 import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { auth, db, storage } from './firebase';
-import { clearListenerError, markListenerError, markListenerSnapshot } from './cloudSyncStatus';
+import {
+  clearListenerError,
+  CLOUD_SYNC_CHANNELS,
+  markListenerError,
+  markListenerSnapshot,
+} from './cloudSyncStatus';
 import { FEEDBACK_MAX_ATTACHMENTS } from './feedbackConstants';
 import type { FeedbackEntry } from './types';
 import { loadFromIDB, saveToIDB, saveToLS } from './projectStorage';
@@ -75,10 +80,14 @@ export async function loadFeedbackFromIDB(): Promise<FeedbackEntry[] | null> {
 }
 
 async function persistFeedbackCache(items: FeedbackEntry[]) {
-  await saveToIDB(IDB_FEEDBACK_KEY, {
-    items,
-    updatedAt: new Date().toISOString(),
-  });
+  try {
+    await saveToIDB(IDB_FEEDBACK_KEY, {
+      items,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch {
+    /* feedback cache is best-effort */
+  }
   try {
     saveToLS(LS_FEEDBACK_META_KEY, { count: items.length, updatedAt: new Date().toISOString() });
   } catch {
@@ -94,18 +103,18 @@ export function subscribeFeedback(onItems: (items: FeedbackEntry[]) => void): ()
   const unsub = onSnapshot(
     q,
     (snap) => {
-      markListenerSnapshot('feedback', snap);
+      markListenerSnapshot(CLOUD_SYNC_CHANNELS.feedback, snap);
       const items: FeedbackEntry[] = snap.docs.map((d) => mapDoc(d.id, d.data() as Record<string, unknown>));
       void persistFeedbackCache(items);
       onItems(items);
     },
     (err) => {
-      markListenerError('feedback');
+      markListenerError(CLOUD_SYNC_CHANNELS.feedback);
       console.warn('Feedback snapshot error:', err);
     },
   );
   return () => {
-    clearListenerError('feedback');
+    clearListenerError(CLOUD_SYNC_CHANNELS.feedback);
     unsub();
   };
 }

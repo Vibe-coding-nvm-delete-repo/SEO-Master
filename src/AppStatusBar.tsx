@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays,
   Clock,
   Cloud,
   CloudOff,
   Globe2,
+  History,
   Loader2,
   MapPinOff,
   RefreshCw,
@@ -25,6 +26,7 @@ import { getWeatherIconAccentClass, getWeatherIconComponent } from './weatherIco
 import { buildWeatherInsights, type HourlyWeatherPoint } from './weatherInsights';
 import { celsiusFromDisplay, getTemperatureHueClass } from './weatherTempStyles';
 import { shouldUseFahrenheit } from './weatherUnits';
+import { subscribeBuildName, subscribeChangelog, type ChangelogEntry } from './changelogStorage';
 
 /** US Eastern — handles EST/EDT automatically. */
 const EASTERN_TZ = 'America/New_York';
@@ -43,6 +45,7 @@ type OpenMeteoDaily = {
   weathercode: number[];
   temperature_2m_max: number[];
   temperature_2m_min: number[];
+  precipitation_probability_max?: number[];
 };
 
 type OpenMeteoHourly = {
@@ -113,10 +116,12 @@ export default function AppStatusBar({ activeProjectId }: Props) {
   const [browserOnline, setBrowserOnline] = useState(
     typeof navigator !== 'undefined' ? navigator.onLine : true,
   );
-  const [, bump] = useState(0);
+  const [cloudSnap, setCloudSnap] = useState(() => getCloudSyncSnapshot());
 
   useEffect(() => {
-    const unsub = subscribeCloudSync(() => bump((n) => n + 1));
+    const unsub = subscribeCloudSync(() => {
+      setCloudSnap(getCloudSyncSnapshot());
+    });
     return () => {
       unsub();
     };
@@ -127,6 +132,8 @@ export default function AppStatusBar({ activeProjectId }: Props) {
     kind: 'loading',
     phase: 'locating',
   });
+  const [currentBuildName, setCurrentBuildName] = useState('');
+  const [latestChangelogEntry, setLatestChangelogEntry] = useState<ChangelogEntry | null>(null);
   const weatherMountedRef = useRef(true);
   const weatherRefreshBusyRef = useRef(false);
   const [weatherRefreshBusy, setWeatherRefreshBusy] = useState(false);
@@ -169,7 +176,10 @@ export default function AppStatusBar({ activeProjectId }: Props) {
       weatherUrl.searchParams.set('longitude', String(longitude));
       weatherUrl.searchParams.set('current_weather', 'true');
       weatherUrl.searchParams.set('temperature_unit', useF ? 'fahrenheit' : 'celsius');
-      weatherUrl.searchParams.set('daily', 'weathercode,temperature_2m_max,temperature_2m_min');
+      weatherUrl.searchParams.set(
+        'daily',
+        'weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+      );
       weatherUrl.searchParams.set('hourly', 'weathercode,precipitation_probability');
       weatherUrl.searchParams.set('forecast_days', '7');
       weatherUrl.searchParams.set('forecast_hours', '24');
@@ -208,6 +218,7 @@ export default function AppStatusBar({ activeProjectId }: Props) {
           const max = daily.temperature_2m_max[i];
           const min = daily.temperature_2m_min[i];
           const wc = daily.weathercode[i];
+          const precipitationProbabilityMax = daily.precipitation_probability_max?.[i];
           if (
             typeof dateIso !== 'string' ||
             typeof max !== 'number' ||
@@ -232,6 +243,11 @@ export default function AppStatusBar({ activeProjectId }: Props) {
             maxDisplay: max,
             minDisplay: min,
             avgC,
+            precipitationProbabilityMax:
+              typeof precipitationProbabilityMax === 'number' &&
+              Number.isFinite(precipitationProbabilityMax)
+                ? precipitationProbabilityMax
+                : null,
           });
         }
       }
@@ -312,39 +328,92 @@ export default function AppStatusBar({ activeProjectId }: Props) {
     };
   }, []);
 
-  const cloudSnap = getCloudSyncSnapshot();
-  const { label, tone } = deriveCloudStatusLine(
+  useEffect(() => {
+    const unsub = subscribeBuildName(setCurrentBuildName);
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const unsub = subscribeChangelog((entries) => {
+      setLatestChangelogEntry(entries[0] ?? null);
+    });
+    return unsub;
+  }, []);
+
+  const rawPrimaryCloudBusy = activeProjectId
+    ? cloudSnap.project.flushDepth > 0 || cloudSnap.project.cloudWritePendingCount > 0
+    : cloudSnap.shared.cloudWritePendingCount > 0;
+  const [smoothPrimaryCloudBusy, setSmoothPrimaryCloudBusy] = useState(rawPrimaryCloudBusy);
+
+  useLayoutEffect(() => {
+    if (rawPrimaryCloudBusy) setSmoothPrimaryCloudBusy(true);
+  }, [rawPrimaryCloudBusy]);
+
+  useEffect(() => {
+    if (rawPrimaryCloudBusy) return undefined;
+    const id = window.setTimeout(() => setSmoothPrimaryCloudBusy(false), 600);
+    return () => window.clearTimeout(id);
+  }, [rawPrimaryCloudBusy]);
+
+  const { label, tone, detail } = deriveCloudStatusLine(
     browserOnline,
     cloudSnap,
     Boolean(activeProjectId),
+    { primaryPipelineAppearsBusy: smoothPrimaryCloudBusy },
   );
 
   const { dateLabel, localLine, easternLine } = useMemo(() => formatStatusBarNow(now), [now]);
 
-  const listenerErrKey = cloudSnap.listenerErrors.join('|');
   const cloudTooltip = useMemo(() => {
-    const snap = getCloudSyncSnapshot();
     return (
       <CloudStatusTooltipBody
         browserOnline={browserOnline}
-        snap={snap}
+        snap={cloudSnap}
         hasActiveProject={Boolean(activeProjectId)}
         activeProjectId={activeProjectId}
         statusLabel={label}
+        statusDetail={detail}
         tone={tone}
       />
     );
-  }, [
-    browserOnline,
-    cloudSnap.serverReachable,
-    cloudSnap.listenerErrorCount,
-    listenerErrKey,
-    cloudSnap.projectFlushDepth,
-    cloudSnap.projectDataWriteFailed,
-    activeProjectId,
-    label,
-    tone,
-  ]);
+  }, [browserOnline, cloudSnap, activeProjectId, label, detail, tone]);
+
+  const buildTooltip = useMemo(() => {
+    const latest = latestChangelogEntry;
+    return (
+      <div className="w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-zinc-200 bg-white p-3 shadow-lg">
+        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-400">
+          <History className="h-3 w-3 shrink-0 text-zinc-400" aria-hidden strokeWidth={2} />
+          Build Info
+        </div>
+        <div className="mt-2 text-sm font-semibold text-zinc-900">
+          {currentBuildName || 'No build name set'}
+        </div>
+        {latest ? (
+          <div className="mt-2 space-y-1.5 text-xs text-zinc-600">
+            <div>
+              <span className="font-medium text-zinc-700">Latest update:</span> {latest.summary}
+            </div>
+            <div>
+              <span className="font-medium text-zinc-700">When:</span>{' '}
+              {new Date(latest.timestamp).toLocaleString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+              })}
+            </div>
+            <div>
+              <span className="font-medium text-zinc-700">Changes:</span> {latest.changes.length}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 text-xs text-zinc-500">No changelog entries available yet.</div>
+        )}
+      </div>
+    );
+  }, [currentBuildName, latestChangelogEntry]);
 
   const dotClass =
     tone === 'emerald'
@@ -359,10 +428,11 @@ export default function AppStatusBar({ activeProjectId }: Props) {
     <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between text-[10px] text-zinc-500 mb-1 pb-1 border-b border-zinc-200/60">
       <InlineHelpHint
         tooltipContent={cloudTooltip}
-        ariaLabel={`${label}. Hover, focus, or tap for connection details.`}
+        ariaLabel={`${label}${detail ? ` ${detail}` : ''}. Hover, focus, or tap for connection details.`}
         triggerRole="group"
         tooltipGap={4}
         tooltipClassName={CLOUD_STATUS_TOOLTIP_PANEL_CLASS}
+        data-testid="cloud-status-chip"
         className="inline-flex min-w-0 max-w-full cursor-help rounded-md border border-zinc-200 bg-white px-2 py-1 shadow-sm"
       >
         <div className="flex items-start gap-1.5 min-w-0">
@@ -377,11 +447,27 @@ export default function AppStatusBar({ activeProjectId }: Props) {
             </span>
             <span className="text-[10px] font-semibold leading-tight text-zinc-800 tracking-tight">
               {label}
+              {detail ? (
+                <span className="font-medium text-zinc-500"> {detail}</span>
+              ) : null}
             </span>
           </div>
         </div>
       </InlineHelpHint>
       <div className="flex flex-wrap items-center sm:justify-end gap-x-2 gap-y-0.5 text-zinc-400 tabular-nums">
+        <InlineHelpHint
+          tooltipContent={buildTooltip}
+          ariaLabel={currentBuildName ? `Current build ${currentBuildName}` : 'Current build not set'}
+          triggerRole="group"
+          tooltipGap={4}
+          data-testid="build-chip"
+          className="inline-flex min-w-0 max-w-[min(100vw-2rem,18rem)] cursor-help rounded-md border border-zinc-200 bg-white px-2 py-1 shadow-sm"
+        >
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-zinc-500">
+            <History className={ROW_ICON} aria-hidden strokeWidth={2} />
+            <span className="truncate font-medium">{currentBuildName || 'Build unset'}</span>
+          </span>
+        </InlineHelpHint>
         <span className="inline-flex items-center gap-1.5 text-zinc-500">
           <CalendarDays className={ROW_ICON} aria-hidden strokeWidth={2} />
           {dateLabel}

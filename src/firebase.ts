@@ -17,9 +17,21 @@ import { resolveFirestoreDatabaseId, WORKSPACE_FIRESTORE_DATABASE_ID } from './f
 // Import the Firebase configuration
 import firebaseConfig from '../firebase-applet-config.json';
 
+type ViteEnvLike = Record<string, string | boolean | undefined>;
+
+const viteEnv = (
+  typeof import.meta === 'object' &&
+  import.meta !== null &&
+  'env' in import.meta
+    ? (import.meta as ImportMeta & { env?: ViteEnvLike }).env
+    : undefined
+) ?? undefined;
+
 // Initialize Firebase SDK
 const app = initializeApp(firebaseConfig);
-const rawFirestoreDbId = (import.meta.env.VITE_FIRESTORE_DATABASE_ID as string | undefined)?.trim();
+const rawFirestoreDbId = typeof viteEnv?.VITE_FIRESTORE_DATABASE_ID === 'string'
+  ? viteEnv.VITE_FIRESTORE_DATABASE_ID.trim()
+  : undefined;
 const firestoreDbId = resolveFirestoreDatabaseId(rawFirestoreDbId);
 
 if (rawFirestoreDbId && rawFirestoreDbId !== WORKSPACE_FIRESTORE_DATABASE_ID) {
@@ -35,7 +47,9 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
 // Optional: set VITE_FIREBASE_APPCHECK_SITE_KEY + enable App Check in Firebase Console for extra abuse resistance.
-const appCheckKey = import.meta.env.VITE_FIREBASE_APPCHECK_SITE_KEY as string | undefined;
+const appCheckKey = typeof viteEnv?.VITE_FIREBASE_APPCHECK_SITE_KEY === 'string'
+  ? viteEnv.VITE_FIREBASE_APPCHECK_SITE_KEY
+  : undefined;
 if (typeof window !== 'undefined' && appCheckKey) {
   initializeAppCheck(app, {
     provider: new ReCaptchaV3Provider(appCheckKey),

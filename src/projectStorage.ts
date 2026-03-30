@@ -1,11 +1,26 @@
 import { db } from './firebase';
 import { collection, deleteDoc, doc, getDocFromServer, getDocs, getDocsFromServer, setDoc, writeBatch } from 'firebase/firestore';
+import {
+  recordLocalPersistError,
+  recordLocalPersistOk,
+  recordLocalPersistStart,
+  recordSharedCloudWriteError,
+  recordSharedCloudWriteOk,
+  recordSharedCloudWriteStart,
+} from './cloudSyncStatus';
+import {
+  deleteQaLocalCache,
+  isContentPipelineQaMode,
+  loadQaLocalCache,
+  saveQaLocalCache,
+} from './qa/contentPipelineQaRuntime';
 import type {
   ActivityLogEntry,
   AutoMergeRecommendation,
   AutoGroupSuggestion,
   BlockedKeyword,
   ClusterSummary,
+  GroupMergeRecommendation,
   GroupedCluster,
   LabelSection,
   ProcessedRow,
@@ -41,11 +56,6 @@ export function sanitizeJsonForFirestore<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-interface GroupCollections {
-  groupedClusters: GroupedCluster[] | null | undefined;
-  approvedGroups: GroupedCluster[] | null | undefined;
-}
-
 export interface ProjectDataPayload {
   results: ProcessedRow[] | null;
   clusterSummary: ClusterSummary[] | null;
@@ -61,6 +71,7 @@ export interface ProjectDataPayload {
   tokenMergeRules: TokenMergeRule[];
   autoGroupSuggestions: AutoGroupSuggestion[];
   autoMergeRecommendations?: AutoMergeRecommendation[];
+  groupMergeRecommendations?: GroupMergeRecommendation[];
   updatedAt: string;
   /** Incrementing save counter — persisted so that on reload we can reject stale
    *  Firestore snapshots that predate the IDB data (prevents data loss on refresh). */
@@ -72,250 +83,82 @@ export interface AppPrefs {
   savedClusters: any[];
 }
 
-/** Total rows that represent uploaded CSV / cluster table data (not grouped-only). */
-function dataRowMass(p: ProjectDataPayload): number {
-  return (p.results?.length ?? 0) + (p.clusterSummary?.length ?? 0);
+export interface LoadProjectsBootstrapResult {
+  projects: Project[];
+  source: 'firestore' | 'local-cache' | 'empty';
 }
 
-function groupMass(p: ProjectDataPayload): number {
-  return (p.groupedClusters?.length ?? 0) + (p.approvedGroups?.length ?? 0);
+/** Any meaningful data present (rows, clusters, groups, approved)? */
+function hasAnyData(p: ProjectDataPayload): boolean {
+  return (
+    (p.results?.length ?? 0) > 0 ||
+    (p.clusterSummary?.length ?? 0) > 0 ||
+    (p.groupedClusters?.length ?? 0) > 0 ||
+    (p.approvedGroups?.length ?? 0) > 0
+  );
 }
 
-/** Count pages sitting in grouped + approved collections. */
-export function countGroupedPages(input: GroupCollections): number {
-  let n = 0;
-  for (const g of input.groupedClusters || []) n += g.clusters?.length ?? 0;
-  for (const g of input.approvedGroups || []) n += g.clusters?.length ?? 0;
-  return n;
-}
+import {
+  buildProjectDataPayloadFromChunkDocs,
+  countGroupedPages,
+  groupedPageMass,
+} from './projectChunkPayload';
 
-/** Pages sitting in grouped + approved (the number users care about on refresh). */
-export function groupedPageMass(p: ProjectDataPayload): number {
-  return countGroupedPages(p);
-}
+export { buildProjectDataPayloadFromChunkDocs, countGroupedPages, groupedPageMass };
 
 /**
  * Merge IDB (first arg) vs Firestore (second arg).
  * Primary: monotonic lastSaveId, then updatedAt.
  * Tie: prefer Firestore — it is the shared source of truth once written.
- * Safety: IDB can have a higher lastSaveId but zero rows (raced/corrupt cache) while Firestore
- * still holds the last good CSV; legacy FS payloads may omit lastSaveId (0). Prefer the side
- * that actually has rows in those cases.
+ *
+ * Safety: When one side has `lastSaveId = 0` (legacy data written before
+ * saveId was introduced), trust the side that has actual CSV rows — the
+ * other side is likely an empty/corrupt cache.
+ *
+ * IMPORTANT: When both sides have a valid saveId (> 0), the higher saveId
+ * ALWAYS wins.  Every `mutateAndSave` call increments saveId atomically
+ * before IDB checkpoint, so a higher id means newer *regardless* of whether
+ * group count or row count decreased (the user may have intentionally
+ * ungrouped or unblocked).  Never override saveId with heuristics about
+ * data "mass" — that caused data loss when ungroup reduced group count and
+ * the stale Firestore side was chosen because it had "more groups."
  */
 export function pickNewerProjectPayload(idb: ProjectDataPayload, fs: ProjectDataPayload): ProjectDataPayload {
   const idI = idb.lastSaveId ?? 0;
   const idF = fs.lastSaveId ?? 0;
-  const mI = dataRowMass(idb);
-  const mF = dataRowMass(fs);
 
-  // Higher local saveId but empty table vs server with rows (failed FS after bad IDB write, or legacy meta without saveId)
-  if (idI > idF && mI === 0 && mF > 0) {
-    if (idF === 0) return fs;
-    if (idI - idF > 5) return fs;
-  }
-  if (idF > idI && mF === 0 && mI > 0) {
-    if (idI === 0) return idb;
-    if (idF - idI > 5) return idb;
-  }
-
-  const gI = groupMass(idb);
-  const gF = groupMass(fs);
-  // Same class of bug as CSV: IDB can have a higher saveId but fewer groups (raced writes)
-  // while Firestore still holds the last committed grouped chunks.
-  if (idI > idF && gI < gF && gF > 0) {
-    if (idF === 0) return fs;
-    if (idI - idF > 5) return fs;
-  }
-  if (idF > idI && gF < gI && gI > 0) {
-    if (idI === 0) return idb;
-    if (idF - idI > 5) return idb;
-  }
-
-  // ── Grouped PAGE mass (clusters inside groups) — fixes 350 → 30 on refresh ──
-  // IDB can have lastSaveId = N+1 with a corrupt/partial write (few pages) while
-  // Firestore still has N with the full grouped set. lastSaveId-only merge picks IDB → loss.
-  // When saveIds are within 2, prefer whoever has more pages in grouped+approved.
-  const pI = groupedPageMass(idb);
-  const pF = groupedPageMass(fs);
-  const idGap = Math.abs(idI - idF);
-  if (idGap <= 2) {
-    if (pI > pF) return idb;
-    if (pF > pI) return fs;
+  // Legacy / missing saveId: one side is 0, the other has data — trust the one with data.
+  if (idI === 0 && idF === 0) {
+    // Neither has saveId — fall through to timestamp comparison.
+  } else if (idI === 0 && idF > 0) {
+    // IDB is legacy (no saveId). Trust Firestore if it has data; otherwise IDB.
+    return hasAnyData(fs) ? fs : idb;
+  } else if (idF === 0 && idI > 0) {
+    // Firestore is legacy (no saveId). Trust IDB if it has data; otherwise Firestore.
+    return hasAnyData(idb) ? idb : fs;
+  } else {
+    // Both have valid saveId — higher wins, UNLESS the higher side is completely
+    // empty while the lower side has real data. A totally empty payload with a
+    // high saveId is a corruption artifact from a clearProject race condition,
+    // not an intentional user action. Prefer the side with data.
+    if (idI > idF) {
+      if (!hasAnyData(idb) && hasAnyData(fs)) return fs;
+      return idb;
+    }
+    if (idF > idI) {
+      if (!hasAnyData(fs) && hasAnyData(idb)) return idb;
+      return fs;
+    }
   }
 
-  if (idF > idI) return fs;
-  if (idI > idF) return idb;
+  // Tie (same saveId or both 0): prefer Firestore as shared source of truth,
+  // but check timestamps first.
   const tI = Date.parse(idb.updatedAt || '0');
   const tF = Date.parse(fs.updatedAt || '0');
   if (tF > tI) return fs;
   if (tI > tF) return idb;
-  return fs; // tie: prefer Firestore
+  return fs; // absolute tie: prefer Firestore
 }
-
-export const buildProjectDataPayloadFromChunkDocs = (
-  docs: Array<{ data: () => any }>
-): ProjectDataPayload | null => {
-  let meta: any = null;
-  const resultChunks: { index: number; data: ProcessedRow[] }[] = [];
-  const clusterChunks: { index: number; data: ClusterSummary[] }[] = [];
-  const blockedChunks: { index: number; data: BlockedKeyword[] }[] = [];
-  const suggestionChunks: { index: number; data: AutoGroupSuggestion[] }[] = [];
-  const autoMergeChunks: { index: number; data: AutoMergeRecommendation[] }[] = [];
-  // grouped/approved chunk docs can briefly lag behind `chunks/meta` updates during
-  // multi-batch writes. We include `saveId` so we can detect and ignore those snapshots.
-  const groupedChunks: { index: number; data: GroupedCluster[]; saveId: unknown }[] = [];
-  const approvedChunks: { index: number; data: GroupedCluster[]; saveId: unknown }[] = [];
-
-  docs.forEach((docSnap) => {
-    const chunk = docSnap.data();
-    if (chunk.type === 'meta') meta = chunk;
-    else if (chunk.type === 'results') resultChunks.push({ index: chunk.index, data: chunk.data });
-    else if (chunk.type === 'clusters') clusterChunks.push({ index: chunk.index, data: chunk.data });
-    else if (chunk.type === 'blocked') blockedChunks.push({ index: chunk.index, data: chunk.data });
-    else if (chunk.type === 'suggestions') suggestionChunks.push({ index: chunk.index, data: chunk.data });
-    else if (chunk.type === 'auto_merge') autoMergeChunks.push({ index: chunk.index, data: chunk.data });
-    else if (chunk.type === 'grouped')
-      groupedChunks.push({ index: chunk.index, data: chunk.data, saveId: chunk.saveId ?? null });
-    else if (chunk.type === 'approved')
-      approvedChunks.push({ index: chunk.index, data: chunk.data, saveId: chunk.saveId ?? null });
-  });
-
-  if (!meta) return null;
-
-  // If `meta.saveId` is set, require grouped/approved chunk docs in the snapshot
-  // to match that same saveId. This prevents temporary shrink when `meta` updates
-  // before the corresponding chunk doc contents are written.
-  const metaSaveId = meta.saveId ?? null;
-  if (metaSaveId != null) {
-    if (groupedChunks.length > 0 && groupedChunks.some((c) => c.saveId !== metaSaveId)) return null;
-    if (approvedChunks.length > 0 && approvedChunks.some((c) => c.saveId !== metaSaveId)) return null;
-  }
-
-  // Chunked fields are written across multiple Firestore batches; `meta` is last. A snapshot can
-  // briefly include new chunk docs while `meta` still reflects the *previous* save. Using only
-  // meta.*ChunkCount would then filter OUT new chunks (index >= stale count) and shrink state
-  // (e.g. grouped pages dropping from 100 → 20). Conversely, meta can update before all chunk
-  // docs are visible — treat as incomplete and return null so the listener does not apply.
-  const impliedChunkSpan = (chunks: { index: number }[]) =>
-    chunks.length === 0 ? 0 : Math.max(...chunks.map((c) => c.index)) + 1;
-
-  const resultSpan = impliedChunkSpan(resultChunks);
-  const clusterSpan = impliedChunkSpan(clusterChunks);
-  const blockedSpan = impliedChunkSpan(blockedChunks);
-  const suggestionSpan = impliedChunkSpan(suggestionChunks);
-  const autoMergeSpan = impliedChunkSpan(autoMergeChunks);
-  const groupedSpan = impliedChunkSpan(groupedChunks);
-  const approvedSpan = impliedChunkSpan(approvedChunks);
-
-  const resultCountMeta = meta.resultChunkCount ?? resultSpan;
-  const clusterCountMeta = meta.clusterChunkCount ?? clusterSpan;
-  const blockedCountMeta = meta.blockedChunkCount ?? blockedSpan;
-  const suggestionCountMeta = meta.suggestionChunkCount ?? suggestionSpan;
-  const autoMergeCountMeta = meta.autoMergeChunkCount ?? autoMergeSpan;
-  const groupedCountMeta = meta.groupedClusterCount ?? groupedSpan;
-  const approvedCountMeta = meta.approvedGroupCount ?? approvedSpan;
-
-  if (resultChunks.length > 0 && resultSpan < resultCountMeta) return null;
-  if (clusterChunks.length > 0 && clusterSpan < clusterCountMeta) return null;
-  if (blockedChunks.length > 0 && blockedSpan < blockedCountMeta) return null;
-  if (suggestionChunks.length > 0 && suggestionSpan < suggestionCountMeta) return null;
-  if (autoMergeChunks.length > 0 && autoMergeSpan < autoMergeCountMeta) return null;
-  if (groupedChunks.length > 0 && groupedSpan < groupedCountMeta) return null;
-  if (approvedChunks.length > 0 && approvedSpan < approvedCountMeta) return null;
-
-  // Auto-merge recommendations are chunked as well; if meta expects chunks but none
-  // are visible yet, treat as an incomplete snapshot (same safety pattern as grouped/approved).
-  if (autoMergeChunks.length === 0 && autoMergeCountMeta > 0) {
-    return null;
-  }
-
-  // New scheme: grouped/approved live only in chunk docs — if meta expects chunks but none yet, wait.
-  if (
-    groupedChunks.length === 0 &&
-    groupedCountMeta > 0 &&
-    !(Array.isArray(meta.groupedClusters) && meta.groupedClusters.length > 0)
-  ) {
-    return null;
-  }
-  if (
-    approvedChunks.length === 0 &&
-    approvedCountMeta > 0 &&
-    !(Array.isArray(meta.approvedGroups) && meta.approvedGroups.length > 0)
-  ) {
-    return null;
-  }
-
-  const resultCount = Math.max(resultCountMeta, resultSpan);
-  const clusterCount = Math.max(clusterCountMeta, clusterSpan);
-  const blockedCount = Math.max(blockedCountMeta, blockedSpan);
-  const suggestionCount = Math.max(suggestionCountMeta, suggestionSpan);
-  const autoMergeCount = Math.max(autoMergeCountMeta, autoMergeSpan);
-  const groupedCount = Math.max(groupedCountMeta, groupedSpan);
-  const approvedCount = Math.max(approvedCountMeta, approvedSpan);
-
-  const results = resultChunks
-    .filter((chunk) => chunk.index < resultCount)
-    .sort((a, b) => a.index - b.index)
-    .flatMap((chunk) => chunk.data);
-  const clusterSummary = clusterChunks
-    .filter((chunk) => chunk.index < clusterCount)
-    .sort((a, b) => a.index - b.index)
-    .flatMap((chunk) => chunk.data);
-  const blockedKeywords = blockedChunks
-    .filter((chunk) => chunk.index < blockedCount)
-    .sort((a, b) => a.index - b.index)
-    .flatMap((chunk) => chunk.data);
-  const autoGroupSuggestions = suggestionChunks
-    .filter((chunk) => chunk.index < suggestionCount)
-    .sort((a, b) => a.index - b.index)
-    .flatMap((chunk) => chunk.data);
-  const autoMergeRecommendations = autoMergeChunks
-    .filter((chunk) => chunk.index < autoMergeCount)
-    .sort((a, b) => a.index - b.index)
-    .flatMap((chunk) => chunk.data);
-
-  const groupedClusters = groupedChunks.length > 0
-    ? groupedChunks
-      .filter((chunk) => chunk.index < groupedCount)
-      .sort((a, b) => a.index - b.index)
-      .flatMap((chunk) => chunk.data)
-    : meta.groupedClusters || [];
-
-  const approvedGroups = approvedChunks.length > 0
-    ? approvedChunks
-      .filter((chunk) => chunk.index < approvedCount)
-      .sort((a, b) => a.index - b.index)
-      .flatMap((chunk) => chunk.data)
-    : meta.approvedGroups || [];
-
-  const lastSaveId =
-    typeof metaSaveId === 'number' && Number.isFinite(metaSaveId)
-      ? metaSaveId
-      : metaSaveId != null && typeof metaSaveId === 'string' && /^\d+$/.test(metaSaveId)
-        ? Number(metaSaveId)
-        : undefined;
-
-  return {
-    // Preserve explicit empty arrays when chunk counts are zero so grouped/approved-only
-    // projects still hydrate instead of being treated as an empty workspace.
-    results: resultCount > 0 ? results : [],
-    clusterSummary: clusterCount > 0 ? clusterSummary : [],
-    tokenSummary: meta.tokenSummary || null,
-    groupedClusters,
-    approvedGroups,
-    stats: meta.stats || null,
-    datasetStats: meta.datasetStats || null,
-    blockedTokens: meta.blockedTokens || [],
-    blockedKeywords,
-    labelSections: meta.labelSections || [],
-    activityLog: meta.activityLog || [],
-    tokenMergeRules: meta.tokenMergeRules || [],
-    autoGroupSuggestions,
-    autoMergeRecommendations,
-    updatedAt: meta.updatedAt || new Date().toISOString(),
-    lastSaveId,
-  };
-};
 
 export const loadFromLS = <T,>(key: string, fallback: T): T => {
   try {
@@ -325,6 +168,17 @@ export const loadFromLS = <T,>(key: string, fallback: T): T => {
     return fallback;
   }
 };
+
+function loadProjectsFromLocalCache(): Project[] {
+  try {
+    const cached = localStorage.getItem(LS_PROJECTS_KEY);
+    if (!cached) return [];
+    const projects = JSON.parse(cached) as Project[];
+    return Array.isArray(projects) ? projects : [];
+  } catch {
+    return [];
+  }
+}
 
 export const saveToLS = (key: string, data: unknown) => {
   try {
@@ -351,6 +205,10 @@ const openIDB = (): Promise<IDBDatabase> => {
 export const saveToIDB = async (projectId: string, data: unknown) => {
   try {
     const cleanData = JSON.parse(JSON.stringify(data));
+    if (isContentPipelineQaMode()) {
+      await saveQaLocalCache(projectId, cleanData);
+      return;
+    }
     const record = { projectId, ...cleanData };
     const dbInstance = await openIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
@@ -364,11 +222,15 @@ export const saveToIDB = async (projectId: string, data: unknown) => {
     dbInstance.close();
   } catch (error) {
     console.error('IndexedDB save error:', error);
+    throw error;
   }
 };
 
 export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
   try {
+    if (isContentPipelineQaMode()) {
+      return loadQaLocalCache<T>(projectId);
+    }
     const dbInstance = await openIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readonly');
     const request = tx.objectStore(IDB_STORE).get(projectId);
@@ -390,6 +252,10 @@ export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
 
 export const deleteFromIDB = async (projectId: string) => {
   try {
+    if (isContentPipelineQaMode()) {
+      await deleteQaLocalCache(projectId);
+      return;
+    }
     const dbInstance = await openIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).delete(projectId);
@@ -437,19 +303,29 @@ export function projectFromFirestoreData(id: string, data: Record<string, unknow
 export async function saveProjectFoldersToFirestore(folders: ProjectFolder[]): Promise<void> {
   const clean = sanitizeJsonForFirestore(folders);
   const updatedAt = new Date().toISOString();
-  await setDoc(doc(db, APP_SETTINGS_COLLECTION, PROJECT_FOLDERS_FS_DOC), {
-    folders: clean,
-    updatedAt,
-  });
+  recordLocalPersistStart();
+  try {
+    await saveToIDB('__project_folders__', { folders: clean, updatedAt });
+    recordLocalPersistOk();
+  } catch (error) {
+    recordLocalPersistError();
+    throw error;
+  }
   try {
     localStorage.setItem(LS_PROJECT_FOLDERS_KEY, JSON.stringify(clean));
   } catch {
     /* ignore */
   }
+  recordSharedCloudWriteStart();
   try {
-    await saveToIDB('__project_folders__', { folders: clean, updatedAt });
-  } catch {
-    /* ignore */
+    await setDoc(doc(db, APP_SETTINGS_COLLECTION, PROJECT_FOLDERS_FS_DOC), {
+      folders: clean,
+      updatedAt,
+    });
+    recordSharedCloudWriteOk();
+  } catch (error) {
+    recordSharedCloudWriteError();
+    throw error;
   }
 }
 
@@ -491,11 +367,6 @@ export async function reviveProjectInFirestore(project: Project): Promise<void> 
 }
 
 export const saveProjectToFirestore = async (project: Project) => {
-  try {
-    await setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), projectMetaForFirestore(project));
-  } catch (error) {
-    console.warn('Firestore save error (project metadata):', error);
-  }
   // Also update localStorage cache so projects survive quota errors
   try {
     const cached = localStorage.getItem(LS_PROJECTS_KEY);
@@ -506,6 +377,15 @@ export const saveProjectToFirestore = async (project: Project) => {
     localStorage.setItem(LS_PROJECTS_KEY, JSON.stringify(projects));
   } catch {
     // Ignore localStorage write failures (quota/private mode).
+  }
+  recordSharedCloudWriteStart();
+  try {
+    await setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), projectMetaForFirestore(project));
+    recordSharedCloudWriteOk();
+  } catch (error) {
+    recordSharedCloudWriteError();
+    console.warn('Firestore save error (project metadata):', error);
+    throw error;
   }
 };
 
@@ -574,9 +454,10 @@ export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
       request.onsuccess = () => {
         dbInstance.close();
         if (request.result) {
+          const wrapped = request.result.value ?? request.result;
           resolve({
-            activeProjectId: request.result.activeProjectId || null,
-            savedClusters: request.result.savedClusters || [],
+            activeProjectId: wrapped.activeProjectId || null,
+            savedClusters: wrapped.savedClusters || [],
           });
           return;
         }
@@ -635,6 +516,11 @@ export const saveProjectDataToFirestore = async (
     for (let i = 0; i < autoMergeRecommendations.length; i += CHUNK_SIZE) {
       autoMergeChunks.push(autoMergeRecommendations.slice(i, i + CHUNK_SIZE));
     }
+    const groupMergeRecommendations = dataClean.groupMergeRecommendations || [];
+    const groupMergeChunks: GroupMergeRecommendation[][] = [];
+    for (let i = 0; i < groupMergeRecommendations.length; i += CHUNK_SIZE) {
+      groupMergeChunks.push(groupMergeRecommendations.slice(i, i + CHUNK_SIZE));
+    }
 
     // groupedClusters / approvedGroups are stored chunked to avoid Firestore's 1MB doc limit.
     // (Previously they lived inside `chunks/meta`, which breaks for large group sizes.)
@@ -669,6 +555,7 @@ export const saveProjectDataToFirestore = async (
     blockedChunks.forEach((chunk, idx) => addToBatch(`blocked_${idx}`, { type: 'blocked', index: idx, data: chunk }));
     suggestionChunks.forEach((chunk, idx) => addToBatch(`suggestions_${idx}`, { type: 'suggestions', index: idx, data: chunk }));
     autoMergeChunks.forEach((chunk, idx) => addToBatch(`auto_merge_${idx}`, { type: 'auto_merge', index: idx, data: chunk }));
+    groupMergeChunks.forEach((chunk, idx) => addToBatch(`group_merge_${idx}`, { type: 'group_merge', index: idx, data: chunk }));
     approvedChunks.forEach((chunk, idx) =>
       addToBatch(`approved_${idx}`, {
         type: 'approved',
@@ -704,63 +591,71 @@ export const saveProjectDataToFirestore = async (
       blockedChunkCount: blockedChunks.length,
       suggestionChunkCount: suggestionChunks.length,
       autoMergeChunkCount: autoMergeChunks.length,
+      groupMergeChunkCount: groupMergeChunks.length,
     });
 
     if (ops > 0) writeBatches.push(batch.commit());
     await Promise.all(writeBatches);
 
-    // Clean up stale chunks (runs after writes complete, non-blocking for the caller)
-    const existingChunks = await existingChunksPromise;
-    if (existingChunks && !existingChunks.empty) {
-      // Prevent cross-writer destructive cleanup:
-      // Only delete stale chunks if the project's current meta.saveId still matches
-      // the saveId for this save request.
-      if (options?.saveId != null) {
-        try {
-          const metaSnap = await getDocFromServer(
-            doc(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION, 'meta'),
-          );
-          const remoteSaveId = metaSnap.exists() ? (metaSnap.data() as any)?.saveId : null;
-          if (remoteSaveId !== options.saveId) {
-            options?.onSyncStatus?.('synced');
+    // Signal success immediately — writes are durable. Stale-chunk cleanup below
+    // is best-effort and must never block the caller or delay the sync status.
+    options?.onSyncStatus?.('synced');
+
+    // Clean up stale chunks (fire-and-forget — never blocks the save promise).
+    // We still await internally so errors are caught, but wrap in a void IIFE
+    // so the caller's await resolves as soon as the writes above land.
+    void (async () => {
+      try {
+        const existingChunks = await existingChunksPromise;
+        if (!existingChunks || existingChunks.empty) return;
+
+        // Prevent cross-writer destructive cleanup:
+        // Only delete stale chunks if the project's current meta.saveId still matches
+        // the saveId for this save request.
+        if (options?.saveId != null) {
+          try {
+            const metaSnap = await getDocFromServer(
+              doc(db, FIRESTORE_PROJECTS_COLLECTION, projectId, CHUNKS_SUBCOLLECTION, 'meta'),
+            );
+            const remoteSaveId = metaSnap.exists() ? (metaSnap.data() as any)?.saveId : null;
+            if (remoteSaveId !== options.saveId) return;
+          } catch {
+            // If we cannot verify, keep existing chunks instead of risking deletion.
             return;
           }
-        } catch {
-          // If we cannot verify, keep existing chunks instead of risking deletion.
-          options?.onSyncStatus?.('synced');
-          return;
         }
+
+        const validDocIds = new Set<string>([
+          'meta',
+          ...resultChunks.map((_, idx) => `results_${idx}`),
+          ...clusterChunks.map((_, idx) => `clusters_${idx}`),
+          ...blockedChunks.map((_, idx) => `blocked_${idx}`),
+          ...suggestionChunks.map((_, idx) => `suggestions_${idx}`),
+          ...autoMergeChunks.map((_, idx) => `auto_merge_${idx}`),
+          ...groupMergeChunks.map((_, idx) => `group_merge_${idx}`),
+          ...groupedChunks.map((_, idx) => `grouped_${idx}`),
+          ...approvedChunks.map((_, idx) => `approved_${idx}`),
+        ]);
+
+        const deleteBatches: Promise<void>[] = [];
+        let deleteBatch = writeBatch(db);
+        let deleteOps = 0;
+        existingChunks.forEach((docSnap) => {
+          if (validDocIds.has(docSnap.id)) return;
+          deleteBatch.delete(docSnap.ref);
+          deleteOps++;
+          if (deleteOps >= 500) {
+            deleteBatches.push(deleteBatch.commit());
+            deleteBatch = writeBatch(db);
+            deleteOps = 0;
+          }
+        });
+        if (deleteOps > 0) deleteBatches.push(deleteBatch.commit());
+        if (deleteBatches.length > 0) await Promise.all(deleteBatches);
+      } catch (cleanupErr) {
+        console.warn('[PERSIST] Stale chunk cleanup failed (non-fatal):', cleanupErr);
       }
-
-      const validDocIds = new Set<string>([
-        'meta',
-        ...resultChunks.map((_, idx) => `results_${idx}`),
-        ...clusterChunks.map((_, idx) => `clusters_${idx}`),
-        ...blockedChunks.map((_, idx) => `blocked_${idx}`),
-        ...suggestionChunks.map((_, idx) => `suggestions_${idx}`),
-        ...autoMergeChunks.map((_, idx) => `auto_merge_${idx}`),
-        ...groupedChunks.map((_, idx) => `grouped_${idx}`),
-        ...approvedChunks.map((_, idx) => `approved_${idx}`),
-      ]);
-
-      const deleteBatches: Promise<void>[] = [];
-      let deleteBatch = writeBatch(db);
-      let deleteOps = 0;
-      existingChunks.forEach((docSnap) => {
-        if (validDocIds.has(docSnap.id)) return;
-        deleteBatch.delete(docSnap.ref);
-        deleteOps++;
-        if (deleteOps >= 500) {
-          deleteBatches.push(deleteBatch.commit());
-          deleteBatch = writeBatch(db);
-          deleteOps = 0;
-        }
-      });
-      if (deleteOps > 0) deleteBatches.push(deleteBatch.commit());
-      if (deleteBatches.length > 0) await Promise.all(deleteBatches);
-    }
-
-    options?.onSyncStatus?.('synced');
+    })();
   } catch (error) {
     console.error('[PERSIST ERROR] Firestore data save FAILED for project:', projectId, error);
     options?.onSyncStatus?.('error');
@@ -813,7 +708,7 @@ export const deleteProjectDataFromFirestore = async (projectId: string) => {
   }
 };
 
-export const loadProjectsFromFirestore = async (): Promise<Project[]> => {
+export const loadProjectsBootstrapState = async (): Promise<LoadProjectsBootstrapResult> => {
   try {
     const snapshot = await getDocs(collection(db, FIRESTORE_PROJECTS_COLLECTION));
 
@@ -829,24 +724,28 @@ export const loadProjectsFromFirestore = async (): Promise<Project[]> => {
       } catch {
         // Ignore localStorage write failures (quota/private mode).
       }
-      return firestoreProjects;
+      return { projects: firestoreProjects, source: 'firestore' };
+    }
+
+    const cachedProjects = loadProjectsFromLocalCache();
+    if (cachedProjects.length > 0) {
+      console.log('[PROJECTS] Firestore returned empty collection; using localStorage cache:', cachedProjects.length, 'projects');
+      return { projects: cachedProjects, source: 'local-cache' };
     }
   } catch (error) {
     console.warn('Firestore load error (likely quota exceeded):', error);
     // Fallback: try loading from localStorage cache
-    try {
-      const cached = localStorage.getItem(LS_PROJECTS_KEY);
-      if (cached) {
-        const projects = JSON.parse(cached) as Project[];
-        if (projects.length > 0) {
-          console.log('[PROJECTS] Using localStorage cache:', projects.length, 'projects');
-          return projects;
-        }
-      }
-    } catch {
-      // Ignore localStorage read failures and fall through to empty list.
+    const cachedProjects = loadProjectsFromLocalCache();
+    if (cachedProjects.length > 0) {
+      console.log('[PROJECTS] Using localStorage cache:', cachedProjects.length, 'projects');
+      return { projects: cachedProjects, source: 'local-cache' };
     }
   }
 
-  return [];
+  return { projects: [], source: 'empty' };
+};
+
+export const loadProjectsFromFirestore = async (): Promise<Project[]> => {
+  const result = await loadProjectsBootstrapState();
+  return result.projects;
 };

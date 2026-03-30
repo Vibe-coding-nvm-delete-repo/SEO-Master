@@ -32,16 +32,51 @@ export const COL = {
   reason: 'w-[80px]',
 } as const;
 
+/**
+ * Default `<col>` widths when the user has not set a custom pixel width.
+ * Keeps header row, filter row, and body cells aligned under `table-fixed`.
+ * Values mirror `COL` (percent vs px); update when adding columns.
+ */
+export const COLUMN_DEFAULT_WIDTH_CSS: Record<string, string> = {
+  name: '27%',
+  tokens: '27%',
+  keyword: '18%',
+  qa: '36px',
+  len: '44px',
+  kws: '44px',
+  pages: '44px',
+  vol: '58px',
+  kd: '36px',
+  kwRating: '52px',
+  label: '72px',
+  city: '52px',
+  state: '44px',
+  reason: '80px',
+};
+
 // Shared cell classes — all text is 12px for consistency
 export const CELL = {
-  headerBase: 'py-2 whitespace-nowrap transition-colors select-none text-[12px]',
+  headerBase: 'py-2 whitespace-nowrap transition-colors select-none text-[12px] overflow-hidden',
   headerSortable: 'cursor-pointer hover:bg-zinc-100',
   headerCompact: 'px-1',                   // Len, KWs, Pages, Vol, KD
   headerNormal: 'px-3',                    // Name, Tokens, Label, City, State
   dataCompact: 'px-1 py-0.5 text-right tabular-nums text-[12px]',  // Len, KWs, Pages, Vol, KD
-  dataNormal: 'px-3 py-0.5 text-[12px]',   // Name, Tokens, Label, City, State
+  dataNormal: 'px-3 py-0.5 text-[12px]',   // Name, Tokens, Keyword, etc.
+  /** Label / City / State — explicit 12px so cells do not inherit table `text-sm` (14px) */
+  dataLabelLocation: 'px-3 py-0.5 text-[12px] text-zinc-600',
   filterInput: 'px-0.5 py-0.5 text-[11px] border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400',
 } as const;
+
+/** Zebra striping: main tbody even rows + expanded child keyword rows (same palette) */
+export const TABLE_ZEBRA = {
+  /** Expanded child row — 0-based even index (lighter band) */
+  childBase: 'bg-white',
+  /** Expanded child row — 0-based odd index (alternate stripe) */
+  childAlt: 'bg-zinc-100/60',
+} as const;
+
+/** Full tbody class so Tailwind JIT sees the nth-child variant (do not split) */
+export const TABLE_TBODY_ZEBRA_CLASS = 'divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-100/45';
 
 // Labels used across all label filter dropdowns
 export const LABEL_LIST = ['Location', 'Number', 'FAQ', 'Commercial', 'Local', 'Year', 'Informational', 'Navigational'] as const;
