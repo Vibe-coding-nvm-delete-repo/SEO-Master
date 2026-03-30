@@ -261,12 +261,18 @@ function isTransientIDBError(err: unknown): boolean {
 }
 
 export const saveToIDB = async (projectId: string, data: unknown) => {
-  const cleanData = JSON.parse(JSON.stringify(data));
   if (isContentPipelineQaMode()) {
+    // QA mode still needs a plain-object copy for its in-memory store.
+    const cleanData = JSON.parse(JSON.stringify(data));
     await saveQaLocalCache(projectId, cleanData);
     return;
   }
-  const record = { projectId, ...cleanData };
+  // IDB uses the browser's structured-clone algorithm internally, so an
+  // explicit JSON round-trip is redundant.  Skipping it avoids blocking the
+  // main thread for 100-500ms on large payloads (4k+ generate rows).
+  const record = data && typeof data === 'object' && !Array.isArray(data)
+    ? { projectId, ...(data as Record<string, unknown>) }
+    : { projectId, value: data };
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= IDB_MAX_RETRIES; attempt++) {
