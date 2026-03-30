@@ -3,8 +3,9 @@
  * P1.1 — extracted from App.tsx; behavior must match the previous inline implementation.
  */
 
-import { useCallback, useState, useTransition, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { ClusterSummary, TokenSummary } from '../types';
+import { useDebouncedValue } from './useDebouncedValue';
 
 export type GroupDataTab = 'pages' | 'keywords' | 'grouped' | 'group-auto-merge' | 'approved' | 'blocked' | 'auto-group';
 
@@ -18,7 +19,6 @@ export function useKeywordWorkspace({ setSelectedClusters }: UseKeywordWorkspace
   const [activeTab, setActiveTab] = useState<GroupDataTab>('pages');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(500);
-  const [, startTransition] = useTransition();
   /** Urgent updates — do not wrap in startTransition or tab switches feel delayed (seconds) under load. */
   const switchTab = useCallback((tab: GroupDataTab) => {
     setActiveTab(tab);
@@ -31,10 +31,13 @@ export function useKeywordWorkspace({ setSelectedClusters }: UseKeywordWorkspace
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setSearchImmediate = useCallback((value: string) => {
     setSearchQuery(value);
-    startTransition(() => setDebouncedSearchQuery(value));
+    if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => setDebouncedSearchQuery(value), 200);
   }, []);
+  useEffect(() => () => { if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current); }, []);
   const [minClusterCount, setMinClusterCount] = useState<string>('');
   const [maxClusterCount, setMaxClusterCount] = useState<string>('');
   const [minTokenLen, setMinTokenLen] = useState<string>('');
@@ -71,7 +74,27 @@ export function useKeywordWorkspace({ setSelectedClusters }: UseKeywordWorkspace
   const [minKwRating, setMinKwRating] = useState<string>('');
   const [maxKwRating, setMaxKwRating] = useState<string>('');
 
+  // Debounced range/location filters — raw values stay bound to inputs for instant UI feedback,
+  // debounced values drive the expensive filtering computations.
+  const debouncedMinClusterCount = useDebouncedValue(minClusterCount, 250);
+  const debouncedMaxClusterCount = useDebouncedValue(maxClusterCount, 250);
+  const debouncedMinTokenLen = useDebouncedValue(minTokenLen, 250);
+  const debouncedMaxTokenLen = useDebouncedValue(maxTokenLen, 250);
+  const debouncedFilterCity = useDebouncedValue(filterCity, 250);
+  const debouncedFilterState = useDebouncedValue(filterState, 250);
+  const debouncedMinLen = useDebouncedValue(minLen, 250);
+  const debouncedMaxLen = useDebouncedValue(maxLen, 250);
+  const debouncedMinKwInCluster = useDebouncedValue(minKwInCluster, 250);
+  const debouncedMaxKwInCluster = useDebouncedValue(maxKwInCluster, 250);
+  const debouncedMinVolume = useDebouncedValue(minVolume, 250);
+  const debouncedMaxVolume = useDebouncedValue(maxVolume, 250);
+  const debouncedMinKd = useDebouncedValue(minKd, 250);
+  const debouncedMaxKd = useDebouncedValue(maxKd, 250);
+  const debouncedMinKwRating = useDebouncedValue(minKwRating, 250);
+  const debouncedMaxKwRating = useDebouncedValue(maxKwRating, 250);
+
   const [tokenMgmtSearch, setTokenMgmtSearch] = useState('');
+  const debouncedTokenMgmtSearch = useDebouncedValue(tokenMgmtSearch, 200);
   const [tokenMgmtSort, setTokenMgmtSort] = useState<{
     key: 'token' | 'totalVolume' | 'frequency' | 'avgKd';
     direction: 'asc' | 'desc';
@@ -151,8 +174,25 @@ export function useKeywordWorkspace({ setSelectedClusters }: UseKeywordWorkspace
     setMinKwRating,
     maxKwRating,
     setMaxKwRating,
+    debouncedMinClusterCount,
+    debouncedMaxClusterCount,
+    debouncedMinTokenLen,
+    debouncedMaxTokenLen,
+    debouncedFilterCity,
+    debouncedFilterState,
+    debouncedMinLen,
+    debouncedMaxLen,
+    debouncedMinKwInCluster,
+    debouncedMaxKwInCluster,
+    debouncedMinVolume,
+    debouncedMaxVolume,
+    debouncedMinKd,
+    debouncedMaxKd,
+    debouncedMinKwRating,
+    debouncedMaxKwRating,
     tokenMgmtSearch,
     setTokenMgmtSearch,
+    debouncedTokenMgmtSearch,
     tokenMgmtSort,
     setTokenMgmtSort,
     selectedMgmtTokens,

@@ -99,6 +99,7 @@ import { useTokenMerge } from './hooks/useTokenMerge';
 import { useAutoMerge } from './hooks/useAutoMerge';
 import { useGroupAutoMerge } from './hooks/useGroupAutoMerge';
 import { useFilteredTableData } from './hooks/useFilteredTableData';
+import { useTokenMgmtFiltering } from './hooks/useTokenMgmtFiltering';
 
 // Error boundary â€" catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
@@ -1019,8 +1020,25 @@ export default function App() {
     setMinKwRating,
     maxKwRating,
     setMaxKwRating,
+    debouncedMinClusterCount,
+    debouncedMaxClusterCount,
+    debouncedMinTokenLen,
+    debouncedMaxTokenLen,
+    debouncedFilterCity,
+    debouncedFilterState,
+    debouncedMinLen,
+    debouncedMaxLen,
+    debouncedMinKwInCluster,
+    debouncedMaxKwInCluster,
+    debouncedMinVolume,
+    debouncedMaxVolume,
+    debouncedMinKd,
+    debouncedMaxKd,
+    debouncedMinKwRating,
+    debouncedMaxKwRating,
     tokenMgmtSearch,
     setTokenMgmtSearch,
+    debouncedTokenMgmtSearch,
     tokenMgmtSort,
     setTokenMgmtSort,
     selectedMgmtTokens,
@@ -2056,11 +2074,14 @@ export default function App() {
     blockedKeywords, blockedTokens, labelSections,
     hasBlockedToken, pendingFilteredAutoGroupTokens, selectedTokens,
     debouncedSearchQuery, activeTab, isLabelDropdownOpen,
-    minClusterCount, maxClusterCount,
-    minLen, maxLen, minKwInCluster, maxKwInCluster,
-    minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating,
-    filterCity, filterState, excludedLabels,
-    minTokenLen, maxTokenLen,
+    minClusterCount: debouncedMinClusterCount, maxClusterCount: debouncedMaxClusterCount,
+    minLen: debouncedMinLen, maxLen: debouncedMaxLen,
+    minKwInCluster: debouncedMinKwInCluster, maxKwInCluster: debouncedMaxKwInCluster,
+    minVolume: debouncedMinVolume, maxVolume: debouncedMaxVolume,
+    minKd: debouncedMinKd, maxKd: debouncedMaxKd,
+    minKwRating: debouncedMinKwRating, maxKwRating: debouncedMaxKwRating,
+    filterCity: debouncedFilterCity, filterState: debouncedFilterState, excludedLabels,
+    minTokenLen: debouncedMinTokenLen, maxTokenLen: debouncedMaxTokenLen,
     sortConfig, tokenSortConfig, keywordsSortConfig, blockedSortConfig,
     currentPage, itemsPerPage,
   });
@@ -2107,7 +2128,7 @@ export default function App() {
     childStats: Record<string, MergeTokenStats>;
   };
 
-  const tokenMgmtMergeSearchTerms = useMemo(() => parseTokenMgmtSearchTerms(tokenMgmtSearch), [tokenMgmtSearch]);
+  const tokenMgmtMergeSearchTerms = useMemo(() => parseTokenMgmtSearchTerms(debouncedTokenMgmtSearch), [debouncedTokenMgmtSearch]);
 
   // Merge subtab rows: 1 row per parent token + collapsible children underneath.
   // We compute token stats by simulating merges in rule order on a per-row tokenArr basis,
@@ -2284,103 +2305,15 @@ export default function App() {
   };
 
   // Token Management panel: filtered, sorted, paginated with subtab support
-  const filteredMgmtTokens = useMemo(() => {
-    if (tokenMgmtSubTab === 'merge' || tokenMgmtSubTab === 'auto-merge') return [];
-    if (!tokenSummary) return [];
-    let base: TokenSummary[];
-    if (tokenMgmtSubTab === 'blocked') {
-      base = tokenSummary.filter(t => blockedTokens.has(t.token) || universalBlockedTokens.has(t.token));
-    } else if (tokenMgmtSubTab === 'current') {
-      // Compute token stats FROM SCRATCH using only currently visible clusters (not global tokenSummary)
-      // This ensures "current" shows different data than "all" when filters are active
-      const tokenStatsMap = new Map<string, { token: string; totalVolume: number; frequency: number; kdSum: number; kdCount: number }>();
-
-      // Collect clusters based on active keyword management tab
-      const clusters: { tokenArr: string[]; keywords: { keyword: string; volume: number; kd: number | null }[] }[] = [];
-      if (activeTab === 'pages') {
-        clusters.push(...filteredClusters);
-      } else if (activeTab === 'grouped') {
-        for (const g of filteredSortedGrouped) clusters.push(...g.clusters);
-      } else if (activeTab === 'approved') {
-        for (const g of filteredApprovedGroups) clusters.push(...g.clusters);
-      }
-
-      // Build stats from clusters (for pages/grouped/approved tabs)
-      if (activeTab === 'pages' || activeTab === 'grouped' || activeTab === 'approved') {
-        for (const c of clusters) {
-          for (const t of c.tokenArr) {
-            if (blockedTokens.has(t)) continue;
-            const existing = tokenStatsMap.get(t);
-            if (existing) {
-              existing.totalVolume += c.keywords.reduce((s, kw) => s + kw.volume, 0);
-              existing.frequency += c.keywords.length;
-              c.keywords.forEach(kw => { if (kw.kd !== null) { existing.kdSum += kw.kd; existing.kdCount++; } });
-            } else {
-              const vol = c.keywords.reduce((s, kw) => s + kw.volume, 0);
-              let kdS = 0, kdC = 0;
-              c.keywords.forEach(kw => { if (kw.kd !== null) { kdS += kw.kd; kdC++; } });
-              tokenStatsMap.set(t, { token: t, totalVolume: vol, frequency: c.keywords.length, kdSum: kdS, kdCount: kdC });
-            }
-          }
-        }
-      }
-
-      if (activeTab === 'keywords') {
-        for (const r of filteredResults) {
-          for (const t of r.tokenArr) {
-            if (blockedTokens.has(t)) continue;
-            const existing = tokenStatsMap.get(t);
-            if (existing) {
-              existing.totalVolume += r.searchVolume;
-              existing.frequency += 1;
-              if (r.kd !== null) { existing.kdSum += r.kd; existing.kdCount++; }
-            } else {
-              tokenStatsMap.set(t, {
-                token: t,
-                totalVolume: r.searchVolume,
-                frequency: 1,
-                kdSum: r.kd ?? 0,
-                kdCount: r.kd !== null ? 1 : 0,
-              });
-            }
-          }
-        }
-      }
-
-      // Convert to TokenSummary format â€" pull extra fields from global tokenSummary if available
-      const globalMap = new Map<string, TokenSummary>((tokenSummary || []).map(t => [t.token, t]));
-      base = Array.from(tokenStatsMap.values()).map(s => {
-        const global = globalMap.get(s.token);
-        return {
-          token: s.token,
-          totalVolume: s.totalVolume,
-          frequency: s.frequency,
-          avgKd: s.kdCount > 0 ? Math.round(s.kdSum / s.kdCount) : null,
-          length: global?.length ?? s.token.length,
-          label: global?.label ?? '',
-          labelArr: global?.labelArr ?? [],
-          locationCity: global?.locationCity ?? '',
-          locationState: global?.locationState ?? '',
-        };
-      });
-    } else {
-      // 'all' â€" show all non-blocked tokens
-      base = tokenSummary.filter(t => !blockedTokens.has(t.token) && !universalBlockedTokens.has(t.token));
-    }
-    const terms = parseTokenMgmtSearchTerms(tokenMgmtSearch);
-    let tokens = terms.length ? base.filter(t => tokenIncludesAnyTerm(t.token, terms)) : [...base];
-    const { key, direction } = tokenMgmtSort;
-    tokens.sort((a, b) => {
-      const aVal = a[key];
-      const bVal = b[key];
-      if (aVal === null && bVal === null) return 0;
-      if (aVal === null) return 1;
-      if (bVal === null) return -1;
-      if (typeof aVal === 'string' && typeof bVal === 'string') return direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-      return direction === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
-    });
-    return tokens;
-  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults]);
+  // Token management filtering — split into 3 stages for performance:
+  // Stage 1 (expensive): build token stats from filtered data — does NOT depend on search/sort
+  // Stage 2 (cheap): apply debounced search filter
+  // Stage 3 (cheap): sort
+  const filteredMgmtTokens = useTokenMgmtFiltering({
+    tokenSummary, tokenMgmtSubTab, blockedTokens, universalBlockedTokens,
+    activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults,
+    debouncedTokenMgmtSearch, tokenMgmtSort,
+  });
 
   const tokenMgmtTotalPages = Math.max(1, Math.ceil(filteredMgmtTokens.length / tokenMgmtPerPage));
   const safeMgmtPage = Math.min(tokenMgmtPage, tokenMgmtTotalPages);

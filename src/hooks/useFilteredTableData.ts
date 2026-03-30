@@ -238,6 +238,22 @@ export function useFilteredTableData({
     return counts;
   }, [activeTab, clusterSummary, tokenSummary, debouncedSearchQuery, min, max, hasMin, hasMax, minTokenLen, maxTokenLen, selectedTokens, isLabelDropdownOpen]);
 
+  // Cached parsed range filter integers — shared between filteredClusters and filteredResultsData
+  const rangeFilters = useMemo(() => ({
+    cityLower: filterCity.toLowerCase(),
+    stateLower: filterState.toLowerCase(),
+    lenMin: minLen ? parseInt(minLen, 10) : NaN,
+    lenMax: maxLen ? parseInt(maxLen, 10) : NaN,
+    kwMin: minKwInCluster ? parseInt(minKwInCluster, 10) : NaN,
+    kwMax: maxKwInCluster ? parseInt(maxKwInCluster, 10) : NaN,
+    volMin: minVolume ? parseInt(minVolume, 10) : NaN,
+    volMax: maxVolume ? parseInt(maxVolume, 10) : NaN,
+    kdMin: minKd ? parseInt(minKd, 10) : NaN,
+    kdMax: maxKd ? parseInt(maxKd, 10) : NaN,
+    ratingMin: minKwRating ? parseInt(minKwRating, 10) : NaN,
+    ratingMax: maxKwRating ? parseInt(maxKwRating, 10) : NaN,
+  }), [filterCity, filterState, minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
+
   const filteredClusters = useMemo(() => {
     if (!effectiveClusters) return [];
     const tokensArr = Array.from(selectedTokens) as string[];
@@ -245,19 +261,7 @@ export function useFilteredTableData({
     const searchLower = debouncedSearchQuery.toLowerCase();
     const hasExcluded = excludedLabels.size > 0;
 
-    // Column-level filters
-    const cityLower = filterCity.toLowerCase();
-    const stateLower = filterState.toLowerCase();
-    const lenMin = minLen ? parseInt(minLen, 10) : NaN;
-    const lenMax = maxLen ? parseInt(maxLen, 10) : NaN;
-    const kwMin = minKwInCluster ? parseInt(minKwInCluster, 10) : NaN;
-    const kwMax = maxKwInCluster ? parseInt(maxKwInCluster, 10) : NaN;
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMin = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMax = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
+    const { cityLower, stateLower, lenMin, lenMax, kwMin, kwMax, volMin, volMax, kdMin, kdMax, ratingMin, ratingMax } = rangeFilters;
 
     const filtered: ClusterSummary[] = [];
     const len = effectiveClusters.length;
@@ -308,7 +312,7 @@ export function useFilteredTableData({
     }
 
     return filtered;
-  }, [effectiveClusters, debouncedSearchQuery, min, max, hasMin, hasMax, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minKwInCluster, maxKwInCluster, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
+  }, [effectiveClusters, debouncedSearchQuery, min, max, hasMin, hasMax, excludedLabels, selectedTokens, rangeFilters]);
 
   const filteredResultsData = useMemo(() => {
     if (!effectiveResults) return { filtered: [], totalVolume: 0 };
@@ -317,17 +321,7 @@ export function useFilteredTableData({
     const searchLower = debouncedSearchQuery.toLowerCase();
     const hasExcluded = excludedLabels.size > 0;
 
-    // Column-level filters
-    const cityLower = filterCity.toLowerCase();
-    const stateLower = filterState.toLowerCase();
-    const lenMin = minLen ? parseInt(minLen, 10) : NaN;
-    const lenMax = maxLen ? parseInt(maxLen, 10) : NaN;
-    const volMin = minVolume ? parseInt(minVolume, 10) : NaN;
-    const volMax = maxVolume ? parseInt(maxVolume, 10) : NaN;
-    const kdMinVal = minKd ? parseInt(minKd, 10) : NaN;
-    const kdMaxVal = maxKd ? parseInt(maxKd, 10) : NaN;
-    const ratingMin = minKwRating ? parseInt(minKwRating, 10) : NaN;
-    const ratingMax = maxKwRating ? parseInt(maxKwRating, 10) : NaN;
+    const { cityLower, stateLower, lenMin, lenMax, volMin, volMax, kdMin: kdMinVal, kdMax: kdMaxVal, ratingMin, ratingMax } = rangeFilters;
 
     const filtered: ProcessedRow[] = [];
     let totalVolume = 0;
@@ -391,7 +385,7 @@ export function useFilteredTableData({
     }
 
     return { filtered, totalVolume };
-  }, [effectiveResults, debouncedSearchQuery, min, max, hasMin, hasMax, validClusterCounts, excludedLabels, selectedTokens, filterCity, filterState, minLen, maxLen, minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating]);
+  }, [effectiveResults, debouncedSearchQuery, min, max, hasMin, hasMax, validClusterCounts, excludedLabels, selectedTokens, rangeFilters]);
 
   const filteredResults = filteredResultsData.filtered;
 
