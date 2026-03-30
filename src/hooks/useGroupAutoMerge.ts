@@ -162,7 +162,7 @@ export function useGroupAutoMerge({
 
     setJob({
       phase: 'embedding',
-      progress: 1,
+      progress: 0,
       groupsScanned: sources.length,
       pairsCompared: 0,
       matchesKept: 0,
@@ -185,7 +185,7 @@ export function useGroupAutoMerge({
           setJob((prev) => ({
             ...prev,
             phase: 'embedding',
-            progress: 5 + Math.round(fraction * 35),
+            progress: Math.round(fraction * 50),
             apiCalls: completedBatches,
             elapsedMs: Math.round(performance.now() - startedAtRef.current),
           }));
@@ -195,7 +195,7 @@ export function useGroupAutoMerge({
       setJob((prev) => ({
         ...prev,
         phase: 'comparing',
-        progress: 45,
+        progress: 50,
         tokensUsed: embeddingResult.tokensUsed,
         apiCalls: Math.max(prev.apiCalls, 1),
         costUsdTotal: embeddingResult.cost,
@@ -212,7 +212,7 @@ export function useGroupAutoMerge({
           setJob((prev) => ({
             ...prev,
             phase: 'comparing',
-            progress: 45 + Math.round(fraction * 45),
+            progress: 50 + Math.round(fraction * 45),
             pairsCompared: comparedPairs,
             matchesKept: keptPairs,
             tokensUsed: embeddingResult.tokensUsed,
@@ -222,12 +222,6 @@ export function useGroupAutoMerge({
         },
       });
 
-      setJob((prev) => ({
-        ...prev,
-        phase: 'ranking',
-        progress: 95,
-      }));
-
       const nextRecommendations = mergeGroupAutoMergeRecommendationsAfterRun(
         Array.isArray(groupMergeRecommendationsRef.current) ? groupMergeRecommendationsRef.current : [],
         freshRecommendations,
@@ -236,19 +230,11 @@ export function useGroupAutoMerge({
 
       groupMergeRecommendationsRef.current = nextRecommendations;
       updateGroupMergeRecommendations(nextRecommendations);
-      // Don't let a persistence hang block the completion UI — race with a timeout
-      try {
-        await Promise.race([
-          flushNow(),
-          new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
-        ]);
-      } catch {
-        // persistence failure is non-fatal for the merge flow
-      }
 
       const runFinishedStale =
         buildGroupAutoMergeFingerprint([...groupedClustersRef.current, ...approvedGroupsRef.current]) !== sourceFingerprint;
 
+      // Set complete IMMEDIATELY — never let persistence block the UI
       setJob({
         phase: 'complete',
         progress: 100,
@@ -261,6 +247,9 @@ export function useGroupAutoMerge({
         elapsedMs: Math.round(performance.now() - startedAtRef.current),
         error: null,
       });
+
+      // Fire-and-forget persistence — never blocks completion
+      flushNow().catch(() => {});
 
       if (runFinishedStale) {
         addToast('Auto Merge finished, but grouped data changed during the run. Recommendations are stale; click Embed again.', 'warning');
