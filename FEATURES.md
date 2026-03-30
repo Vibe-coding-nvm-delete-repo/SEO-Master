@@ -570,7 +570,12 @@
   - source (`all / group / generate / content / feedback / projects / settings / system`)
   - free-text search across message, source, and project name
 - The table shows timestamp, type, source, scope (`Global` or a project name/id), the full notification text, and a **Copy** action.
-- Timestamp cells show both the browser-local date/time and a secondary **US Eastern** line.
+- **Pagination**: 50 notifications per page with Prev/Next controls, "Showing X–Y of Z", and "Page N of M". Resets to page 1 when filters change.
+- **Relative timestamps**: Primary display shows "just now", "Xm ago", "Xh ago", "yesterday", "Xd ago" with full absolute timestamps (local + US Eastern) below in smaller text.
+- **Human-readable descriptions**: 16 regex-matched patterns map technical messages to plain-English explanations shown in italic below the original message (e.g., "Auto-synced 130 H2 rows from upstream step" → "130 heading outlines were automatically pulled from the previous step").
+- **Summary stats bar**: Colored clickable badges above the filter bar showing counts per type (errors, warnings, success, info). Clicking a badge toggles the type filter as a quick shortcut.
+- **Expandable long messages**: Notifications longer than 120 characters are truncated with a "more" toggle. Expanding reveals the full message plus the humanized description.
+- **Improved empty states**: No-notifications state shows a Bell icon with helpful description. No-matches state shows a Search icon with "Clear all filters" button.
 - Copy uses the stored full notification text when present, otherwise it composes a formatted block with source, scope, timestamps, and message.
 - The Notifications feed starts from this rollout forward and does **not** backfill the existing Group activity log or the Updates changelog.
 
