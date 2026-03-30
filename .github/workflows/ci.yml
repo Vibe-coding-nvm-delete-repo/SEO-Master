@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm install --ignore-scripts
+      - run: npm install --ignore-scripts --legacy-peer-deps
       - run: npm install --ignore-scripts esbuild-wasm @rollup/wasm-node @tailwindcss/oxide-wasm32-wasi --force
       - run: node scripts/patch-wasm.cjs
       - name: TypeScript Check
@@ -34,7 +34,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm install --ignore-scripts
+      - run: npm install --ignore-scripts --legacy-peer-deps
       - run: npm install --ignore-scripts esbuild-wasm @rollup/wasm-node @tailwindcss/oxide-wasm32-wasi --force
       - run: node scripts/patch-wasm.cjs
       - name: Install Playwright Chromium
