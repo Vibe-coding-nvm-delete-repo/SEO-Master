@@ -319,6 +319,8 @@ export const saveToIDB = async (projectId: string, data: unknown) => {
     await saveQaLocalCache(projectId, data);
     return;
   }
+  // IDB uses the browser's structured-clone algorithm internally — no need
+  // for JSON round-trip.  toIDBRecord just normalises the shape.
   const record = toIDBRecord(projectId, data);
 
   let lastError: unknown;

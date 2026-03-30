@@ -1810,11 +1810,10 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       lastSavedRowsJsonRef.current = json;
       lastAppliedUpstreamJsonRef.current = json;
       await persistRows(sourceRows);
-      cacheStateLocallyBestEffort({
-        idbKey: appSettingsIdbKey(rowsDocId),
-        value: sourceRows,
-        localStorageKey: rowsCacheKey(rowsDocId),
-      });
+      // IDB write removed — applyRowsState triggers the rows useEffect which
+      // calls scheduleRowsSave → doSave → persistTrackedState (writes to IDB).
+      // The extra cacheStateLocallyBestEffort was a redundant second IDB write
+      // that competed for the same readwrite transaction lock.
       emitLocalAppSettingsRowsUpdated(rowsDocId);
       // Mark loaded so async IDB fallback won't overwrite pipeline rows before H2 row snapshot arrives
       if (populateFromSource?.upstreamDocId) {
@@ -1855,6 +1854,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       }
       const json = JSON.stringify(next);
       if (json === lastAppliedUpstreamJsonRef.current) return;
+      // Guard: don't let an empty upstream response wipe rows that have generated output.
+      // This prevents the save-storm where empty → restore → save → snapshot echo → save
+      // cascades and overwhelms IDB with competing readwrite transactions.
+      if (next.length === 0 && rowsRef.current.some(r => r.output.trim())) {
+        return;
+      }
       setIsSyncingSource(true);
       try {
         await applyPipelineRows(next);
@@ -2992,16 +2997,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   // Flush all pending saves on page close or component unmount â€” wrapped in try/catch to never crash
   const flushAllSaves = useCallback(async () => {
-    try {
-      await Promise.all([
-        flushRowsSaveNow(),
-        flushLogsPersistNow(),
-        flushViewStatePersistNow(),
-        flushSettingsPersistNow(),
-      ]);
-    } catch (e) {
-      console.warn('flushAllSaves error:', e);
-    }
+    // Sequential writes — IDB readwrite transactions serialize internally anyway.
+    // Parallel calls just create lock contention and increase abort risk on large payloads.
+    try { await flushRowsSaveNow(); } catch (e) { console.warn('flushAllSaves (rows):', e); }
+    try { await flushLogsPersistNow(); } catch (e) { console.warn('flushAllSaves (logs):', e); }
+    try { await flushViewStatePersistNow(); } catch (e) { console.warn('flushAllSaves (viewState):', e); }
+    try { await flushSettingsPersistNow(); } catch (e) { console.warn('flushAllSaves (settings):', e); }
   }, [flushLogsPersistNow, flushRowsSaveNow, flushSettingsPersistNow, flushViewStatePersistNow]);
 
   // beforeunload â€” flush on tab close / browser close
