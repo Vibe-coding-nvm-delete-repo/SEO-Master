@@ -68,6 +68,7 @@ export const createEmptyProjectViewState = (): ProjectViewState => ({
 export const toProjectViewState = (
   data: ProjectDataPayload | null,
   project?: Project | null,
+  opts?: { skipRebuild?: boolean },
 ): ProjectViewState => {
   if (!data) {
     return createEmptyProjectViewState();
@@ -81,15 +82,28 @@ export const toProjectViewState = (
   // `results` is the source of truth for per-keyword fields (e.g. kwRating). Chunked
   // Firestore/IDB payloads can have stale clusterSummary vs results after a refresh or
   // older saves — rebuild aggregates so Ungrouped / Grouped / Approved rating columns match.
+  //
+  // When skipRebuild is requested (IDB-first fast path), we do a cheap consistency check:
+  // if clusterSummary total keyword count matches results length, the data is consistent
+  // and we can skip the expensive O(n) rebuildClusters call.
   if (results && results.length > 0) {
-    clusterSummary = rebuildClusters(results);
-    const refreshed = refreshGroupsFromClusterSummaries(
-      groupedClusters,
-      approvedGroups,
-      clusterSummary,
-    );
-    groupedClusters = refreshed.groupedClusters;
-    approvedGroups = refreshed.approvedGroups;
+    let needsRebuild = true;
+    if (opts?.skipRebuild && clusterSummary && clusterSummary.length > 0) {
+      const totalKw = clusterSummary.reduce((sum, c) => sum + c.keywordCount, 0);
+      if (totalKw === results.length) {
+        needsRebuild = false;
+      }
+    }
+    if (needsRebuild) {
+      clusterSummary = rebuildClusters(results);
+      const refreshed = refreshGroupsFromClusterSummaries(
+        groupedClusters,
+        approvedGroups,
+        clusterSummary,
+      );
+      groupedClusters = refreshed.groupedClusters;
+      approvedGroups = refreshed.approvedGroups;
+    }
   }
 
   return {
@@ -131,6 +145,49 @@ export const loadSavedWorkspacePrefs = async (): Promise<AppPrefs> => {
   }
 
   return { savedClusters: [], activeProjectId: null };
+};
+
+/**
+ * Load project data from IDB only (fast path, ~5ms).
+ * Used by the IDB-first loading strategy to show cached data instantly.
+ */
+export const loadProjectDataFromIDBOnly = async (
+  projectId: string,
+): Promise<ProjectDataPayload | null> => {
+  try {
+    return await loadFromIDB<ProjectDataPayload>(projectId);
+  } catch (e) {
+    logPersistError('IDB-only project load', e);
+    return null;
+  }
+};
+
+/**
+ * Background Firestore reconciliation after IDB-first display.
+ * Compares saveIds and only returns 'update' if Firestore has newer data.
+ */
+export const reconcileWithFirestore = async (
+  projectId: string,
+  idbData: ProjectDataPayload,
+): Promise<{ action: 'skip' | 'update'; data?: ProjectDataPayload }> => {
+  const fsData = await loadProjectDataFromFirestore(projectId);
+  if (!fsData) return { action: 'skip' };
+
+  const idbSaveId = idbData.lastSaveId ?? 0;
+  const fsSaveId = fsData.lastSaveId ?? 0;
+
+  // Fast path: if both have saveIds and Firestore is same or older, skip
+  if (fsSaveId <= idbSaveId && idbSaveId > 0) return { action: 'skip' };
+
+  // Delegate to existing merge logic for edge cases (saveId=0, timestamps, etc.)
+  const picked = pickNewerProjectPayload(idbData, fsData);
+  if (picked === idbData) return { action: 'skip' };
+
+  // Firestore wins — update IDB cache
+  saveToIDB(projectId, fsData).catch((e) =>
+    logPersistError('refresh IDB from Firestore reconciliation', e),
+  );
+  return { action: 'update', data: picked };
 };
 
 export const loadProjectDataForView = async (projectId: string): Promise<ProjectDataPayload | null> => {
