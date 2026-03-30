@@ -49,11 +49,18 @@ const CHUNK_SIZE = 200;
 const CHUNKS_SUBCOLLECTION = 'chunks';
 
 /**
- * Firestore rejects nested `undefined` values; IDB saves already use JSON round-trip.
- * Apply the same normalization before `batch.set` so cloud sync matches local persistence.
+ * Firestore rejects nested `undefined` values.
+ * Apply JSON normalization before `batch.set` so cloud payloads are Firestore-safe.
  */
 export function sanitizeJsonForFirestore<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function toIDBRecord(projectId: string, data: unknown): Record<string, unknown> {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return { projectId, ...(data as Record<string, unknown>) };
+  }
+  return { projectId, value: data };
 }
 
 export interface ProjectDataPayload {
@@ -188,8 +195,28 @@ export const saveToLS = (key: string, data: unknown) => {
   }
 };
 
-const openIDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
+/**
+ * Cached IDB connection — reused across saves to avoid open/close churn.
+ * Automatically reopens if the connection is closed or invalidated.
+ */
+let cachedDb: IDBDatabase | null = null;
+let dbOpenPromise: Promise<IDBDatabase> | null = null;
+
+const getIDB = (): Promise<IDBDatabase> => {
+  // Return existing healthy connection
+  if (cachedDb) {
+    try {
+      // Probe: if the connection is closed, accessing objectStoreNames throws
+      void cachedDb.objectStoreNames;
+      return Promise.resolve(cachedDb);
+    } catch {
+      cachedDb = null;
+    }
+  }
+  // Deduplicate concurrent open requests
+  if (dbOpenPromise) return dbOpenPromise;
+
+  dbOpenPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(IDB_NAME, IDB_VERSION);
     request.onupgradeneeded = () => {
       const dbInstance = request.result;
@@ -197,33 +224,89 @@ const openIDB = (): Promise<IDBDatabase> => {
         dbInstance.createObjectStore(IDB_STORE, { keyPath: 'projectId' });
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const dbInstance = request.result;
+      // If the browser closes the connection (e.g. version change), clear cache
+      dbInstance.onclose = () => { cachedDb = null; };
+      dbInstance.onversionchange = () => {
+        dbInstance.close();
+        cachedDb = null;
+      };
+      cachedDb = dbInstance;
+      dbOpenPromise = null;
+      resolve(dbInstance);
+    };
+    request.onerror = () => {
+      dbOpenPromise = null;
+      reject(request.error);
+    };
   });
+  return dbOpenPromise;
 };
 
-export const saveToIDB = async (projectId: string, data: unknown) => {
-  try {
-    const cleanData = JSON.parse(JSON.stringify(data));
-    if (isContentPipelineQaMode()) {
-      await saveQaLocalCache(projectId, cleanData);
-      return;
-    }
-    const record = { projectId, ...cleanData };
-    const dbInstance = await openIDB();
-    const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
-    const putRequest = tx.objectStore(IDB_STORE).put(record);
-    putRequest.onerror = (event) => console.error('IndexedDB put error:', putRequest.error, event);
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-    dbInstance.close();
-  } catch (error) {
-    console.error('IndexedDB save error:', error);
-    throw error;
+/** For tests only — reset the cached IDB connection. */
+export const _resetIDBCache = () => { cachedDb = null; dbOpenPromise = null; };
+
+const IDB_MAX_RETRIES = 3;
+const IDB_BASE_DELAY_MS = 200;
+
+/**
+ * Check if an IDB error is transient and worth retrying.
+ * QuotaExceeded is NOT transient (retrying won't help).
+ */
+function isTransientIDBError(err: unknown): boolean {
+  if (!err) return false;
+  const name = (err as { name?: string }).name;
+  // Abort/timeout/unknown errors are typically transient
+  if (name === 'AbortError' || name === 'TimeoutError' || name === 'UnknownError') return true;
+  // InvalidStateError can mean the connection was unexpectedly closed — retry with fresh connection
+  if (name === 'InvalidStateError') {
+    cachedDb = null;
+    return true;
   }
+  return false;
+}
+
+export const saveToIDB = async (projectId: string, data: unknown) => {
+  if (isContentPipelineQaMode()) {
+    await saveQaLocalCache(projectId, data);
+    return;
+  }
+  const record = toIDBRecord(projectId, data);
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= IDB_MAX_RETRIES; attempt++) {
+    try {
+      const dbInstance = await getIDB();
+      const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(record);
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        }),
+        15_000,
+        'IDB write transaction',
+      );
+      return; // success
+    } catch (error) {
+      lastError = error;
+      // If connection went bad, clear cache so next attempt gets a fresh one
+      if ((error as { name?: string })?.name === 'InvalidStateError') {
+        cachedDb = null;
+      }
+      if (attempt < IDB_MAX_RETRIES && isTransientIDBError(error)) {
+        const delay = IDB_BASE_DELAY_MS * Math.pow(2, attempt);
+        console.warn(`[IDB] Save attempt ${attempt + 1} failed (${(error as Error)?.name}), retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      break; // non-transient error or out of retries
+    }
+  }
+  console.error('IndexedDB save error (after retries):', lastError);
+  throw lastError;
 };
 
 export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
@@ -231,16 +314,14 @@ export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
     if (isContentPipelineQaMode()) {
       return loadQaLocalCache<T>(projectId);
     }
-    const dbInstance = await openIDB();
+    const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readonly');
     const request = tx.objectStore(IDB_STORE).get(projectId);
     return new Promise((resolve, reject) => {
       request.onsuccess = () => {
-        dbInstance.close();
         resolve((request.result as T) || null);
       };
       request.onerror = () => {
-        dbInstance.close();
         reject(request.error);
       };
     });
@@ -256,14 +337,13 @@ export const deleteFromIDB = async (projectId: string) => {
       await deleteQaLocalCache(projectId);
       return;
     }
-    const dbInstance = await openIDB();
+    const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).delete(projectId);
     await new Promise<void>((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-    dbInstance.close();
   } catch (error) {
     console.error('IndexedDB delete error:', error);
   }
@@ -411,7 +491,7 @@ export const saveAppPrefsToFirestore = async (activeId: string | null, clusters:
 
 export const saveAppPrefsToIDB = async (activeId: string | null, clusters: any[]) => {
   try {
-    const dbInstance = await openIDB();
+    const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).put({
       projectId: '__app_prefs__',
@@ -423,7 +503,6 @@ export const saveAppPrefsToIDB = async (activeId: string | null, clusters: any[]
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-    dbInstance.close();
   } catch (error) {
     console.warn('IDB app prefs save error:', error);
   }
@@ -447,12 +526,11 @@ export const loadAppPrefsFromFirestore = async (): Promise<AppPrefs | null> => {
 
 export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
   try {
-    const dbInstance = await openIDB();
+    const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readonly');
     const request = tx.objectStore(IDB_STORE).get('__app_prefs__');
     return new Promise((resolve, reject) => {
       request.onsuccess = () => {
-        dbInstance.close();
         if (request.result) {
           const wrapped = request.result.value ?? request.result;
           resolve({
@@ -464,7 +542,6 @@ export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
         resolve(null);
       };
       request.onerror = () => {
-        dbInstance.close();
         reject(request.error);
       };
     });
@@ -473,6 +550,20 @@ export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
     return null;
   }
 };
+
+/** Race a promise against a timeout. Rejects with a descriptive error if the timeout fires first. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** Firestore batch commit timeout — prevents indefinite hangs if the connection is stale. */
+const FIRESTORE_BATCH_TIMEOUT_MS = 30_000;
 
 export const saveProjectDataToFirestore = async (
   projectId: string,
@@ -595,7 +686,11 @@ export const saveProjectDataToFirestore = async (
     });
 
     if (ops > 0) writeBatches.push(batch.commit());
-    await Promise.all(writeBatches);
+    await withTimeout(
+      Promise.all(writeBatches),
+      FIRESTORE_BATCH_TIMEOUT_MS,
+      `Firestore project save (${writeBatches.length} batches, project ${projectId})`,
+    );
 
     // Signal success immediately — writes are durable. Stale-chunk cleanup below
     // is best-effort and must never block the caller or delay the sync status.

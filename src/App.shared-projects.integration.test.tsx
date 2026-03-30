@@ -135,6 +135,8 @@ vi.mock('./projectWorkspace', () => {
   return {
     loadSavedWorkspacePrefs: storageMocks.loadSavedWorkspacePrefs,
     loadProjectDataForView: storageMocks.loadProjectDataForView,
+    loadProjectDataFromIDBOnly: storageMocks.loadProjectDataForView,
+    reconcileWithFirestore: vi.fn().mockResolvedValue({ action: 'skip' }),
     createEmptyProjectViewState: () => makeEmpty(),
     toProjectViewState: (data: Record<string, unknown> | null) => {
       if (!data) return makeEmpty();

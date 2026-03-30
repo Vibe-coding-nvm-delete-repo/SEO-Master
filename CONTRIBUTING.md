@@ -131,3 +131,59 @@ npm run dev      # Start dev server at localhost:3000
 | `npm test` | Run all tests |
 | `npm run test:watch` | Tests in watch mode |
 | `npm run setup` | Full dependency install + WASM patches |
+
+### Worktree Workflow (Claude Code Agents)
+
+Claude Code agents work in isolated git worktrees under `.claude/worktrees/`. Here's the full merge + deploy process:
+
+**1. Verify in the worktree** (agent does this before declaring done):
+```bash
+npx tsc --noEmit      # zero errors
+npx vitest run        # all tests pass
+npx vite build        # clean build
+```
+
+**2. Commit in the worktree** (pre-commit hooks may fail in worktrees due to missing `.bin` links — use `--no-verify` if the 3 checks above already passed):
+```bash
+git add <files>
+git commit --no-verify -m "type(scope): description"
+```
+
+**3. Merge to main:**
+```bash
+cd C:/Users/chris/Downloads/KWG   # main repo root
+git stash                          # stash any uncommitted main changes
+git merge claude/<worktree-name> --no-edit
+git stash pop                      # restore stashed changes
+```
+
+**4. Build + deploy:**
+```bash
+cd C:/Users/chris/Downloads/KWG
+NAPI_RS_FORCE_WASI=1 npx vite build
+npx firebase deploy --only hosting,storage --project new-final-8edfc
+```
+
+If `npm run build` fails with "vite not recognized", run setup first:
+```bash
+npm install --ignore-scripts --legacy-peer-deps
+npm install --ignore-scripts --legacy-peer-deps esbuild-wasm @rollup/wasm-node --force
+node scripts/patch-wasm.cjs
+```
+
+**5. Clean up worktree** (optional — use `/exit-worktree` or leave for reference):
+```bash
+git worktree remove .claude/worktrees/<name>
+git branch -d claude/<name>
+```
+
+### Firebase Deployment
+
+| Target | Command |
+|--------|---------|
+| Hosting + Storage | `npx firebase deploy --only hosting,storage --project new-final-8edfc` |
+| Firestore rules only | `firebase deploy --only firestore --project new-final-8edfc` |
+| Preview channel | `npx firebase hosting:channel:deploy kwg-verify --project new-final-8edfc` |
+
+**Production URL:** https://new-final-8edfc.web.app
+**Console:** https://console.firebase.google.com/project/new-final-8edfc/overview

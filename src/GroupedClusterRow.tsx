@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, Copy, Loader2 } from 'lucide-react';
 import { CELL, TABLE_ZEBRA } from './tableConstants';
 import { normalizeMismatchedPageNames } from './GroupReviewEngine';
@@ -59,14 +59,22 @@ const GroupedClusterRow = React.memo(({
   setCurrentPage: (p: number) => void;
   isGroupSelected: boolean;
   selectedSubClusters: Set<string>;
-  onGroupSelect: (checked: boolean) => void;
+  onGroupSelect: (groupId: string, clusters: { tokens: string }[], checked: boolean) => void;
   onSubClusterSelect: (subKey: string, checked: boolean) => void;
   labelColorMap: Map<string, { border: string; bg: string; text: string; sectionName: string }>;
   groupActionButton?: React.ReactNode;
 }) => {
-  const groupedLabelSummary = groupedClusterAggregatedLabels(row);
-  const groupedCitySummary = groupedClusterAggregatedCities(row);
-  const groupedStateSummary = groupedClusterAggregatedStates(row);
+  const groupedLabelSummary = useMemo(() => groupedClusterAggregatedLabels(row), [row]);
+  const groupedCitySummary = useMemo(() => groupedClusterAggregatedCities(row), [row]);
+  const groupedStateSummary = useMemo(() => groupedClusterAggregatedStates(row), [row]);
+
+  // Lazy expansion: limit child keyword rows rendered per sub-cluster
+  const INITIAL_VISIBLE = 20;
+  const LOAD_MORE_INCREMENT = 50;
+  // Lazy expansion: limit child keyword rows rendered per sub-cluster
+  // State persists across collapse/re-expand (acceptable — perf gain is on initial expand)
+  const [visibleKeywordCounts, setVisibleKeywordCounts] = useState<Record<string, number>>({});
+
   return (
     <>
       <tr className="hover:bg-zinc-50/50 transition-colors">
@@ -75,7 +83,7 @@ const GroupedClusterRow = React.memo(({
             type="checkbox"
             className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
             checked={isGroupSelected}
-            onChange={(e) => onGroupSelect(e.target.checked)}
+            onChange={(e) => onGroupSelect(row.id, row.clusters, e.target.checked)}
           />
         </td>
         <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
@@ -92,6 +100,9 @@ const GroupedClusterRow = React.memo(({
               )}
             </button>
             <span className="break-words">{row.groupName}</span>
+            {row.groupAutoMerged && (
+              <span className="text-[10px] font-medium text-zinc-400 border-b-2 border-violet-400 leading-tight shrink-0" title="Created by group auto-merge">Merged</span>
+            )}
             <button
               onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.groupName)}`, '_blank'); }}
               className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/gname:opacity-100 transition-opacity shrink-0"
@@ -293,38 +304,105 @@ const GroupedClusterRow = React.memo(({
                 <td className={`${CELL.dataLabelLocation} capitalize`}>{cluster.locationCity || '-'}</td>
                 <td className={`${CELL.dataLabelLocation} uppercase`}>{cluster.locationState || '-'}</td>
               </tr>
-              {isSubExpanded && cluster.keywords.map((kw, i) => (
-                <tr
-                  key={groupedTabChildRowKey(subId, i, kw.keyword)}
-                  className={`${i % 2 === 0 ? TABLE_ZEBRA.childBase : TABLE_ZEBRA.childAlt} border-b border-zinc-100`}
-                >
-                  <td className="px-3 py-px" aria-hidden />
-                  <td className="px-3 py-px text-[11px] overflow-hidden min-w-0">
-                    <div className="pl-10 min-w-0">
-                      <span className="text-[11px] font-medium text-zinc-600 break-words" title={kw.keyword}>
-                        {kw.keyword}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-px min-w-0" aria-hidden />
-                  <td className="px-1.5 py-px" aria-hidden />
-                  <td className="px-1 py-px text-zinc-500 text-right tabular-nums text-[11px]">{keywordLenForCell(kw.keyword)}</td>
-                  <td className="px-1 py-px text-zinc-400 text-right tabular-nums text-[11px]">-</td>
-                  <td className="px-1 py-px text-zinc-600 text-right tabular-nums text-[11px]">1</td>
-                  <td className="px-1 py-px text-zinc-600 text-right tabular-nums text-[11px]">{volumeCellDisplay(kw.volume)}</td>
-                  <td className="px-1 py-px text-zinc-600 text-right tabular-nums text-[11px]">{kdCellDisplay(kw.kd)}</td>
-                  <KwRatingCell value={kw.kwRating} />
-                  <td className="px-3 py-px text-[11px] text-zinc-600 whitespace-nowrap overflow-hidden text-ellipsis max-w-[90px]" title={cluster.label}>{cluster.label}</td>
-                  <td className="px-3 py-px text-[11px] text-zinc-600 capitalize whitespace-nowrap">{groupedTabChildCity(kw, cluster)}</td>
-                  <td className="px-3 py-px text-[11px] text-zinc-600 uppercase whitespace-nowrap">{groupedTabChildState(kw, cluster)}</td>
-                </tr>
-              ))}
+              {isSubExpanded && (() => {
+                const visibleCount = visibleKeywordCounts[subId] ?? INITIAL_VISIBLE;
+                const visibleKws = cluster.keywords.slice(0, visibleCount);
+                const remaining = cluster.keywords.length - visibleCount;
+                return (
+                  <>
+                    {visibleKws.map((kw, i) => (
+                      <tr
+                        key={groupedTabChildRowKey(subId, i, kw.keyword)}
+                        className={`${i % 2 === 0 ? TABLE_ZEBRA.childBase : TABLE_ZEBRA.childAlt} border-b border-zinc-100`}
+                      >
+                        <td className="px-3 py-px" aria-hidden />
+                        <td className="px-3 py-px text-[11px] overflow-hidden min-w-0">
+                          <div className="pl-10 min-w-0">
+                            <span className="text-[11px] font-medium text-zinc-600 break-words" title={kw.keyword}>
+                              {kw.keyword}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-px min-w-0" aria-hidden />
+                        <td className="px-1.5 py-px" aria-hidden />
+                        <td className="px-1 py-px text-zinc-500 text-right tabular-nums text-[11px]">{keywordLenForCell(kw.keyword)}</td>
+                        <td className="px-1 py-px text-zinc-400 text-right tabular-nums text-[11px]">-</td>
+                        <td className="px-1 py-px text-zinc-600 text-right tabular-nums text-[11px]">1</td>
+                        <td className="px-1 py-px text-zinc-600 text-right tabular-nums text-[11px]">{volumeCellDisplay(kw.volume)}</td>
+                        <td className="px-1 py-px text-zinc-600 text-right tabular-nums text-[11px]">{kdCellDisplay(kw.kd)}</td>
+                        <KwRatingCell value={kw.kwRating} />
+                        <td className="px-3 py-px text-[11px] text-zinc-600 whitespace-nowrap overflow-hidden text-ellipsis max-w-[90px]" title={cluster.label}>{cluster.label}</td>
+                        <td className="px-3 py-px text-[11px] text-zinc-600 capitalize whitespace-nowrap">{groupedTabChildCity(kw, cluster)}</td>
+                        <td className="px-3 py-px text-[11px] text-zinc-600 uppercase whitespace-nowrap">{groupedTabChildState(kw, cluster)}</td>
+                      </tr>
+                    ))}
+                    {remaining > 0 && (
+                      <tr className="border-b border-zinc-100">
+                        <td colSpan={13} className="text-center py-1">
+                          <button
+                            onClick={() => setVisibleKeywordCounts(prev => ({ ...prev, [subId]: visibleCount + LOAD_MORE_INCREMENT }))}
+                            className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium"
+                          >
+                            Show more ({remaining} remaining)
+                          </button>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                );
+              })()}
             </React.Fragment>
           );
         });
       })()}
     </>
   );
+}, (prev, next) => {
+  // Custom areEqual: avoid re-renders when Set references change but relevant content doesn't
+  if (prev.row !== next.row) return false;
+  if (prev.isExpanded !== next.isExpanded) return false;
+  if (prev.isGroupSelected !== next.isGroupSelected) return false;
+  if (prev.labelColorMap !== next.labelColorMap) return false;
+  if (prev.groupActionButton !== next.groupActionButton) return false;
+  // Callbacks: stable after useCallback optimization
+  if (prev.toggleGroup !== next.toggleGroup) return false;
+  if (prev.toggleSubCluster !== next.toggleSubCluster) return false;
+  if (prev.onGroupSelect !== next.onGroupSelect) return false;
+  if (prev.onSubClusterSelect !== next.onSubClusterSelect) return false;
+  if (prev.setSelectedTokens !== next.setSelectedTokens) return false;
+  if (prev.setCurrentPage !== next.setCurrentPage) return false;
+  if (prev.onBlockToken !== next.onBlockToken) return false;
+  // Sets: only re-render if content relevant to THIS row changed
+  if (prev.expandedSubClusters !== next.expandedSubClusters) {
+    for (const cluster of prev.row.clusters) {
+      const subId = `${prev.row.id}-${cluster.pageName}`;
+      if (prev.expandedSubClusters.has(subId) !== next.expandedSubClusters.has(subId)) return false;
+    }
+  }
+  if (prev.selectedSubClusters !== next.selectedSubClusters) {
+    for (const cluster of prev.row.clusters) {
+      const subKey = `${prev.row.id}::${cluster.tokens}`;
+      if (prev.selectedSubClusters.has(subKey) !== next.selectedSubClusters.has(subKey)) return false;
+    }
+  }
+  if (prev.selectedTokens !== next.selectedTokens) {
+    // Check tokens from the top page (the ones actually rendered in this row)
+    const topPage = prev.row.clusters.length > 0 ? prev.row.clusters.reduce((best, c) => c.totalVolume > best.totalVolume ? c : best, prev.row.clusters[0]) : null;
+    if (topPage) {
+      for (const token of topPage.tokenArr) {
+        if (prev.selectedTokens.has(token) !== next.selectedTokens.has(token)) return false;
+      }
+    }
+    // Also check sub-cluster tokens if expanded
+    if (prev.isExpanded) {
+      for (const cluster of prev.row.clusters) {
+        for (const token of cluster.tokenArr) {
+          if (prev.selectedTokens.has(token) !== next.selectedTokens.has(token)) return false;
+        }
+      }
+    }
+  }
+  return true;
 });
 
 export default GroupedClusterRow;

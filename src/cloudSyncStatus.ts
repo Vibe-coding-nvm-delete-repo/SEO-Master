@@ -553,6 +553,11 @@ export function resetCloudSyncStateForTests(): void {
   notifyQueued = false;
 }
 
+/** Read-only probe for recovery timers — true when the last IDB write failed. */
+export function isLocalWriteFailed(): boolean {
+  return localWriteFailed;
+}
+
 export type CloudSyncDerived = {
   revision: number;
   local: {

@@ -29,6 +29,7 @@ export interface GroupAutoMergeCompareProgress {
 export interface GroupAutoMergeResolution {
   mergedGroups: GroupedCluster[];
   removedGroupIds: Set<string>;
+  removedApprovedGroupIds: Set<string>;
   appliedRecommendationIds: string[];
 }
 
@@ -117,7 +118,7 @@ function uniqueTopPageNames(group: GroupedCluster): string[] {
   return topPages;
 }
 
-export function buildGroupAutoMergeSource(group: GroupedCluster): GroupAutoMergeSource {
+export function buildGroupAutoMergeSource(group: GroupedCluster, source: 'grouped' | 'approved' = 'grouped'): GroupAutoMergeSource {
   const { summary: locationSummary, localityKey, isLocal } = buildLocationSummary(group);
   const topPageNames = uniqueTopPageNames(group);
   const normalizedName = normalizeName(group.groupName);
@@ -129,6 +130,7 @@ export function buildGroupAutoMergeSource(group: GroupedCluster): GroupAutoMerge
       pageCount: group.clusters.length,
       totalVolume: group.totalVolume,
       locationSummary,
+      source,
     },
     embeddingText: [
       `GROUP NAME: ${group.groupName}`,
@@ -292,11 +294,12 @@ function chooseMergeTemplate(groups: GroupedCluster[]): GroupedCluster {
 
 export function resolveGroupAutoMergeSelection(params: {
   groupedClusters: GroupedCluster[];
+  approvedGroups?: GroupedCluster[];
   recommendations: GroupMergeRecommendation[];
   selectedRecommendationIds: Iterable<string>;
   hasReviewApi: boolean;
 }): GroupAutoMergeResolution {
-  const { groupedClusters, recommendations, selectedRecommendationIds, hasReviewApi } = params;
+  const { groupedClusters, approvedGroups = [], recommendations, selectedRecommendationIds, hasReviewApi } = params;
   const selectedIds = new Set(selectedRecommendationIds);
   const selectedRecommendations = recommendations.filter(
     (recommendation) =>
@@ -304,7 +307,9 @@ export function resolveGroupAutoMergeSelection(params: {
       recommendation.status === 'pending',
   );
 
-  const groupById = new Map(groupedClusters.map((group) => [group.id, group]));
+  const allGroups = [...groupedClusters, ...approvedGroups];
+  const groupById = new Map(allGroups.map((group) => [group.id, group]));
+  const approvedIdSet = new Set(approvedGroups.map((group) => group.id));
   const involvedGroupIds = new Set<string>();
   for (const recommendation of selectedRecommendations) {
     involvedGroupIds.add(recommendation.groupA.id);
@@ -345,6 +350,7 @@ export function resolveGroupAutoMergeSelection(params: {
   }
 
   const removedGroupIds = new Set<string>();
+  const removedApprovedGroupIds = new Set<string>();
   const mergedGroups: GroupedCluster[] = [];
   for (const componentIds of components.values()) {
     const componentGroups = componentIds
@@ -356,23 +362,25 @@ export function resolveGroupAutoMergeSelection(params: {
     const uniquePages = new Map<string, GroupedCluster['clusters'][number]>();
     for (const group of componentGroups) {
       removedGroupIds.add(group.id);
+      if (approvedIdSet.has(group.id)) removedApprovedGroupIds.add(group.id);
       for (const page of group.clusters) {
         if (!uniquePages.has(page.tokens)) uniquePages.set(page.tokens, page);
       }
     }
 
-    mergedGroups.push(
-      buildGroupedClusterFromPages(
-        [...uniquePages.values()],
-        hasReviewApi,
-        { ...template, groupName: template.groupName },
-      ),
+    const merged = buildGroupedClusterFromPages(
+      [...uniquePages.values()],
+      hasReviewApi,
+      { ...template, groupName: template.groupName },
     );
+    merged.groupAutoMerged = true;
+    mergedGroups.push(merged);
   }
 
   return {
     mergedGroups,
     removedGroupIds,
+    removedApprovedGroupIds,
     appliedRecommendationIds: selectedRecommendations.map((recommendation) => recommendation.id),
   };
 }

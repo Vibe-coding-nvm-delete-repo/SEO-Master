@@ -1685,10 +1685,18 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     return () => clearInterval(interval);
   }, [isRunningRecon]);
 
-  // Compute token clusters from ungrouped pages
-  const clusters = useMemo(() => {
-    if (!effectiveClusters || effectiveClusters.length < 2) return [];
-    return buildCascadingClusters(effectiveClusters);
+  // Compute token clusters from ungrouped pages (async to avoid blocking UI)
+  const [clusters, setClusters] = useState<AutoGroupCluster[]>([]);
+  useEffect(() => {
+    if (!effectiveClusters || effectiveClusters.length < 2) {
+      setClusters([]);
+      return;
+    }
+    let cancelled = false;
+    buildCascadingClusters(effectiveClusters).then(result => {
+      if (!cancelled) setClusters(result);
+    });
+    return () => { cancelled = true; };
   }, [effectiveClusters]);
 
   const coveredPages = useMemo(() => countCoveredPages(clusters), [clusters]);
@@ -2582,7 +2590,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
   const compactTabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70';
   const compactTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
-  const compactTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const compactTabBtnActive = 'bg-white text-zinc-900 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#6366f1]';
   const compactTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
 
   return (

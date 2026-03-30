@@ -32,6 +32,8 @@ import {
 } from './projectStorage';
 import {
   loadProjectDataForView,
+  loadProjectDataFromIDBOnly,
+  reconcileWithFirestore,
   toProjectViewState,
   createEmptyProjectViewState,
   type ProjectViewState,
@@ -54,6 +56,7 @@ import type {
 } from './types';
 import { parseSubClusterKey } from './subClusterKeys';
 import { logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
+import { withPersistTimeout } from './persistTimeout';
 import {
   clearListenerError,
   CLOUD_SYNC_CHANNELS,
@@ -67,7 +70,11 @@ import {
   recordProjectFirestoreSaveOk,
   recordProjectFlushEnter,
   recordProjectFlushExit,
+  isLocalWriteFailed,
 } from './cloudSyncStatus';
+
+export const PROJECT_LOCAL_WRITE_TIMEOUT_MS = 15_000;
+export const PROJECT_CLOUD_WRITE_TIMEOUT_MS = 30_000;
 
 /** Matches App.tsx remove-from-approved row shape (cluster-level location). */
 function appendResultRowsRemoveFromApproved(
@@ -490,7 +497,13 @@ export function useProjectPersistence(options: {
       recordLocalPersistStart();
     }
     try {
-      await saveToIDB(projectId, payload);
+      await withPersistTimeout(
+        saveToIDB(projectId, payload),
+        PROJECT_LOCAL_WRITE_TIMEOUT_MS,
+        `project local write (${mode}:${projectId})`,
+      );
+      // Both modes clear the failed flag on success — this is critical so that
+      // a flush after a failed checkpoint can recover the durability status.
       recordLocalPersistOk({ decrementPending: mode === 'checkpoint' });
       return true;
     } catch (err) {
@@ -498,6 +511,9 @@ export function useProjectPersistence(options: {
         recordLocalPersistError();
         reportLocalPersistFailure(addToast, 'project data local save', err);
       } else {
+        // Flush mode: still update durability status so the UI reflects reality,
+        // but skip the toast (flushes are background work, don't spam the user).
+        recordLocalPersistError({ decrementPending: false });
         logPersistError('IDB save (flush)', err);
       }
       return false;
@@ -541,7 +557,11 @@ export function useProjectPersistence(options: {
         await persistProjectPayloadToIDB(projectId, payload, { mode: 'flush' });
         try {
           recordProjectCloudWriteStart();
-          await saveProjectDataToFirestore(projectId, payload, { saveId, clientId });
+          await withPersistTimeout(
+            saveProjectDataToFirestore(projectId, payload, { saveId, clientId }),
+            PROJECT_CLOUD_WRITE_TIMEOUT_MS,
+            `project cloud write (${projectId})`,
+          );
           recordProjectFirestoreSaveOk();
           console.log(
             '[PERSIST] Firestore save OK - grouped:',
@@ -606,6 +626,22 @@ export function useProjectPersistence(options: {
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
     };
+  }, [enqueueSave]);
+
+  // ── Auto-recovery: when local durability is "Failed", periodically retry ──
+  // This ensures that transient IDB failures (busy connection, temporary lock)
+  // automatically recover once IDB becomes available again, rather than staying
+  // stuck in the "Failed" state forever.
+  useEffect(() => {
+    const RECOVERY_INTERVAL_MS = 10_000; // retry every 10s
+    const timer = setInterval(() => {
+      if (!isLocalWriteFailed()) return;
+      if (!activeProjectIdRef.current) return;
+      if (isFlushingRef.current) return; // don't interfere with active flush
+      console.log('[PERSIST] Local durability failed — attempting recovery save...');
+      enqueueSave();
+    }, RECOVERY_INTERVAL_MS);
+    return () => clearInterval(timer);
   }, [enqueueSave]);
 
   // ── Helper: update latest + state + save atomically ───────────────────
@@ -689,25 +725,63 @@ export function useProjectPersistence(options: {
 
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
-    const data = await loadProjectDataForView(projectId);
     const project = projectList.find(p => p.id === projectId);
+
+    // ── Phase 1: IDB-first fast path (~5ms) ──────────────────────────────
+    // Show cached data instantly. Reconcile with Firestore in background.
+    const idbData = await loadProjectDataFromIDBOnly(projectId);
+
+    if (idbData) {
+      // skipRebuild: IDB data was saved by this app, clusterSummary is consistent.
+      // Consistency check inside toProjectViewState falls back to rebuilding if not.
+      const viewState = toProjectViewState(idbData, project, { skipRebuild: true });
+      applyViewState(viewState);
+
+      const loadedSaveId = idbData.lastSaveId ?? 0;
+      if (loadedSaveId > saveCounterRef.current) {
+        saveCounterRef.current = loadedSaveId;
+      }
+      loadFenceRef.current = countGroupedPages(viewState);
+
+      // Phase 1 done — spinner can disappear, data is visible.
+      projectLoadingRef.current = false;
+
+      // ── Phase 2: Background Firestore reconciliation (fire-and-forget) ──
+      // The onSnapshot listener handles real-time sync going forward.
+      // This is a safety net for when IDB is stale and the first snapshot
+      // was suppressed by the projectLoading guard during Phase 1.
+      const saveIdAtLoad = saveCounterRef.current;
+      reconcileWithFirestore(projectId, idbData)
+        .then((result) => {
+          if (activeProjectIdRef.current !== projectId) return;   // user switched projects
+          if (saveCounterRef.current > saveIdAtLoad) return;      // user edited or onSnapshot advanced
+          if (result.action === 'update' && result.data) {
+            const fsSaveId = result.data.lastSaveId ?? 0;
+            if (fsSaveId <= saveCounterRef.current) return;       // already up to date
+            const fsViewState = toProjectViewState(result.data, project);
+            applyViewState(fsViewState);
+            saveCounterRef.current = fsSaveId;
+            const fsTotal = countGroupedPages(fsViewState);
+            if (fsTotal > loadFenceRef.current) loadFenceRef.current = fsTotal;
+          }
+        })
+        .catch((err) => {
+          console.warn('[PERSIST] Background Firestore reconciliation failed:', err);
+        });
+
+      return;
+    }
+
+    // ── Fallback: No IDB cache — blocking load from both sources ────────
+    const data = await loadProjectDataForView(projectId);
     const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
     applyViewState(viewState);
 
-    // Initialize save counter from IDB so new saves continue from where we
-    // left off. This ensures that Firestore meta.saveId from our previous
-    // session is always <= saveCounterRef, which lets the stale-save guard work.
     const loadedSaveId = data?.lastSaveId ?? 0;
     if (loadedSaveId > saveCounterRef.current) {
       saveCounterRef.current = loadedSaveId;
     }
-
-    // Set load fence = total grouped pages loaded at startup. The onSnapshot
-    // listener will reject any snapshot that would shrink below this count — preventing
-    // stale Firestore data (from incomplete saves of a prior session) from
-    // overwriting the fresher IDB state.
-    const loadedTotal = countGroupedPages(viewState);
-    loadFenceRef.current = loadedTotal;
+    loadFenceRef.current = countGroupedPages(viewState);
 
     projectLoadingRef.current = false;
   }, [applyViewState]);

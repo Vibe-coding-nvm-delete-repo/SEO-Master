@@ -62,7 +62,7 @@ describe('compareGroupAutoMergeSources', () => {
     const carLoan = makeGroup('a', 'car loan', [makeCluster('car loan page', 'car loan tokens', 1000)]);
     const autoLoan = makeGroup('b', 'auto loan', [makeCluster('auto loan page', 'auto finance tokens', 900)]);
     const mortgage = makeGroup('c', 'mortgage', [makeCluster('mortgage page', 'home mortgage tokens', 800)]);
-    const sources = [carLoan, autoLoan, mortgage].map(buildGroupAutoMergeSource);
+    const sources = [carLoan, autoLoan, mortgage].map((g) => buildGroupAutoMergeSource(g));
     const fingerprint = buildGroupAutoMergeFingerprint([carLoan, autoLoan, mortgage]);
 
     const recommendations = await compareGroupAutoMergeSources({
@@ -85,7 +85,7 @@ describe('compareGroupAutoMergeSources', () => {
   it('suppresses obvious location mismatches before they become recommendations', async () => {
     const miami = makeGroup('a', 'personal loan', [makeCluster('personal loan miami', 'loan miami', 1000, { city: 'Miami', state: 'FL' })]);
     const chicago = makeGroup('b', 'personal loan', [makeCluster('personal loan chicago', 'loan chicago', 900, { city: 'Chicago', state: 'IL' })]);
-    const sources = [miami, chicago].map(buildGroupAutoMergeSource);
+    const sources = [miami, chicago].map((g) => buildGroupAutoMergeSource(g));
 
     const recommendations = await compareGroupAutoMergeSources({
       sources,

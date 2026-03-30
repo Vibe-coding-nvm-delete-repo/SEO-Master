@@ -23,6 +23,16 @@
 
 ## Content Pipeline (Generate > Content)
 
+- Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, and project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts.
+
+- Renderer-stability hardening pass for Generate/Content:
+  - `App` now mounts `Generate` and `Content` only when the tab is active or currently busy, instead of keeping both full trees mounted indefinitely.
+  - `Content` now mounts only active/busy pipeline stages and unmounts hidden idle stages, reducing hidden listener/write pressure.
+  - Generate instances now support `liveSyncEnabled` so hidden stages can suspend Firestore/upstream subscriptions while preserving active run continuity.
+  - Added Content safe mode guardrails (row/payload thresholds) that suspend hidden sync under heavy pressure and temporarily block high-risk bulk rewrites.
+  - Removed legacy `[DEBUG-LOOP]` logging noise from Generate runtime paths and added per-instance row payload estimation hooks for runtime pressure management.
+  - Added targeted coverage for mount policy, hidden-busy retention, safe-mode sync suspension, cache bounds, and IDB singleton reuse.
+
 - `Content` now supports a second external pipeline view: `Rating`, alongside `H2 Content`.
 - The content-stage rail now uses shorter stage labels and a visual left-to-right flow treatment:
   - `Page Name` -> `Pages`
@@ -39,7 +49,12 @@
   - `Rating Explanation` in the main output column
   - `Rating Score` in a separate visible table column
 - `H2 Content` now mirrors the `Rating Score` column so low-rated answers are visible directly in the rewrite view.
+- `H2 Body` now labels its inherited guideline column as `Page Guide` to make it explicit that the field comes from the upstream page-guide stage, not from a separate H2-only guideline authoring step.
+- `H2 Body` and `H2 Rate` now keep their upstream sync buttons visible as a recovery path when a user needs to manually rebuild derived rows from `Pages` or `H2 Body`.
 - `H2 Body` row sync now rebuilds one canonical per-H2 context bundle from `Pages`, `H2s`, `Page Guide`, and `H2 Rate`, so the visible H2 table and the generated prompt input stay aligned on `Page Name`, `#`, `H2 Name`, `Rating Score`, and H2-specific guideline text instead of silently dropping those fields.
+- `H2 Body` pipeline sync now ignores execution-only setting edits like concurrency, so changing concurrent request count no longer forces an unnecessary upstream row reload or clobbers the active table state.
+- Generate settings now preserve local concurrency edits through hydration races, so `Concurrent Requests` changes in shared generate subtabs no longer snap back to `5` when Firestore or cache snapshots arrive late.
+- Derived content subtabs now react to local upstream row updates with a local-preferred reload before Firestore catches up, so finishing `Pages`, `H2s`, `Page Guide`, `H2 Body`, or other upstream stages populates the next content subtab immediately instead of leaving it blank until a later remote snapshot lands.
 - `H2 Content` includes a top-level bulk `Redo Rated 3/4` action that resets only the H2 answers currently rated `3` or `4` back to pending for rewrite.
 - Shared Generate/Content instances now scope the header `Clear` button to the active visible subtab:
   - clearing a slot subtab only wipes that slot’s own generated state
@@ -85,11 +100,15 @@
   - settings now include a persisted `H2 JSON Contract` reference field beside the normal prompt tabs
 - `Pages` now keeps shared metadata columns visible while you switch into slot subtabs like `Page Guide`, and it adds an `H2s` preview column so the generated H2 outline stays visible during downstream review.
 - `H2 Body` now rebuilds from authoritative shared Page Guide data during upstream sync, so per-H2 guideline text and formatting instructions no longer stay stuck at `(No guidelines generated yet)` after Page Guide JSON has been generated.
+- `H2 Body` upstream sync now always rebuilds from the authoritative shared `Pages` rows before merging downstream outputs, so a newer local cache can no longer keep the `Page Guide` column frozen on stale placeholder text after a Page Guide save.
+- Derived content subtabs now load their upstream source rows from Firestore instead of trusting a newer-but-stale local cache, so fresh Page Guide / H2 / summary updates propagate through downstream tabs without being masked by an in-flight local snapshot.
+- Rows that broadcast upstream updates now wait for the local cache write to finish before emitting the shared refresh event, so the next tab cannot react to a half-written Page Guide snapshot and re-render stale `(No guidelines generated yet)` text.
 - Derived content subtabs now reuse persisted outputs only when the current derived prompt still matches the saved upstream-driven input, so `Page Guide` / `H2s` / prompt changes immediately invalidate stale `H2 Body`, `H2 Rate`, and downstream content rows instead of leaving old generated text attached to the wrong source state.
 - Downstream content builders now ignore stale upstream text unless the source row/slot is still in `generated` state, so resetting or erroring `Pages`, `H2s`, or `Page Guide` can no longer keep leaking old page titles/H2 context into `H2 Body` or `H1 Body`.
 - Generate row snapshot reloads and deferred upstream syncs now wait for active content batches to go idle, and generation flushes its latest row state before those shared-doc reloads resume. This prevents `H2 Body` batches from dropping back to `pending`, losing visible outputs, or snapping generated counts back to zero mid-run while preserving downstream `H2 Rate` carry-over.
 - Generate/content stop controls now keep a batch in a visible `Stopping...` state until the worker pool actually drains, discard late results after stop is requested, and abort retry backoff immediately. This prevents Stop from disappearing while hidden requests keep landing outputs underneath it.
 - Generate/content requests now resolve the OpenRouter API key from the shared live key source at request time, so the Pages surface can no longer send a missing auth header after the key was updated on another already-mounted subtab.
+- The shared OpenRouter API key now writes to the browser cache immediately on edit, and request resolution prefers the live in-memory value before falling back to shared cache so a stale cache cannot override a freshly entered key during content-tab hydration.
 - Generate/content toolbars now use an explicit saving phase instead of an inferred `Finalizing...` state, and final row persistence is time-bounded before the CTA is released. This prevents Pages/H2 batches from getting stranded on a dead-end completion button while cloud sync cleanup lags or stalls.
 - Content pipeline tables now use a more consistent compact column-width scale across subtabs, with tighter shared presets for metadata columns and clipped header overflow so narrow header labels and help icons no longer bleed into adjacent columns.
 - The `H2 Body` rewrite banner and Generate shell now use the same compact spacing rhythm as the rest of Content, so stacked cards stay tight and consistent without collapsing into each other.
@@ -189,7 +208,8 @@
 ### Select Project
 - Click project card to load its data. The workspace **clears immediately** when you select a different project, then loads that project’s saved data — you never see the previous project’s keywords on screen while the new one is loading (each project, e.g. Installment Loans vs Title Loans, stays visually separate).
 - Project switching is blocked while any Generate or Content run is active or still finalizing persistence, preventing in-flight shared-doc writes from landing in the wrong project workspace.
-- Loads **IDB + Firestore in parallel**; Firestore leg uses **`getDocsFromServer`** (falls back to cache if offline) so refresh does not merge against a **stale local Firestore cache**. Merges with `pickNewerProjectPayload`: monotonic `lastSaveId` (incremented on **every** local mutation before IDB checkpoint, not only on cloud flush), then `updatedAt`; **ties prefer Firestore**; safety rules when IDB has higher `lastSaveId` but **fewer CSV rows or fewer groups** vs server (legacy `saveId`, or large id gap). Fixes grouped/pages drops, “CSV disappeared” after refresh, and **ungroup/unblock reverting** when reload beat the debounced Firestore write.
+- **IDB-first instant loading** (two-phase): Phase 1 loads from IDB only (~5ms) and displays immediately with `skipRebuild` (skips the O(n) `rebuildClusters` if `clusterSummary` keyword count matches `results.length`). Phase 2 runs `reconcileWithFirestore` in the background — compares `lastSaveId`, applies Firestore data only if strictly newer. Guards prevent stale reconciliation if the user switches projects or makes edits before Phase 2 completes. Falls back to the blocking parallel IDB+Firestore load if IDB cache is empty.
+- **Blocking fallback** (no IDB cache): Loads IDB + Firestore in parallel; Firestore leg uses **`getDocsFromServer`** (falls back to cache if offline). Merges with `pickNewerProjectPayload`: monotonic `lastSaveId` (incremented on **every** local mutation before IDB checkpoint, not only on cloud flush), then `updatedAt`; **ties prefer Firestore**; safety rules when IDB has higher `lastSaveId` but **fewer CSV rows or fewer groups** vs server.
 - If Firestore wins, IDB cache is refreshed from it
 - Restores all state: results, clusters, tokens, groups, blocked keywords, stats
 - **`user_preferences` listener:** syncs **`savedClusters`** in realtime from the shared Firestore doc. It does **not** apply `activeProjectId` from remote snapshots — another collaborator (or stale cloud data) cannot switch your focused project; active project is chosen at init (URL + local/IDB prefs) and only changes from explicit in-app actions. Local changes still **write** `activeProjectId` to that doc for backup/cross-device visibility, but incoming listener updates ignore that field.
@@ -213,6 +233,8 @@
 - **Top-left status now shows write safety:** the cloud status chip turns amber for `Saving… don’t refresh` while IndexedDB durability is still pending, amber for `Saved locally — syncing…` while Firestore is still in flight, rose for local durability failures (`Save failed — local data at risk`) and cloud retry states, and keeps richer local/cloud details in the tooltip. When healthy, the chip adds a muted **clock suffix** after each successful Firestore write (project or shared doc), e.g. `Cloud: synced · 3:45:02 PM` — stable text that only changes when a new write completes (no per-second UI churn). The **Saved locally — syncing…** state uses **display hysteresis** (~600ms after writes finish) so rapid back-to-back Firestore operations do not flash synced/syncing.
 - **Unsafe refresh warning:** the browser now shows a native unload warning if you try to refresh while a local durability write is still pending or after a local save failure that could lose the latest edits.
 - **Visible local failure reporting:** IndexedDB failures now surface through the same status/toast flow instead of silently disappearing into the console.
+- **IDB deadlock hardening:** local persistence writes now use bounded timeouts (open/read/write/delete). If an IDB operation stalls (for example cross-tab lock contention), the app marks local persistence failure instead of hanging forever on `Saving… don’t refresh`, and project/shared Firestore sync can continue.
+- **Startup migration safety:** the Firebase-project migration path no longer calls `indexedDB.deleteDatabase` during startup, preventing cross-tab blocked-delete states from stalling live persistence.
 
 ---
 
@@ -570,7 +592,12 @@
   - source (`all / group / generate / content / feedback / projects / settings / system`)
   - free-text search across message, source, and project name
 - The table shows timestamp, type, source, scope (`Global` or a project name/id), the full notification text, and a **Copy** action.
-- Timestamp cells show both the browser-local date/time and a secondary **US Eastern** line.
+- **Pagination**: 50 notifications per page with Prev/Next controls, "Showing X–Y of Z", and "Page N of M". Resets to page 1 when filters change.
+- **Relative timestamps**: Primary display shows "just now", "Xm ago", "Xh ago", "yesterday", "Xd ago" with full absolute timestamps (local + US Eastern) below in smaller text.
+- **Human-readable descriptions**: 16 regex-matched patterns map technical messages to plain-English explanations shown in italic below the original message (e.g., "Auto-synced 130 H2 rows from upstream step" → "130 heading outlines were automatically pulled from the previous step").
+- **Summary stats bar**: Colored clickable badges above the filter bar showing counts per type (errors, warnings, success, info). Clicking a badge toggles the type filter as a quick shortcut.
+- **Expandable long messages**: Notifications longer than 120 characters are truncated with a "more" toggle. Expanding reveals the full message plus the humanized description.
+- **Improved empty states**: No-notifications state shows a Bell icon with helpful description. No-matches state shows a Search icon with "Clear all filters" button.
 - Copy uses the stored full notification text when present, otherwise it composes a formatted block with source, scope, timestamps, and message.
 - The Notifications feed starts from this rollout forward and does **not** backfill the existing Group activity log or the Updates changelog.
 
@@ -956,3 +983,9 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 
 - Derived content rows now keep generated output only when the saved row input still exactly matches the current upstream-derived prompt, making prompt changes and upstream content changes invalidate stale results deterministically instead of leaking them across subtabs.
 - The stricter reuse rule now covers `H2 Body`, `H2 Rate`, `H2 Summ.`, `H1 Body`, `H1 Body HTML`, `Quick Answer`, `Quick Answer HTML`, `Metas/Slug/CTAs`, and `Pro Tip/Red Flag/Key Takeaways`.
+
+### 2026-03-30: Page Guide -> H2 Body Local Fallback Guard
+
+- `H2 Body` source rebuilding now still uses remote `Pages` rows as primary data, but it can selectively reuse local `Page Guide` slot output when remote rows temporarily arrive without generated guide payloads during sync races.
+- Local fallback is only accepted when the local and remote H2 lists normalize to the exact same ordered signature, preventing stale/mismatched local guides from being copied into current H2 rows.
+- Added regression coverage for all three paths: remote wins when complete, local fallback fills missing guide slots when signatures match, and fallback is rejected when H2 signatures diverge.

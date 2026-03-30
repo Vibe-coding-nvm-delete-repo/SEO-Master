@@ -99,6 +99,7 @@ import { useTokenMerge } from './hooks/useTokenMerge';
 import { useAutoMerge } from './hooks/useAutoMerge';
 import { useGroupAutoMerge } from './hooks/useGroupAutoMerge';
 import { useFilteredTableData } from './hooks/useFilteredTableData';
+import { useTokenMgmtFiltering } from './hooks/useTokenMgmtFiltering';
 
 // Error boundary â€" catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
@@ -399,7 +400,7 @@ const ClusterRow = React.memo(({
     {isExpanded && row.keywords.map((kw, i) => (
       <tr
         key={pagesTabChildRowKey(row.pageName, i, kw.keyword)}
-        className="bg-zinc-50/70 border-b border-zinc-100"
+        className={`border-b border-zinc-100 ${i % 2 === 0 ? 'bg-zinc-50/70' : 'bg-zinc-100/50'}`}
       >
         <td className="px-3 py-0.5" aria-hidden />
         <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
@@ -640,8 +641,8 @@ const GroupedClusterRow = React.memo(({
       const isSubExpanded = expandedSubClusters.has(subId);
       return (
         <React.Fragment key={cIdx}>
-          <tr 
-            className="bg-indigo-50/40 hover:bg-indigo-50/70 transition-colors border-b border-zinc-100"
+          <tr
+            className={`hover:bg-indigo-50/70 transition-colors border-b border-zinc-100 ${cIdx % 2 === 0 ? 'bg-indigo-50/40' : 'bg-indigo-50/60'}`}
           >
             <td className="px-3 py-0.5" onClick={(e) => e.stopPropagation()}>
               <input 
@@ -743,7 +744,7 @@ const GroupedClusterRow = React.memo(({
           {isSubExpanded && cluster.keywords.map((kw, i) => (
             <tr
               key={groupedTabChildRowKey(subId, i, kw.keyword)}
-              className="bg-zinc-50/70 border-b border-zinc-100"
+              className={`border-b border-zinc-100 ${i % 2 === 0 ? 'bg-zinc-50/70' : 'bg-zinc-100/50'}`}
             >
               <td className="px-3 py-0.5" aria-hidden />
               <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
@@ -1019,8 +1020,25 @@ export default function App() {
     setMinKwRating,
     maxKwRating,
     setMaxKwRating,
+    debouncedMinClusterCount,
+    debouncedMaxClusterCount,
+    debouncedMinTokenLen,
+    debouncedMaxTokenLen,
+    debouncedFilterCity,
+    debouncedFilterState,
+    debouncedMinLen,
+    debouncedMaxLen,
+    debouncedMinKwInCluster,
+    debouncedMaxKwInCluster,
+    debouncedMinVolume,
+    debouncedMaxVolume,
+    debouncedMinKd,
+    debouncedMaxKd,
+    debouncedMinKwRating,
+    debouncedMaxKwRating,
     tokenMgmtSearch,
     setTokenMgmtSearch,
+    debouncedTokenMgmtSearch,
     tokenMgmtSort,
     setTokenMgmtSort,
     selectedMgmtTokens,
@@ -2056,11 +2074,14 @@ export default function App() {
     blockedKeywords, blockedTokens, labelSections,
     hasBlockedToken, pendingFilteredAutoGroupTokens, selectedTokens,
     debouncedSearchQuery, activeTab, isLabelDropdownOpen,
-    minClusterCount, maxClusterCount,
-    minLen, maxLen, minKwInCluster, maxKwInCluster,
-    minVolume, maxVolume, minKd, maxKd, minKwRating, maxKwRating,
-    filterCity, filterState, excludedLabels,
-    minTokenLen, maxTokenLen,
+    minClusterCount: debouncedMinClusterCount, maxClusterCount: debouncedMaxClusterCount,
+    minLen: debouncedMinLen, maxLen: debouncedMaxLen,
+    minKwInCluster: debouncedMinKwInCluster, maxKwInCluster: debouncedMaxKwInCluster,
+    minVolume: debouncedMinVolume, maxVolume: debouncedMaxVolume,
+    minKd: debouncedMinKd, maxKd: debouncedMaxKd,
+    minKwRating: debouncedMinKwRating, maxKwRating: debouncedMaxKwRating,
+    filterCity: debouncedFilterCity, filterState: debouncedFilterState, excludedLabels,
+    minTokenLen: debouncedMinTokenLen, maxTokenLen: debouncedMaxTokenLen,
     sortConfig, tokenSortConfig, keywordsSortConfig, blockedSortConfig,
     currentPage, itemsPerPage,
   });
@@ -2078,6 +2099,119 @@ export default function App() {
     filteredApprovedGroups, filteredBlocked, sortedBlocked,
     groupedStats, approvedPageCount, keywordGroupingProgress,
   } = filteredData;
+
+  // --- Performance: stable callbacks for row components ---
+  // Extract groupNameInput auto-population to a useEffect so onSelect callbacks don't close over clusterByTokens
+  useEffect(() => {
+    if (selectedClusters.size > 0) {
+      let highest: ClusterSummary | null = null;
+      for (const tokens of selectedClusters) {
+        const c = clusterByTokens.get(tokens);
+        if (c && (!highest || c.totalVolume > highest.totalVolume)) highest = c;
+      }
+      if (highest) setGroupNameInput(highest.pageName);
+    } else {
+      setGroupNameInput('');
+    }
+  }, [selectedClusters, clusterByTokens]);
+
+  // Stable callback: select/deselect a cluster on the Pages tab
+  const handleClusterSelect = useCallback((tokens: string, checked: boolean) => {
+    setSelectedClusters(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(tokens);
+      else next.delete(tokens);
+      return next;
+    });
+  }, []);
+
+  // Stable callback: toggle group expansion
+  const handleToggleGroup = useCallback((id: string) => {
+    setExpandedGroupedClusters(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Stable callback: toggle sub-cluster expansion
+  const handleToggleSubCluster = useCallback((subId: string) => {
+    setExpandedGroupedSubClusters(prev => {
+      const next = new Set(prev);
+      if (next.has(subId)) next.delete(subId);
+      else next.add(subId);
+      return next;
+    });
+  }, []);
+
+  // Stable callback: select/deselect a group (grouped + approved tabs)
+  const handleGroupSelect = useCallback((groupId: string, clusters: { tokens: string }[], checked: boolean) => {
+    setSelectedGroups(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(groupId);
+      else next.delete(groupId);
+      return next;
+    });
+    setSelectedSubClusters(prev => {
+      const next = new Set(prev);
+      clusters.forEach(c => {
+        const key = `${groupId}::${c.tokens}`;
+        if (checked) next.add(key);
+        else next.delete(key);
+      });
+      return next;
+    });
+  }, []);
+
+  // Stable callback: select/deselect a sub-cluster (grouped + approved tabs)
+  const handleSubClusterSelect = useCallback((subKey: string, checked: boolean) => {
+    setSelectedSubClusters(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(subKey);
+      else next.delete(subKey);
+      // Auto-select/deselect parent group
+      const parsed = parseSubClusterKey(subKey);
+      if (parsed) {
+        // Look up group in both grouped and approved lists via refs
+        const allGroups = [...(groupedClustersRef.current || []), ...(approvedGroupsRef.current || [])];
+        const group = allGroups.find(g => g.id === parsed.groupId);
+        if (group) {
+          const allSelected = group.clusters.every(c => next.has(`${parsed.groupId}::${c.tokens}`));
+          setSelectedGroups(gPrev => {
+            const gNext = new Set(gPrev);
+            if (allSelected) gNext.add(parsed.groupId);
+            else gNext.delete(parsed.groupId);
+            return gNext;
+          });
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  // Memoize approved tab sort+pagination (was an inline IIFE re-computed every render)
+  const sortedPaginatedApproved = useMemo(() => {
+    const sorted = [...filteredApprovedGroups].sort((a, b) => {
+      for (const { key, direction } of groupedSortConfig) {
+        let aVal: any, bVal: any;
+        if (key === 'groupName') { aVal = a.groupName.toLowerCase(); bVal = b.groupName.toLowerCase(); }
+        else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
+        else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
+        else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
+        else if (key === 'avgKwRating') { aVal = a.avgKwRating ?? -1; bVal = b.avgKwRating ?? -1; }
+        else { aVal = 0; bVal = 0; }
+        if (typeof aVal === 'string') {
+          const cmp = aVal.localeCompare(bVal);
+          if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
+          continue;
+        }
+        if (aVal !== bVal) return direction === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+      return 0;
+    });
+    return sorted.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+  }, [filteredApprovedGroups, groupedSortConfig, currentPage, itemsPerPage]);
 
   // Shared filter bag for TableHeader — single object passed to all tabs
   const filterBag = useMemo((): FilterBag => ({
@@ -2107,7 +2241,7 @@ export default function App() {
     childStats: Record<string, MergeTokenStats>;
   };
 
-  const tokenMgmtMergeSearchTerms = useMemo(() => parseTokenMgmtSearchTerms(tokenMgmtSearch), [tokenMgmtSearch]);
+  const tokenMgmtMergeSearchTerms = useMemo(() => parseTokenMgmtSearchTerms(debouncedTokenMgmtSearch), [debouncedTokenMgmtSearch]);
 
   // Merge subtab rows: 1 row per parent token + collapsible children underneath.
   // We compute token stats by simulating merges in rule order on a per-row tokenArr basis,
@@ -2284,103 +2418,15 @@ export default function App() {
   };
 
   // Token Management panel: filtered, sorted, paginated with subtab support
-  const filteredMgmtTokens = useMemo(() => {
-    if (tokenMgmtSubTab === 'merge' || tokenMgmtSubTab === 'auto-merge') return [];
-    if (!tokenSummary) return [];
-    let base: TokenSummary[];
-    if (tokenMgmtSubTab === 'blocked') {
-      base = tokenSummary.filter(t => blockedTokens.has(t.token) || universalBlockedTokens.has(t.token));
-    } else if (tokenMgmtSubTab === 'current') {
-      // Compute token stats FROM SCRATCH using only currently visible clusters (not global tokenSummary)
-      // This ensures "current" shows different data than "all" when filters are active
-      const tokenStatsMap = new Map<string, { token: string; totalVolume: number; frequency: number; kdSum: number; kdCount: number }>();
-
-      // Collect clusters based on active keyword management tab
-      const clusters: { tokenArr: string[]; keywords: { keyword: string; volume: number; kd: number | null }[] }[] = [];
-      if (activeTab === 'pages') {
-        clusters.push(...filteredClusters);
-      } else if (activeTab === 'grouped') {
-        for (const g of filteredSortedGrouped) clusters.push(...g.clusters);
-      } else if (activeTab === 'approved') {
-        for (const g of filteredApprovedGroups) clusters.push(...g.clusters);
-      }
-
-      // Build stats from clusters (for pages/grouped/approved tabs)
-      if (activeTab === 'pages' || activeTab === 'grouped' || activeTab === 'approved') {
-        for (const c of clusters) {
-          for (const t of c.tokenArr) {
-            if (blockedTokens.has(t)) continue;
-            const existing = tokenStatsMap.get(t);
-            if (existing) {
-              existing.totalVolume += c.keywords.reduce((s, kw) => s + kw.volume, 0);
-              existing.frequency += c.keywords.length;
-              c.keywords.forEach(kw => { if (kw.kd !== null) { existing.kdSum += kw.kd; existing.kdCount++; } });
-            } else {
-              const vol = c.keywords.reduce((s, kw) => s + kw.volume, 0);
-              let kdS = 0, kdC = 0;
-              c.keywords.forEach(kw => { if (kw.kd !== null) { kdS += kw.kd; kdC++; } });
-              tokenStatsMap.set(t, { token: t, totalVolume: vol, frequency: c.keywords.length, kdSum: kdS, kdCount: kdC });
-            }
-          }
-        }
-      }
-
-      if (activeTab === 'keywords') {
-        for (const r of filteredResults) {
-          for (const t of r.tokenArr) {
-            if (blockedTokens.has(t)) continue;
-            const existing = tokenStatsMap.get(t);
-            if (existing) {
-              existing.totalVolume += r.searchVolume;
-              existing.frequency += 1;
-              if (r.kd !== null) { existing.kdSum += r.kd; existing.kdCount++; }
-            } else {
-              tokenStatsMap.set(t, {
-                token: t,
-                totalVolume: r.searchVolume,
-                frequency: 1,
-                kdSum: r.kd ?? 0,
-                kdCount: r.kd !== null ? 1 : 0,
-              });
-            }
-          }
-        }
-      }
-
-      // Convert to TokenSummary format â€" pull extra fields from global tokenSummary if available
-      const globalMap = new Map<string, TokenSummary>((tokenSummary || []).map(t => [t.token, t]));
-      base = Array.from(tokenStatsMap.values()).map(s => {
-        const global = globalMap.get(s.token);
-        return {
-          token: s.token,
-          totalVolume: s.totalVolume,
-          frequency: s.frequency,
-          avgKd: s.kdCount > 0 ? Math.round(s.kdSum / s.kdCount) : null,
-          length: global?.length ?? s.token.length,
-          label: global?.label ?? '',
-          labelArr: global?.labelArr ?? [],
-          locationCity: global?.locationCity ?? '',
-          locationState: global?.locationState ?? '',
-        };
-      });
-    } else {
-      // 'all' â€" show all non-blocked tokens
-      base = tokenSummary.filter(t => !blockedTokens.has(t.token) && !universalBlockedTokens.has(t.token));
-    }
-    const terms = parseTokenMgmtSearchTerms(tokenMgmtSearch);
-    let tokens = terms.length ? base.filter(t => tokenIncludesAnyTerm(t.token, terms)) : [...base];
-    const { key, direction } = tokenMgmtSort;
-    tokens.sort((a, b) => {
-      const aVal = a[key];
-      const bVal = b[key];
-      if (aVal === null && bVal === null) return 0;
-      if (aVal === null) return 1;
-      if (bVal === null) return -1;
-      if (typeof aVal === 'string' && typeof bVal === 'string') return direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-      return direction === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
-    });
-    return tokens;
-  }, [tokenSummary, tokenMgmtSearch, tokenMgmtSort, tokenMgmtSubTab, blockedTokens, universalBlockedTokens, activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults]);
+  // Token management filtering — split into 3 stages for performance:
+  // Stage 1 (expensive): build token stats from filtered data — does NOT depend on search/sort
+  // Stage 2 (cheap): apply debounced search filter
+  // Stage 3 (cheap): sort
+  const filteredMgmtTokens = useTokenMgmtFiltering({
+    tokenSummary, tokenMgmtSubTab, blockedTokens, universalBlockedTokens,
+    activeTab, filteredClusters, filteredSortedGrouped, filteredApprovedGroups, filteredResults,
+    debouncedTokenMgmtSearch, tokenMgmtSort,
+  });
 
   const tokenMgmtTotalPages = Math.max(1, Math.ceil(filteredMgmtTokens.length / tokenMgmtPerPage));
   const safeMgmtPage = Math.min(tokenMgmtPage, tokenMgmtTotalPages);
@@ -2447,6 +2493,8 @@ export default function App() {
   } = useGroupAutoMerge({
     groupedClusters,
     groupedClustersRef,
+    approvedGroups,
+    approvedGroupsRef,
     groupMergeRecommendations,
     groupMergeRecommendationsRef,
     groupReviewSettingsRef,
@@ -2708,6 +2756,14 @@ export default function App() {
     removeFromApproved,
     ungroupPages,
   });
+
+  // Stable callback: middle-click on a ClusterRow to quick-group
+  const handleClusterMiddleClick = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      handleGroupClusters();
+    }
+  }, [handleGroupClusters]);
 
   // Update ETA every 10 seconds based on rolling average
   useEffect(() => {
@@ -3173,10 +3229,10 @@ FAILURE CONDITIONS TO AVOID:
 
   const tabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70';
   const mainTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5';
-  const mainTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const mainTabBtnActive = 'bg-white text-zinc-900 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#6366f1]';
   const mainTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/60';
   const subTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
-  const subTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const subTabBtnActive = 'bg-white text-zinc-900 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#6366f1]';
   const subTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
   const stateTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1';
 
@@ -3199,7 +3255,11 @@ FAILURE CONDITIONS TO AVOID:
                 className="flex min-w-0 flex-wrap items-center gap-1 text-[10px] text-zinc-400 leading-tight"
                 aria-label="Breadcrumb"
               >
-                <span className="text-zinc-600 font-medium">
+                <button
+                  type="button"
+                  onClick={() => navigateMainTab(mainTab)}
+                  className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors"
+                >
                   {mainTab === 'group'
                     ? 'Group'
                     : mainTab === 'generate'
@@ -3213,11 +3273,21 @@ FAILURE CONDITIONS TO AVOID:
                           : mainTab === 'updates'
                             ? 'Updates'
                             : 'Feature ideas'}
-                </span>
+                </button>
                 {mainTab === 'group' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium capitalize">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (groupSubTab === 'data' && activeProjectId) {
+                          setActiveProjectId(null);
+                        } else {
+                          setGroupSubTab(groupSubTab);
+                        }
+                      }}
+                      className="text-zinc-600 font-medium capitalize hover:text-zinc-800 hover:underline transition-colors"
+                    >
                       {groupSubTab === 'data'
                         ? (activeProjectId ? 'Data' : 'Projects')
                         : groupSubTab === 'topics'
@@ -3227,11 +3297,15 @@ FAILURE CONDITIONS TO AVOID:
                             : groupSubTab === 'log'
                               ? 'Log'
                               : groupSubTab}
-                    </span>
+                    </button>
                     {groupSubTab === 'settings' && (
                       <>
                         <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                        <span className="text-zinc-600 font-medium">
+                        <button
+                          type="button"
+                          onClick={() => setSettingsSubTab(settingsSubTab)}
+                          className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors"
+                        >
                           {settingsSubTab === 'general'
                             ? 'General'
                             : settingsSubTab === 'how-it-works'
@@ -3239,7 +3313,7 @@ FAILURE CONDITIONS TO AVOID:
                               : settingsSubTab === 'dictionaries'
                                 ? 'Dictionaries'
                                 : 'Blocked'}
-                        </span>
+                        </button>
                       </>
                     )}
                     {groupSubTab === 'data' && activeProjectId && (
@@ -3278,9 +3352,13 @@ FAILURE CONDITIONS TO AVOID:
                           </button>
                         )}
                         <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                        <span className="text-zinc-600 font-medium capitalize">
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab(activeTab)}
+                          className="text-zinc-600 font-medium capitalize hover:text-zinc-800 hover:underline transition-colors"
+                        >
                           {activeTab === 'pages' ? 'Pages (Ungrouped)' : activeTab === 'keywords' ? 'All Keywords' : activeTab === 'grouped' ? 'Pages (Grouped)' : activeTab === 'approved' ? 'Pages (Approved)' : 'Blocked'}
-                        </span>
+                        </button>
                       </>
                     )}
                   </>
@@ -3288,19 +3366,19 @@ FAILURE CONDITIONS TO AVOID:
                 {mainTab === 'generate' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium">Generate 1</span>
+                    <button type="button" onClick={() => navigateMainTab('generate')} className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors">Generate 1</button>
                   </>
                 )}
                 {mainTab === 'feedback' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium">Queue</span>
+                    <button type="button" onClick={() => navigateMainTab('feedback')} className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors">Queue</button>
                   </>
                 )}
                 {mainTab === 'feature-ideas' && (
                   <>
                     <ChevronRight className="w-2.5 h-2.5 shrink-0 text-zinc-300" aria-hidden />
-                    <span className="text-zinc-600 font-medium">Backlog</span>
+                    <button type="button" onClick={() => navigateMainTab('feature-ideas')} className="text-zinc-600 font-medium hover:text-zinc-800 hover:underline transition-colors">Backlog</button>
                   </>
                 )}
               </nav>
@@ -3428,7 +3506,7 @@ FAILURE CONDITIONS TO AVOID:
                   <Settings className="w-2.5 h-2.5 shrink-0" aria-hidden />Settings
                 </button>
                 <button type="button" onClick={() => navigateGroupSub('log')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'log' ? subTabBtnActive : subTabBtnInactive}`}>
-                  <ClipboardList className="w-2.5 h-2.5 shrink-0" aria-hidden />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
+                  <ClipboardList className="w-2.5 h-2.5 shrink-0" aria-hidden />Log {activityLog.length > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({activityLog.length})</span>}
                 </button>
               </div>
             </div>
@@ -3813,22 +3891,16 @@ FAILURE CONDITIONS TO AVOID:
                 <div className="flex items-center gap-1">
                   <div className={`${tabRailClass} w-fit`}>
                     <button
-                      onClick={() => switchTab('auto-group')}
-                      className={`${stateTabBtnBase} ${activeTab === 'auto-group' ? 'bg-violet-50 shadow-sm text-violet-700 border border-violet-200' : mainTabBtnInactive}`}
+                      onClick={() => switchTab('keywords')}
+                      className={`${stateTabBtnBase} ${activeTab === 'keywords' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
-                      <Zap className="w-3 h-3" />Auto-Group
+                      <List className="w-3 h-3" />All {(effectiveResults?.length || 0) > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('pages')}
                       className={`${stateTabBtnBase} ${activeTab === 'pages' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
-                      <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
-                    </button>
-                    <button
-                      onClick={() => switchTab('keywords')}
-                      className={`${stateTabBtnBase} ${activeTab === 'keywords' ? mainTabBtnActive : mainTabBtnInactive}`}
-                    >
-                      <List className="w-3 h-3" />All Keywords {(effectiveResults?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
+                      <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => {
@@ -3839,29 +3911,29 @@ FAILURE CONDITIONS TO AVOID:
                       }}
                       className={`${stateTabBtnBase} ${activeTab === 'grouped' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
-                      <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
+                      <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
                       {(() => { const mc = groupedClusters.filter(g => g.reviewStatus === 'mismatch').length; return mc > 0 ? <span className="ml-1 px-1 py-0.5 text-[9px] font-bold bg-red-100 text-red-700 rounded-full">{mc}</span> : null; })()}
                     </button>
                     <button
                       onClick={() => switchTab('group-auto-merge')}
-                      className={`${stateTabBtnBase} ${activeTab === 'group-auto-merge' ? 'bg-sky-50 shadow-sm text-sky-700 border border-sky-200' : mainTabBtnInactive}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'group-auto-merge' ? 'bg-sky-50 text-sky-700 border border-sky-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#0ea5e9]' : mainTabBtnInactive}`}
                     >
                       <Sparkles className="w-3 h-3" />Auto Merge
                       {pendingGroupMergeRecommendationsCount > 0 && (
-                        <span className="text-sky-600 ml-0.5">({pendingGroupMergeRecommendationsCount.toLocaleString()})</span>
+                        <span className="text-[10px] text-sky-600 ml-0.5">({pendingGroupMergeRecommendationsCount.toLocaleString()})</span>
                       )}
                     </button>
                     <button
                       onClick={() => switchTab('approved')}
-                      className={`${stateTabBtnBase} ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : mainTabBtnInactive}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'approved' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#10b981]' : mainTabBtnInactive}`}
                     >
-                      <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
+                      <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-[10px] text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('blocked')}
-                      className={`${stateTabBtnBase} ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : mainTabBtnInactive}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'blocked' ? 'bg-red-50 text-red-700 border border-red-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#ef4444]' : mainTabBtnInactive}`}
                     >
-                      <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
+                      <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-[10px] text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
                     </button>
                   </div>
                   <div className="ml-auto flex items-center gap-1.5">
@@ -4274,23 +4346,15 @@ FAILURE CONDITIONS TO AVOID:
                       showCheckbox={true}
                       allChecked={paginatedClusters.length > 0 && paginatedClusters.every(c => selectedClusters.has(c.tokens))}
                       onCheckAll={(checked) => {
-                        const newSelected = new Set(selectedClusters);
-                        if (checked) {
-                          paginatedClusters.forEach(c => newSelected.add(c.tokens));
-                        } else {
-                          paginatedClusters.forEach(c => newSelected.delete(c.tokens));
-                        }
-                        setSelectedClusters(newSelected);
-                        if (newSelected.size > 0) {
-                          let highest: ClusterSummary | null = null;
-                          for (const tokens of newSelected) {
-                            const c = clusterByTokens.get(tokens);
-                            if (c && (!highest || c.totalVolume > highest.totalVolume)) highest = c;
+                        setSelectedClusters(prev => {
+                          const next = new Set(prev);
+                          if (checked) {
+                            paginatedClusters.forEach(c => next.add(c.tokens));
+                          } else {
+                            paginatedClusters.forEach(c => next.delete(c.tokens));
                           }
-                          if (highest) setGroupNameInput(highest.pageName);
-                        } else {
-                          setGroupNameInput('');
-                        }
+                          return next;
+                        });
                       }}
                       sortKey={sortConfig[0]?.key ?? null}
                       sortDirection={sortConfig[0]?.direction ?? 'desc'}
@@ -4368,46 +4432,18 @@ FAILURE CONDITIONS TO AVOID:
                     />
                   ) : null}
                   <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
-                    {activeTab === 'pages' && paginatedClusters.map((row, idx) => (
-                      <ClusterRow 
-                        key={idx} 
-                        row={row} 
+                    {activeTab === 'pages' && paginatedClusters.map((row) => (
+                      <ClusterRow
+                        key={row.tokens}
+                        row={row}
                         isExpanded={expandedClusters.has(row.pageName)}
                         isSelected={selectedClusters.has(row.tokens)}
                         selectedTokens={selectedTokens}
                         toggleCluster={toggleCluster}
-                        onSelect={(checked) => {
-                          const newSelected = new Set(selectedClusters);
-                          if (checked) {
-                            newSelected.add(row.tokens);
-                          } else {
-                            newSelected.delete(row.tokens);
-                          }
-                          setSelectedClusters(newSelected);
-                          
-                          if (newSelected.size > 0) {
-                            let highest: ClusterSummary | null = null;
-                            for (const tokens of newSelected) {
-                              const c = clusterByTokens.get(tokens);
-                              if (c && (!highest || c.totalVolume > highest.totalVolume)) {
-                                highest = c;
-                              }
-                            }
-                            if (highest) setGroupNameInput(highest.pageName);
-                          } else {
-                            setGroupNameInput('');
-                          }
-                        }}
+                        onSelect={handleClusterSelect}
                         setSelectedTokens={setSelectedTokens}
                         setCurrentPage={setCurrentPage}
-                        onMiddleClick={(e) => {
-                          if (e.button === 1) { // Middle click
-                            e.preventDefault();
-                            if (selectedClusters.size > 0 && groupNameInput.trim()) {
-                              handleGroupClusters();
-                            }
-                          }
-                        }}
+                        onMiddleClick={handleClusterMiddleClick}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                       />
@@ -4447,67 +4483,21 @@ FAILURE CONDITIONS TO AVOID:
                       </tr>
                     ))}
                     
-                    {activeTab === 'grouped' && paginatedGroupedClusters.map((row, idx) => (
-                      <GroupedClusterRow 
-                        key={idx} 
-                        row={row} 
+                    {activeTab === 'grouped' && paginatedGroupedClusters.map((row) => (
+                      <GroupedClusterRow
+                        key={row.id}
+                        row={row}
                         isExpanded={expandedGroupedClusters.has(row.id)}
                         expandedSubClusters={expandedGroupedSubClusters}
-                        toggleGroup={(id) => {
-                          const newExpanded = new Set(expandedGroupedClusters);
-                          if (newExpanded.has(id)) newExpanded.delete(id);
-                          else newExpanded.add(id);
-                          setExpandedGroupedClusters(newExpanded);
-                        }}
-                        toggleSubCluster={(subId) => {
-                          const newExpanded = new Set(expandedGroupedSubClusters);
-                          if (newExpanded.has(subId)) newExpanded.delete(subId);
-                          else newExpanded.add(subId);
-                          setExpandedGroupedSubClusters(newExpanded);
-                        }}
+                        toggleGroup={handleToggleGroup}
+                        toggleSubCluster={handleToggleSubCluster}
                         selectedTokens={selectedTokens}
                         setSelectedTokens={setSelectedTokens}
                         setCurrentPage={setCurrentPage}
                         isGroupSelected={selectedGroups.has(row.id)}
                         selectedSubClusters={selectedSubClusters}
-                        onGroupSelect={(checked) => {
-                          const newGroups = new Set(selectedGroups);
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) {
-                            newGroups.add(row.id);
-                            // Also select all sub-clusters in this group
-                            row.clusters.forEach(c => newSubs.add(`${row.id}::${c.tokens}`));
-                          } else {
-                            newGroups.delete(row.id);
-                            // Also deselect all sub-clusters in this group
-                            row.clusters.forEach(c => newSubs.delete(`${row.id}::${c.tokens}`));
-                          }
-                          setSelectedGroups(newGroups);
-                          setSelectedSubClusters(newSubs);
-                        }}
-                        onSubClusterSelect={(subKey, checked) => {
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) {
-                            newSubs.add(subKey);
-                          } else {
-                            newSubs.delete(subKey);
-                          }
-                          setSelectedSubClusters(newSubs);
-                          // If all sub-clusters of a group are selected, auto-select the group
-                          const groupId = parseSubClusterKey(subKey)?.groupId;
-                          if (!groupId) return;
-                          const group = groupedClusters.find(g => g.id === groupId);
-                          if (group) {
-                            const allSelected = group.clusters.every(c => newSubs.has(`${groupId}::${c.tokens}`));
-                            const newGroups = new Set(selectedGroups);
-                            if (allSelected) {
-                              newGroups.add(groupId);
-                            } else {
-                              newGroups.delete(groupId);
-                            }
-                            setSelectedGroups(newGroups);
-                          }
-                        }}
+                        onGroupSelect={handleGroupSelect}
+                        onSubClusterSelect={handleSubClusterSelect}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                         groupActionButton={
@@ -4522,81 +4512,21 @@ FAILURE CONDITIONS TO AVOID:
                       />
                     ))}
 
-                    {activeTab === 'approved' && (() => {
-                      // Apply same multi-sorting as grouped tab
-                      const sorted = [...filteredApprovedGroups].sort((a, b) => {
-                        for (const { key, direction } of groupedSortConfig) {
-                          let aVal: any, bVal: any;
-                          if (key === 'groupName') { aVal = a.groupName.toLowerCase(); bVal = b.groupName.toLowerCase(); }
-                          else if (key === 'keywordCount') { aVal = a.keywordCount; bVal = b.keywordCount; }
-                          else if (key === 'totalVolume') { aVal = a.totalVolume; bVal = b.totalVolume; }
-                          else if (key === 'avgKd') { aVal = a.avgKd ?? -1; bVal = b.avgKd ?? -1; }
-                          else if (key === 'avgKwRating') { aVal = a.avgKwRating ?? -1; bVal = b.avgKwRating ?? -1; }
-                          else { aVal = 0; bVal = 0; }
-                          if (typeof aVal === 'string') {
-                            const cmp = aVal.localeCompare(bVal);
-                            if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
-                            continue;
-                          }
-                          if (aVal !== bVal) return direction === 'asc' ? aVal - bVal : bVal - aVal;
-                        }
-                        return 0;
-                      });
-                      // Apply same pagination
-                      const paginated = sorted.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
-                      return paginated;
-                    })().map((group, idx) => (
+                    {activeTab === 'approved' && sortedPaginatedApproved.map((group) => (
                       <GroupedClusterRow
                         key={group.id}
                         row={group}
                         isExpanded={expandedGroupedClusters.has(group.id)}
                         expandedSubClusters={expandedGroupedSubClusters}
-                        toggleGroup={(id) => {
-                          const newExpanded = new Set(expandedGroupedClusters);
-                          if (newExpanded.has(id)) newExpanded.delete(id);
-                          else newExpanded.add(id);
-                          setExpandedGroupedClusters(newExpanded);
-                        }}
-                        toggleSubCluster={(subId) => {
-                          const newExpanded = new Set(expandedGroupedSubClusters);
-                          if (newExpanded.has(subId)) newExpanded.delete(subId);
-                          else newExpanded.add(subId);
-                          setExpandedGroupedSubClusters(newExpanded);
-                        }}
+                        toggleGroup={handleToggleGroup}
+                        toggleSubCluster={handleToggleSubCluster}
                         selectedTokens={selectedTokens}
                         setSelectedTokens={setSelectedTokens}
                         setCurrentPage={setCurrentPage}
                         isGroupSelected={selectedGroups.has(group.id)}
                         selectedSubClusters={selectedSubClusters}
-                        onGroupSelect={(checked) => {
-                          const newGroups = new Set(selectedGroups);
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) {
-                            newGroups.add(group.id);
-                            group.clusters.forEach(c => newSubs.add(`${group.id}::${c.tokens}`));
-                          } else {
-                            newGroups.delete(group.id);
-                            group.clusters.forEach(c => newSubs.delete(`${group.id}::${c.tokens}`));
-                          }
-                          setSelectedGroups(newGroups);
-                          setSelectedSubClusters(newSubs);
-                        }}
-                        onSubClusterSelect={(subKey, checked) => {
-                          const newSubs = new Set(selectedSubClusters);
-                          if (checked) newSubs.add(subKey);
-                          else newSubs.delete(subKey);
-                          setSelectedSubClusters(newSubs);
-                          const groupId = parseSubClusterKey(subKey)?.groupId;
-                          if (!groupId) return;
-                          const g = approvedGroups.find(ag => ag.id === groupId);
-                          if (g) {
-                            const allSelected = g.clusters.every(c => newSubs.has(`${groupId}::${c.tokens}`));
-                            const newGroups = new Set(selectedGroups);
-                            if (allSelected) newGroups.add(groupId);
-                            else newGroups.delete(groupId);
-                            setSelectedGroups(newGroups);
-                          }
-                        }}
+                        onGroupSelect={handleGroupSelect}
+                        onSubClusterSelect={handleSubClusterSelect}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
                         groupActionButton={
@@ -4611,8 +4541,8 @@ FAILURE CONDITIONS TO AVOID:
                       />
                     ))}
 
-                    {activeTab === 'blocked' && sortedBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row, idx) => (
-                      <tr key={idx} className="hover:bg-red-50/50 transition-colors">
+                    {activeTab === 'blocked' && sortedBlocked.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((row) => (
+                      <tr key={row.keyword} className="hover:bg-red-50/50 transition-colors">
                         <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 break-words">{row.keyword}</td>
                         <td className="px-3 py-0.5 overflow-hidden">
                           {row.tokenArr ? (
@@ -4651,6 +4581,7 @@ FAILURE CONDITIONS TO AVOID:
               {activeTab === 'group-auto-merge' && (
                 <GroupAutoMergePanel
                   groupedClusters={groupedClusters}
+                  approvedGroups={approvedGroups}
                   recommendations={groupMergeRecommendations}
                   recommendationsAreStale={groupAutoMergeRecommendationsAreStale}
                   job={groupAutoMergeJob}
@@ -4976,10 +4907,10 @@ FAILURE CONDITIONS TO AVOID:
                                 </td>
                               </tr>
 
-                              {isExpanded && ruleRow.childTokens.map(childToken => {
+                              {isExpanded && ruleRow.childTokens.map((childToken, childIdx) => {
                                 const st = ruleRow.childStats[childToken];
                                 return (
-                                  <tr key={`${ruleRow.ruleId}::${childToken}`} className="hover:bg-zinc-50/30 transition-colors">
+                                  <tr key={`${ruleRow.ruleId}::${childToken}`} className={`transition-colors ${childIdx % 2 === 0 ? 'bg-zinc-50/50 hover:bg-zinc-50/70' : 'bg-zinc-100/40 hover:bg-zinc-100/60'}`}>
                                     <td className="px-2 py-1" onClick={(e) => e.stopPropagation()}>
                                       <input
                                         type="checkbox"
@@ -5405,7 +5336,7 @@ FAILURE CONDITIONS TO AVOID:
                   Dictionaries
                 </button>
                 <button type="button" onClick={() => navigateSettingsSub('blocked')} className={`${subTabBtnBase} text-[11px] ${settingsSubTab === 'blocked' ? subTabBtnActive : subTabBtnInactive}`}>
-                  Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
+                  Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
                 </button>
               </div>
             </div>

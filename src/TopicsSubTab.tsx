@@ -133,8 +133,7 @@ export default function TopicsSubTab() {
         merge: true,
         localContext: 'topics loans',
         cloudContext: 'topics loans',
-      }).then(({ cloudOk }) => {
-        if (cloudOk) return;
+      }).then(() => {
         suppressSnapshotRef.current = false;
       }).catch((err) => {
         suppressSnapshotRef.current = false;
