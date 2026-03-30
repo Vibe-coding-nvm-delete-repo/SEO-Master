@@ -49,11 +49,18 @@ const CHUNK_SIZE = 200;
 const CHUNKS_SUBCOLLECTION = 'chunks';
 
 /**
- * Firestore rejects nested `undefined` values; IDB saves already use JSON round-trip.
- * Apply the same normalization before `batch.set` so cloud sync matches local persistence.
+ * Firestore rejects nested `undefined` values.
+ * Apply JSON normalization before `batch.set` so cloud payloads are Firestore-safe.
  */
 export function sanitizeJsonForFirestore<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function toIDBRecord(projectId: string, data: unknown): Record<string, unknown> {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    return { projectId, ...(data as Record<string, unknown>) };
+  }
+  return { projectId, value: data };
 }
 
 export interface ProjectDataPayload {
@@ -261,12 +268,11 @@ function isTransientIDBError(err: unknown): boolean {
 }
 
 export const saveToIDB = async (projectId: string, data: unknown) => {
-  const cleanData = JSON.parse(JSON.stringify(data));
   if (isContentPipelineQaMode()) {
-    await saveQaLocalCache(projectId, cleanData);
+    await saveQaLocalCache(projectId, data);
     return;
   }
-  const record = { projectId, ...cleanData };
+  const record = toIDBRecord(projectId, data);
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= IDB_MAX_RETRIES; attempt++) {
@@ -274,11 +280,15 @@ export const saveToIDB = async (projectId: string, data: unknown) => {
       const dbInstance = await getIDB();
       const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
       tx.objectStore(IDB_STORE).put(record);
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error);
-      });
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        }),
+        15_000,
+        'IDB write transaction',
+      );
       return; // success
     } catch (error) {
       lastError = error;
@@ -541,6 +551,20 @@ export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
   }
 };
 
+/** Race a promise against a timeout. Rejects with a descriptive error if the timeout fires first. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** Firestore batch commit timeout — prevents indefinite hangs if the connection is stale. */
+const FIRESTORE_BATCH_TIMEOUT_MS = 30_000;
+
 export const saveProjectDataToFirestore = async (
   projectId: string,
   data: ProjectDataPayload,
@@ -662,7 +686,11 @@ export const saveProjectDataToFirestore = async (
     });
 
     if (ops > 0) writeBatches.push(batch.commit());
-    await Promise.all(writeBatches);
+    await withTimeout(
+      Promise.all(writeBatches),
+      FIRESTORE_BATCH_TIMEOUT_MS,
+      `Firestore project save (${writeBatches.length} batches, project ${projectId})`,
+    );
 
     // Signal success immediately — writes are durable. Stale-chunk cleanup below
     // is best-effort and must never block the caller or delay the sync status.

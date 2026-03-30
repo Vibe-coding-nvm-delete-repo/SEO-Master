@@ -56,6 +56,7 @@ import type {
 } from './types';
 import { parseSubClusterKey } from './subClusterKeys';
 import { logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
+import { withPersistTimeout } from './persistTimeout';
 import {
   clearListenerError,
   CLOUD_SYNC_CHANNELS,
@@ -71,6 +72,9 @@ import {
   recordProjectFlushExit,
   isLocalWriteFailed,
 } from './cloudSyncStatus';
+
+export const PROJECT_LOCAL_WRITE_TIMEOUT_MS = 15_000;
+export const PROJECT_CLOUD_WRITE_TIMEOUT_MS = 30_000;
 
 /** Matches App.tsx remove-from-approved row shape (cluster-level location). */
 function appendResultRowsRemoveFromApproved(
@@ -493,7 +497,11 @@ export function useProjectPersistence(options: {
       recordLocalPersistStart();
     }
     try {
-      await saveToIDB(projectId, payload);
+      await withPersistTimeout(
+        saveToIDB(projectId, payload),
+        PROJECT_LOCAL_WRITE_TIMEOUT_MS,
+        `project local write (${mode}:${projectId})`,
+      );
       // Both modes clear the failed flag on success — this is critical so that
       // a flush after a failed checkpoint can recover the durability status.
       recordLocalPersistOk({ decrementPending: mode === 'checkpoint' });
@@ -549,7 +557,11 @@ export function useProjectPersistence(options: {
         await persistProjectPayloadToIDB(projectId, payload, { mode: 'flush' });
         try {
           recordProjectCloudWriteStart();
-          await saveProjectDataToFirestore(projectId, payload, { saveId, clientId });
+          await withPersistTimeout(
+            saveProjectDataToFirestore(projectId, payload, { saveId, clientId }),
+            PROJECT_CLOUD_WRITE_TIMEOUT_MS,
+            `project cloud write (${projectId})`,
+          );
           recordProjectFirestoreSaveOk();
           console.log(
             '[PERSIST] Firestore save OK - grouped:',

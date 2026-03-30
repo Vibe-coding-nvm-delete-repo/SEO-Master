@@ -23,6 +23,8 @@
 
 ## Content Pipeline (Generate > Content)
 
+- Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, and project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts.
+
 - Renderer-stability hardening pass for Generate/Content:
   - `App` now mounts `Generate` and `Content` only when the tab is active or currently busy, instead of keeping both full trees mounted indefinitely.
   - `Content` now mounts only active/busy pipeline stages and unmounts hidden idle stages, reducing hidden listener/write pressure.

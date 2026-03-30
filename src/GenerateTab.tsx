@@ -1798,6 +1798,9 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       suppressRowsSnapshotRef.current = false;
       throw err;
     }
+    // Reset suppress flag after successful write — the onSnapshot echo will
+    // also reset it, but if the echo never arrives we must not stay stuck.
+    suppressRowsSnapshotRef.current = false;
   }, [rowsDocId]);
 
   const applyPipelineRows = useCallback(
@@ -2038,6 +2041,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       suppressLogsSnapshotRef.current = false;
       throw err;
     }
+    suppressLogsSnapshotRef.current = false;
   }, [addToast, logsDocId, logsSuffix]);
   const { schedule: scheduleLogsPersist, flushNow: flushLogsPersistNow } = useLatestPersistQueue(persistLogs);
   useEffect(() => {
@@ -2694,6 +2698,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       suppressSettingsSnapshotRef.current = false;
       throw err;
     }
+    suppressSettingsSnapshotRef.current = false;
   }, [addToast, settings, settingsDocId, suffix, toSharedGenerateSettings]);
   const { schedule: scheduleSettingsPersist, flushNow: flushSettingsPersistNow } = useLatestPersistQueue(persistSettings);
   useEffect(() => {
@@ -2724,6 +2729,8 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       cloudContext: 'generate settings',
       localStorageKey: settingsCacheKey(settingsDocId),
       localStorageValue: json,
+    }).then(() => {
+      suppressSettingsSnapshotRef.current = false;
     }).catch(() => {
       suppressSettingsSnapshotRef.current = false;
     });
