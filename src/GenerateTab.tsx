@@ -653,7 +653,7 @@ const activeSubTabCacheKey = `${GENERATE_CACHE_PREFIX}:active_subtab`;
 const compactTabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70 w-fit';
 const flowTabRailClass = 'flex flex-wrap items-center gap-1 rounded-xl border border-zinc-200/70 bg-zinc-50/90 px-2 py-1.5';
 const compactTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
-const compactTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+const compactTabBtnActive = 'bg-white text-zinc-900 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#6366f1]';
 const compactTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
 const toTestIdSegment = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'item';
@@ -909,11 +909,11 @@ function FlowTabButton({
 }) {
   const stateClass = disabled
     ? active
-      ? 'bg-zinc-100 text-zinc-600 border border-zinc-200 shadow-sm cursor-not-allowed'
+      ? 'bg-zinc-100 text-zinc-600 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#a1a1aa] cursor-not-allowed'
       : 'bg-zinc-50 text-zinc-400 border border-zinc-200 cursor-not-allowed'
     : locked
     ? active
-      ? 'bg-zinc-200 text-zinc-700 border border-zinc-300 shadow-sm'
+      ? 'bg-zinc-200 text-zinc-700 border border-zinc-300 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#a1a1aa]'
       : 'bg-zinc-100 text-zinc-400 border border-zinc-200 hover:bg-zinc-200/80'
     : active
       ? compactTabBtnActive

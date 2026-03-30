@@ -3173,10 +3173,10 @@ FAILURE CONDITIONS TO AVOID:
 
   const tabRailClass = 'flex items-center gap-0.5 bg-zinc-100/80 p-0.5 rounded-lg border border-zinc-200/70';
   const mainTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5';
-  const mainTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const mainTabBtnActive = 'bg-white text-zinc-900 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#6366f1]';
   const mainTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200/60';
   const subTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all';
-  const subTabBtnActive = 'bg-white shadow-sm text-zinc-900 border border-zinc-200';
+  const subTabBtnActive = 'bg-white text-zinc-900 border border-zinc-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#6366f1]';
   const subTabBtnInactive = 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100/70';
   const stateTabBtnBase = 'px-2.5 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1';
 
@@ -3428,7 +3428,7 @@ FAILURE CONDITIONS TO AVOID:
                   <Settings className="w-2.5 h-2.5 shrink-0" aria-hidden />Settings
                 </button>
                 <button type="button" onClick={() => navigateGroupSub('log')} className={`${subTabBtnBase} flex items-center gap-1 ${groupSubTab === 'log' ? subTabBtnActive : subTabBtnInactive}`}>
-                  <ClipboardList className="w-2.5 h-2.5 shrink-0" aria-hidden />Log {activityLog.length > 0 && <span className="text-zinc-400 ml-0.5">({activityLog.length})</span>}
+                  <ClipboardList className="w-2.5 h-2.5 shrink-0" aria-hidden />Log {activityLog.length > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({activityLog.length})</span>}
                 </button>
               </div>
             </div>
@@ -3813,22 +3813,16 @@ FAILURE CONDITIONS TO AVOID:
                 <div className="flex items-center gap-1">
                   <div className={`${tabRailClass} w-fit`}>
                     <button
-                      onClick={() => switchTab('auto-group')}
-                      className={`${stateTabBtnBase} ${activeTab === 'auto-group' ? 'bg-violet-50 shadow-sm text-violet-700 border border-violet-200' : mainTabBtnInactive}`}
+                      onClick={() => switchTab('keywords')}
+                      className={`${stateTabBtnBase} ${activeTab === 'keywords' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
-                      <Zap className="w-3 h-3" />Auto-Group
+                      <List className="w-3 h-3" />All {(effectiveResults?.length || 0) > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('pages')}
                       className={`${stateTabBtnBase} ${activeTab === 'pages' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
-                      <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
-                    </button>
-                    <button
-                      onClick={() => switchTab('keywords')}
-                      className={`${stateTabBtnBase} ${activeTab === 'keywords' ? mainTabBtnActive : mainTabBtnInactive}`}
-                    >
-                      <List className="w-3 h-3" />All Keywords {(effectiveResults?.length || 0) > 0 && <span className="text-zinc-400 ml-0.5">({(effectiveResults?.length || 0).toLocaleString()})</span>}
+                      <FileText className="w-3 h-3" />Ungrouped {(effectiveClusters?.length || 0) > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({(effectiveClusters?.length || 0).toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => {
@@ -3839,29 +3833,29 @@ FAILURE CONDITIONS TO AVOID:
                       }}
                       className={`${stateTabBtnBase} ${activeTab === 'grouped' ? mainTabBtnActive : mainTabBtnInactive}`}
                     >
-                      <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
+                      <Layers className="w-3 h-3" />Grouped {effectiveGrouped.length > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({effectiveGrouped.length.toLocaleString()}/{groupedStats.pagesGrouped.toLocaleString()})</span>}
                       {(() => { const mc = groupedClusters.filter(g => g.reviewStatus === 'mismatch').length; return mc > 0 ? <span className="ml-1 px-1 py-0.5 text-[9px] font-bold bg-red-100 text-red-700 rounded-full">{mc}</span> : null; })()}
                     </button>
                     <button
                       onClick={() => switchTab('group-auto-merge')}
-                      className={`${stateTabBtnBase} ${activeTab === 'group-auto-merge' ? 'bg-sky-50 shadow-sm text-sky-700 border border-sky-200' : mainTabBtnInactive}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'group-auto-merge' ? 'bg-sky-50 text-sky-700 border border-sky-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#0ea5e9]' : mainTabBtnInactive}`}
                     >
                       <Sparkles className="w-3 h-3" />Auto Merge
                       {pendingGroupMergeRecommendationsCount > 0 && (
-                        <span className="text-sky-600 ml-0.5">({pendingGroupMergeRecommendationsCount.toLocaleString()})</span>
+                        <span className="text-[10px] text-sky-600 ml-0.5">({pendingGroupMergeRecommendationsCount.toLocaleString()})</span>
                       )}
                     </button>
                     <button
                       onClick={() => switchTab('approved')}
-                      className={`${stateTabBtnBase} ${activeTab === 'approved' ? 'bg-emerald-50 shadow-sm text-emerald-700 border border-emerald-200' : mainTabBtnInactive}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'approved' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#10b981]' : mainTabBtnInactive}`}
                     >
-                      <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
+                      <CheckCircle2 className="w-3 h-3" />Approved {approvedGroups.length > 0 && <span className="text-[10px] text-emerald-600 ml-0.5">({approvedGroups.length.toLocaleString()}/{approvedPageCount.toLocaleString()})</span>}
                     </button>
                     <button
                       onClick={() => switchTab('blocked')}
-                      className={`${stateTabBtnBase} ${activeTab === 'blocked' ? 'bg-red-50 shadow-sm text-red-700 border border-red-200' : mainTabBtnInactive}`}
+                      className={`${stateTabBtnBase} ${activeTab === 'blocked' ? 'bg-red-50 text-red-700 border border-red-200 shadow-[0_1px_2px_0_rgba(0,0,0,0.05),inset_0_-2px_0_0_#ef4444]' : mainTabBtnInactive}`}
                     >
-                      <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
+                      <Lock className="w-3 h-3" />Blocked {allBlockedKeywords.length > 0 && <span className="text-[10px] text-red-500 ml-0.5">({allBlockedKeywords.length.toLocaleString()})</span>}
                     </button>
                   </div>
                   <div className="ml-auto flex items-center gap-1.5">
@@ -5405,7 +5399,7 @@ FAILURE CONDITIONS TO AVOID:
                   Dictionaries
                 </button>
                 <button type="button" onClick={() => navigateSettingsSub('blocked')} className={`${subTabBtnBase} text-[11px] ${settingsSubTab === 'blocked' ? subTabBtnActive : subTabBtnInactive}`}>
-                  Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
+                  Universal Blocked {universalBlockedTokens.size > 0 && <span className="text-[10px] text-zinc-400 ml-0.5">({universalBlockedTokens.size})</span>}
                 </button>
               </div>
             </div>
