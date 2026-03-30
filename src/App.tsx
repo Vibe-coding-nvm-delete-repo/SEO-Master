@@ -2447,6 +2447,8 @@ export default function App() {
   } = useGroupAutoMerge({
     groupedClusters,
     groupedClustersRef,
+    approvedGroups,
+    approvedGroupsRef,
     groupMergeRecommendations,
     groupMergeRecommendationsRef,
     groupReviewSettingsRef,
@@ -4651,6 +4653,7 @@ FAILURE CONDITIONS TO AVOID:
               {activeTab === 'group-auto-merge' && (
                 <GroupAutoMergePanel
                   groupedClusters={groupedClusters}
+                  approvedGroups={approvedGroups}
                   recommendations={groupMergeRecommendations}
                   recommendationsAreStale={groupAutoMergeRecommendationsAreStale}
                   job={groupAutoMergeJob}

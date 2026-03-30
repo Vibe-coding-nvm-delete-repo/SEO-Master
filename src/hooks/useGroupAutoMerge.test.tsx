@@ -132,10 +132,15 @@ describe('useGroupAutoMerge', () => {
     const logAndToast = vi.fn();
     const flushNow = vi.fn(async () => {});
 
+    const approvedGroups: GroupedCluster[] = [];
+    const approvedGroupsRef = { current: approvedGroups };
+
     const { result } = renderHook(() =>
       useGroupAutoMerge({
         groupedClusters,
         groupedClustersRef,
+        approvedGroups,
+        approvedGroupsRef,
         groupMergeRecommendations: recommendations,
         groupMergeRecommendationsRef,
         groupReviewSettingsRef,

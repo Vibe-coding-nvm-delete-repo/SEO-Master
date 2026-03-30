@@ -38,6 +38,11 @@ export async function fetchOpenRouterEmbeddings(
 
   async function fetchBatch(batchIndex: number, batch: string[]) {
     if (signal?.aborted) throw new Error('Aborted');
+    // Combine user cancellation signal with a 60s per-batch timeout
+    const timeoutSignal = AbortSignal.timeout(60_000);
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
     const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -46,7 +51,7 @@ export async function fetchOpenRouterEmbeddings(
         'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : '',
       },
       body: JSON.stringify({ model, input: batch }),
-      signal,
+      signal: combinedSignal,
     });
 
     if (!response.ok) {

@@ -5,6 +5,7 @@ import type { GroupMergeRecommendation, GroupedCluster } from './types';
 
 interface GroupAutoMergePanelProps {
   groupedClusters: GroupedCluster[];
+  approvedGroups: GroupedCluster[];
   recommendations: GroupMergeRecommendation[];
   recommendationsAreStale: boolean;
   job: GroupAutoMergeJobState;
@@ -35,6 +36,7 @@ function similarityTone(similarity: number): string {
 
 const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
   groupedClusters,
+  approvedGroups,
   recommendations,
   recommendationsAreStale,
   job,
@@ -63,14 +65,14 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
     [expandedIdsState, visibleRecommendationIds],
   );
   const groupsById = useMemo(
-    () => new Map(groupedClusters.map((group) => [group.id, group])),
-    [groupedClusters],
+    () => new Map([...groupedClusters, ...approvedGroups].map((group) => [group.id, group])),
+    [groupedClusters, approvedGroups],
   );
 
   const handleApply = async (recommendationIds: string[]) => {
     if (recommendationIds.length === 0) return;
     const confirmed = window.confirm(
-      `Merge ${recommendationIds.length} recommendation${recommendationIds.length === 1 ? '' : 's'}? This rewrites current grouped groups and there is no persisted undo history for v1.`,
+      `Merge ${recommendationIds.length} recommendation${recommendationIds.length === 1 ? '' : 's'}? Merged groups land in the Grouped tab. Any approved groups involved will lose their approved status. There is no persisted undo history for v1.`,
     );
     if (!confirmed) return;
     const applied = await onApply(recommendationIds);
@@ -85,11 +87,11 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
     setSelectedIds((prev) => new Set([...prev].filter((id) => !recommendationIds.includes(id))));
   };
 
-  if (groupedClusters.length < 2) {
+  if (groupedClusters.length + approvedGroups.length < 2) {
     return (
       <div className="border-t border-zinc-100">
         <div className="py-14 text-center text-sm text-zinc-400">
-          Need at least 2 groups in <span className="font-medium text-zinc-500">Grouped</span> before Auto Merge can compare them.
+          Need at least 2 groups across <span className="font-medium text-zinc-500">Grouped</span> and <span className="font-medium text-zinc-500">Approved</span> before Auto Merge can compare them.
         </div>
       </div>
     );
@@ -122,7 +124,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
           )}
 
           <span className="text-[11px] text-zinc-500">
-            Compares all current grouped groups using embeddings of the group name, location summary, and top pages.
+            Compares all Grouped + Approved groups using embeddings of the group name, location summary, and top pages.
           </span>
 
           {pendingRecommendations.length > 0 && (
@@ -261,14 +263,24 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                         </span>
                       </td>
                       <td className="px-3 py-2">
-                        <div className="font-medium text-zinc-800">{recommendation.groupA.name}</div>
+                        <div className="font-medium text-zinc-800 flex items-center gap-1.5">
+                          {recommendation.groupA.name}
+                          {recommendation.groupA.source === 'approved' && (
+                            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">Approved</span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-zinc-500">
                           {recommendation.groupA.pageCount} pages · {recommendation.groupA.totalVolume.toLocaleString()} vol
                         </div>
                         <div className="text-[11px] text-zinc-400">{recommendation.groupA.locationSummary}</div>
                       </td>
                       <td className="px-3 py-2">
-                        <div className="font-medium text-zinc-800">{recommendation.groupB.name}</div>
+                        <div className="font-medium text-zinc-800 flex items-center gap-1.5">
+                          {recommendation.groupB.name}
+                          {recommendation.groupB.source === 'approved' && (
+                            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">Approved</span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-zinc-500">
                           {recommendation.groupB.pageCount} pages · {recommendation.groupB.totalVolume.toLocaleString()} vol
                         </div>
@@ -279,6 +291,9 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                           {recommendation.exactNameMatch ? <SignalChip label="Exact group name" tone="emerald" /> : null}
                           {recommendation.sharedPageNameCount > 0 ? <SignalChip label={`${recommendation.sharedPageNameCount} shared page${recommendation.sharedPageNameCount === 1 ? '' : 's'}`} tone="sky" /> : null}
                           <SignalChip label={recommendation.locationCompatible ? 'Location compatible' : 'Location mismatch'} tone={recommendation.locationCompatible ? 'zinc' : 'amber'} />
+                          {(recommendation.groupA.source === 'approved' || recommendation.groupB.source === 'approved') && (
+                            <SignalChip label="Reverts to Grouped" tone="amber" />
+                          )}
                         </div>
                       </td>
                       <td className="px-3 py-2">
