@@ -72,10 +72,8 @@ export function addOpenRouterUsage(a: OpenRouterUsage, b: OpenRouterUsage): Open
 
 /** Human-readable duration for job timer */
 export function formatKeywordRatingDuration(ms: number): string {
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60000);
-  const s = Math.floor((ms % 60000) / 1000);
-  return `${m}m ${s}s`;
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 /** Build newline-separated keyword list for the summary phase */

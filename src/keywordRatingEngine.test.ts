@@ -123,11 +123,20 @@ describe('parseOpenRouterUsage + addOpenRouterUsage', () => {
 });
 
 describe('formatKeywordRatingDuration', () => {
-  it('formats under one minute', () => {
+  it('formats under 1 second as milliseconds', () => {
+    expect(formatKeywordRatingDuration(500)).toBe('500ms');
+    expect(formatKeywordRatingDuration(999)).toBe('999ms');
+  });
+  it('formats zero correctly', () => {
+    expect(formatKeywordRatingDuration(0)).toBe('0ms');
+  });
+  it('formats 1 second and above as seconds', () => {
+    expect(formatKeywordRatingDuration(1000)).toBe('1.0s');
     expect(formatKeywordRatingDuration(12_340)).toBe('12.3s');
   });
-  it('formats minutes', () => {
-    expect(formatKeywordRatingDuration(125_000)).toBe('2m 5s');
+  it('formats exact minutes and above as seconds', () => {
+    expect(formatKeywordRatingDuration(60_000)).toBe('60.0s');
+    expect(formatKeywordRatingDuration(125_000)).toBe('125.0s');
   });
 });
 
