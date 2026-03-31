@@ -8,6 +8,7 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 2. [`CLAUDE.md`](./CLAUDE.md) — persistence, ref-before-save, Firestore snapshot suppression, verification commands, environment constraints (WDAC, Tailwind CDN, etc.).
 3. [`CONTRIBUTING.md`](./CONTRIBUTING.md) — workflow, file layout, testing requirements, technical debt prevention.
 4. [`ARCHITECTURE.md`](./ARCHITECTURE.md) — data flow, storage shape, where logic should live.
+5. [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) — authoritative shared-project persistence contract, recovery limits, and rollout rules.
 
 ## Non‑negotiables (summary)
 
@@ -16,6 +17,7 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 - **Snapshots:** Set `suppressSnapshotRef` during writes so `onSnapshot` does not clobber in-flight updates.
 - **Bootstrap guards:** Any feature that combines async local fallback (IndexedDB/localStorage) with a Firestore listener must use an explicit “Firestore is authoritative” guard so an initial empty/missing snapshot cannot wipe good local state during startup.
 - **Multi-user:** Treat Firestore as source of truth for shared projects; design for concurrent editors.
+- **Shared-project V2:** Before touching shared-project persistence, read `SHARED_PROJECT_COLLAB_V2.md` and preserve the commit-barrier model. Do not reintroduce whole-project mutable snapshot semantics or legacy fallback reads in V2 mode.
 - **Verification before “done”:** `npx tsc --noEmit`, `npx vitest run`, `npx vite build` — zero new errors/failures.
 - **FEATURES.md:** Update when user-visible behavior changes ([`FEATURES.md`](./FEATURES.md)).
 
@@ -50,6 +52,7 @@ If a feature touches **Firestore chunk layout** or **IDB schema**, you must upda
 - [ ] Settings and per-row fields appear in **IDB + Firestore** (and localStorage only if appropriate for tiny metadata).
 - [ ] Column defs + filters in `tableConstants.ts` if it’s a table column.
 - [ ] LLM calls isolated in a **dedicated module** with tests for parsing and edge cases; concurrency/rate limits aligned with existing engines.
+- [ ] For shared-project persistence changes, document cache identity/invalidation, epoch activation behavior, and recovery steps.
 - [ ] `FEATURES.md` updated.
 - [ ] `tsc`, `vitest`, `vite build` all pass.
 

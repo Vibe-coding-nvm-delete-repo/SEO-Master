@@ -1,16 +1,31 @@
 rules_version = '2';
+// Open access remains for the non-project collections used by this workspace app.
+// The `projects/*` tree gets explicit schema/epoch checks so V2 clients cannot
+// keep writing legacy shared snapshots after cutover.
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isString(value) {
+      return value is string;
+    }
 
-    // ─── Helper functions ───
+    function isInt(value) {
+      return value is int;
+    }
 
-    // Check if a project has V2 collab meta
-    function hasMeta(projectId) {
-      return exists(/databases/$(database)/documents/projects/$(projectId)/collab/meta);
+    function nonNegativeInt(value) {
+      return value is int && value >= 0;
+    }
+
+    function stringList(value) {
+      return value is list;
     }
 
     function currentMeta(projectId) {
       return get(/databases/$(database)/documents/projects/$(projectId)/collab/meta).data;
+    }
+
+    function hasMeta(projectId) {
+      return exists(/databases/$(database)/documents/projects/$(projectId)/collab/meta);
     }
 
     function hasV2Meta(projectId) {
@@ -21,199 +36,340 @@ service cloud.firestore {
       return currentMeta(projectId).datasetEpoch;
     }
 
-    // Validate revision increment (CAS semantics)
-    function validRevisionIncrement() {
-      return request.resource.data.revision == resource.data.revision + 1;
-    }
-
-    function validRevisionedCreate() {
-      return request.resource.data.revision == 1
-        && request.resource.data.updatedAt is string
-        && request.resource.data.updatedByClientId is string;
-    }
-
-    function validRevisionedUpdate() {
-      return validRevisionIncrement()
-        && request.resource.data.updatedAt is string
-        && request.resource.data.updatedByClientId is string;
-    }
-
-    // Epoch scoping — prevent writes to wrong epoch
     function epochScopedWrite(projectId, data) {
       return !hasV2Meta(projectId) || data.datasetEpoch == activeEpoch(projectId);
     }
 
-    // Validate collab meta updates
-    function validCollabMetaUpdate() {
-      let current = resource.data;
-      let next = request.resource.data;
-
-      return next.schemaVersion == 2
-        && next.revision == current.revision + 1
-        // readMode can only transition legacy → v2, never back
-        && (current.readMode == 'v2' ? next.readMode == 'v2' : true)
-        // Epoch must be >= current (monotonically increasing)
-        && next.datasetEpoch >= current.datasetEpoch;
+    function epochScopedDelete(projectId, data) {
+      return !hasV2Meta(projectId) || data.datasetEpoch == activeEpoch(projectId);
     }
 
-    // ─── App settings (open access) ───
-    match /app_settings/{docId} {
+    function validCollabMetaCreate(data) {
+      return data.schemaVersion == 2
+        && isInt(data.revision)
+        && isString(data.updatedAt)
+        && isString(data.updatedByClientId)
+        && isInt(data.datasetEpoch)
+        && (data.baseCommitId == null || isString(data.baseCommitId))
+        && data.commitState in ['writing', 'ready']
+        && data.migrationState in ['running', 'complete', 'failed']
+        && data.readMode in ['legacy', 'v2']
+        && isInt(data.requiredClientSchema)
+        && data.requiredClientSchema >= 2;
+    }
+
+    function hasOwnedCurrentOperationLock(projectId, ownerId) {
+      return isString(ownerId)
+        && exists(/databases/$(database)/documents/projects/$(projectId)/project_operations/current)
+        && get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.ownerId == ownerId
+        && (
+          get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.ownerClientId == null
+          || get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.ownerClientId == ownerId
+        )
+        && (
+          get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.status == null
+          || get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.status == 'running'
+        );
+    }
+
+    function collabEpochActivationWrite() {
+      return resource != null
+        && resource.data.readMode == 'v2'
+        && request.resource.data.readMode == 'v2'
+        && (
+          request.resource.data.datasetEpoch != resource.data.datasetEpoch
+          || request.resource.data.baseCommitId != resource.data.baseCommitId
+          || request.resource.data.commitState != resource.data.commitState
+          || request.resource.data.migrationState != resource.data.migrationState
+        );
+    }
+
+    function validCollabMetaUpdate(projectId) {
+      return validCollabMetaCreate(request.resource.data)
+        && (
+          resource != null
+          || request.resource.data.readMode != 'v2'
+          || hasOwnedCurrentOperationLock(projectId, request.resource.data.updatedByClientId)
+        )
+        && (
+          resource == null
+          || request.resource.data.revision == resource.data.revision + 1
+        )
+        && (
+          resource == null
+          || resource.data.readMode != 'v2'
+          || request.resource.data.readMode == 'v2'
+        )
+        && (
+          request.resource.data.readMode != 'v2'
+          || request.resource.data.requiredClientSchema >= 2
+        )
+        && (
+          resource == null
+          || !hasV2Meta(projectId)
+          || request.resource.data.datasetEpoch >= resource.data.datasetEpoch
+        )
+        && (
+          request.resource.data.readMode != 'v2'
+          || request.resource.data.baseCommitId == null
+          || (
+            exists(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(request.resource.data.baseCommitId))
+            && get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(request.resource.data.baseCommitId)).data.datasetEpoch == request.resource.data.datasetEpoch
+            && (
+              request.resource.data.commitState != 'ready'
+              || get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(request.resource.data.baseCommitId)).data.commitState == 'ready'
+            )
+          )
+        )
+        && (
+          request.resource.data.readMode != 'v2'
+          || !collabEpochActivationWrite()
+          || hasOwnedCurrentOperationLock(projectId, request.resource.data.updatedByClientId)
+        );
+    }
+
+    function validBaseCommitManifestCreate(commitId) {
+      return request.resource.data.id == 'manifest'
+        && request.resource.data.type == 'meta'
+        && request.resource.data.commitId == commitId
+        && isInt(request.resource.data.datasetEpoch)
+        && isInt(request.resource.data.revision)
+        && isString(request.resource.data.updatedAt)
+        && isString(request.resource.data.updatedByClientId)
+        && request.resource.data.commitState in ['writing', 'ready']
+        && stringList(request.resource.data.resultChunkIds)
+        && nonNegativeInt(request.resource.data.resultChunkCount)
+        && stringList(request.resource.data.clusterChunkIds)
+        && nonNegativeInt(request.resource.data.clusterChunkCount)
+        && stringList(request.resource.data.suggestionChunkIds)
+        && nonNegativeInt(request.resource.data.suggestionChunkCount)
+        && stringList(request.resource.data.autoMergeChunkIds)
+        && nonNegativeInt(request.resource.data.autoMergeChunkCount)
+        && stringList(request.resource.data.groupMergeChunkIds)
+        && nonNegativeInt(request.resource.data.groupMergeChunkCount)
+        && (request.resource.data.contentHash == null || isString(request.resource.data.contentHash));
+    }
+
+    function validBaseCommitManifestUpdate(commitId) {
+      return validBaseCommitManifestCreate(commitId)
+        && resource != null
+        && resource.data.commitState == 'writing'
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.datasetEpoch == resource.data.datasetEpoch
+        && request.resource.data.commitId == resource.data.commitId
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.type == resource.data.type;
+    }
+
+    function baseCommitIsWriting(projectId, commitId) {
+      return exists(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(commitId))
+        && get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(commitId)).data.commitState == 'writing';
+    }
+
+    function validScopedRevisionedDoc(data, projectId) {
+      return isString(data.id)
+        && isInt(data.datasetEpoch)
+        && epochScopedWrite(projectId, data)
+        && isInt(data.revision)
+        && isString(data.updatedAt)
+        && isString(data.updatedByClientId);
+    }
+
+    function validRevisionedCreate(projectId) {
+      return resource == null
+        && request.resource.data.revision == 1;
+    }
+
+    function validRevisionedUpdate(projectId) {
+      return resource != null
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.datasetEpoch == resource.data.datasetEpoch
+        && request.resource.data.revision == resource.data.revision + 1
+        && epochScopedWrite(projectId, request.resource.data);
+    }
+
+    function validGroupDoc(projectId) {
+      return validScopedRevisionedDoc(request.resource.data, projectId)
+        && isString(request.resource.data.groupName)
+        && request.resource.data.status in ['grouped', 'approved']
+        && request.resource.data.clusterTokens is list;
+    }
+
+    function validBlockedTokenDoc(projectId) {
+      return validScopedRevisionedDoc(request.resource.data, projectId)
+        && isString(request.resource.data.token);
+    }
+
+    function validBlockedKeywordDoc(projectId) {
+      return validScopedRevisionedDoc(request.resource.data, projectId)
+        && isString(request.resource.data.keyword)
+        && isString(request.resource.data.reason)
+        && isInt(request.resource.data.volume);
+    }
+
+    function validTokenMergeRuleDoc(projectId) {
+      return validScopedRevisionedDoc(request.resource.data, projectId)
+        && isString(request.resource.data.parentToken)
+        && request.resource.data.childTokens is list
+        && isString(request.resource.data.createdAt);
+    }
+
+    function validLabelSectionDoc(projectId) {
+      return validScopedRevisionedDoc(request.resource.data, projectId)
+        && isString(request.resource.data.name)
+        && request.resource.data.tokens is list
+        && isInt(request.resource.data.colorIndex);
+    }
+
+    function validActivityLogDoc(projectId) {
+      return !hasV2Meta(projectId)
+        || (
+          isString(request.resource.data.id)
+          && isInt(request.resource.data.datasetEpoch)
+          && epochScopedWrite(projectId, request.resource.data)
+          && isString(request.resource.data.timestamp)
+          && isString(request.resource.data.details)
+          && isInt(request.resource.data.count)
+        );
+    }
+
+    function validOperationLockDoc() {
+      return request.resource.data.type in ['csv-import', 'keyword-rating', 'auto-group', 'token-merge', 'bulk-update']
+        && isString(request.resource.data.ownerId)
+        && isString(request.resource.data.startedAt)
+        && isString(request.resource.data.heartbeatAt)
+        && isString(request.resource.data.expiresAt)
+        && (request.resource.data.ownerClientId == null || isString(request.resource.data.ownerClientId))
+        && (request.resource.data.ownerUserId == null || isString(request.resource.data.ownerUserId))
+        && (request.resource.data.status == null || request.resource.data.status in ['running', 'releasing']);
+    }
+
+    function validOperationLockCreate() {
+      return resource == null
+        && validOperationLockDoc();
+    }
+
+    function validOperationLockUpdate() {
+      return resource != null
+        && validOperationLockDoc()
+        && (
+          (
+            request.resource.data.type == resource.data.type
+            && request.resource.data.ownerId == resource.data.ownerId
+            && request.resource.data.ownerClientId == resource.data.ownerClientId
+            && request.resource.data.startedAt == resource.data.startedAt
+          )
+          || request.resource.data.status == 'running'
+        );
+    }
+
+    match /app_settings/{document=**} {
       allow read, write: if true;
     }
 
-    // ─── Changelog ───
-    match /changelog/{docId} {
+    match /changelog/{document=**} {
       allow read, write: if true;
     }
 
-    // ─── Build info ───
-    match /build_info/{docId} {
+    match /feedback/{document=**} {
       allow read, write: if true;
     }
 
-    // ─── Feedback ───
-    match /feedback/{docId} {
+    match /notifications/{document=**} {
       allow read, write: if true;
     }
 
-    // ─── Notifications ───
-    match /notifications/{docId} {
+    match /project_folders/{document=**} {
       allow read, write: if true;
     }
 
-    // ─── Generate/autogroup/content settings ───
-    match /generate_autogroup_settings/{docId} {
-      allow read, write: if true;
-    }
-
-    // ─── Projects ───
     match /projects/{projectId} {
-      // Project metadata — always readable, writable
       allow read, write: if true;
 
-      // ─── Legacy chunks (pre-V2) ───
       match /chunks/{chunkId} {
         allow read: if true;
-        // Block legacy writes once V2 is active
-        allow write: if !hasV2Meta(projectId);
+        allow create, update: if !hasV2Meta(projectId);
+        allow delete: if true;
       }
 
-      // ─── V2 Collab Meta ───
-      match /collab/meta {
+      match /base_chunks/{chunkId} {
         allow read: if true;
-        allow create: if request.resource.data.schemaVersion == 2
-          && request.resource.data.revision == 1
-          && request.resource.data.readMode in ['legacy', 'v2'];
-        allow update: if validCollabMetaUpdate();
-        // Never allow meta deletion
-        allow delete: if false;
+        allow create, update: if !hasV2Meta(projectId);
+        allow delete: if true;
       }
 
-      // ─── Base Commits ───
       match /base_commits/{commitId} {
         allow read: if true;
+        allow create: if validBaseCommitManifestCreate(commitId);
+        allow update: if validBaseCommitManifestUpdate(commitId);
+        allow delete: if !hasV2Meta(projectId) || currentMeta(projectId).baseCommitId != commitId;
 
-        // Manifest document
-        allow create: if request.resource.data.commitState == 'writing'
-          && request.resource.data.datasetEpoch is number;
-        allow update: if (
-          // Only allow writing → ready transition
-          resource.data.commitState == 'writing'
-          && request.resource.data.commitState == 'ready'
-        );
-        allow delete: if false;
-
-        // Chunks within a commit
         match /chunks/{chunkId} {
           allow read: if true;
-          allow create: if request.resource.data.datasetEpoch is number
-            && request.resource.data.type is string
-            && request.resource.data.index is number;
-          allow update: if false; // Chunks are immutable
-          allow delete: if false;
+          allow create, update: if baseCommitIsWriting(projectId, commitId)
+            && request.resource.data.id == chunkId
+            && isString(request.resource.data.type)
+            && isInt(request.resource.data.index)
+            && isInt(request.resource.data.datasetEpoch)
+            && request.resource.data.data is list
+            && get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(commitId)).data.datasetEpoch == request.resource.data.datasetEpoch;
+          allow delete: if !hasV2Meta(projectId) || currentMeta(projectId).baseCommitId != commitId;
         }
       }
 
-      // ─── V2 Entity Collections (epoch-scoped, CAS revisioned) ───
+      match /collab/meta {
+        allow read: if true;
+        allow create, update: if validCollabMetaUpdate(projectId);
+        allow delete: if false;
+      }
+
       match /groups/{groupId} {
         allow read: if true;
-        allow create: if validRevisionedCreate()
-          && epochScopedWrite(projectId, request.resource.data)
-          && request.resource.data.groupName is string
-          && request.resource.data.status in ['grouped', 'approved'];
-        allow update: if validRevisionedUpdate()
-          && epochScopedWrite(projectId, request.resource.data);
-        allow delete: if false; // Soft-delete via revision update
+        allow create: if !hasV2Meta(projectId) || (validGroupDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validGroupDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /blocked_tokens/{tokenId} {
         allow read: if true;
-        allow create: if validRevisionedCreate()
-          && epochScopedWrite(projectId, request.resource.data)
-          && request.resource.data.token is string;
-        allow update: if validRevisionedUpdate()
-          && epochScopedWrite(projectId, request.resource.data);
-        allow delete: if false;
+        allow create: if !hasV2Meta(projectId) || (validBlockedTokenDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validBlockedTokenDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /manual_blocked_keywords/{keywordId} {
         allow read: if true;
-        allow create: if validRevisionedCreate()
-          && epochScopedWrite(projectId, request.resource.data)
-          && request.resource.data.keyword is string;
-        allow update: if validRevisionedUpdate()
-          && epochScopedWrite(projectId, request.resource.data);
-        allow delete: if false;
+        allow create: if !hasV2Meta(projectId) || (validBlockedKeywordDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validBlockedKeywordDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /token_merge_rules/{ruleId} {
         allow read: if true;
-        allow create: if validRevisionedCreate()
-          && epochScopedWrite(projectId, request.resource.data)
-          && request.resource.data.parentToken is string;
-        allow update: if validRevisionedUpdate()
-          && epochScopedWrite(projectId, request.resource.data);
-        allow delete: if false;
+        allow create: if !hasV2Meta(projectId) || (validTokenMergeRuleDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validTokenMergeRuleDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /label_sections/{sectionId} {
         allow read: if true;
-        allow create: if validRevisionedCreate()
-          && epochScopedWrite(projectId, request.resource.data)
-          && request.resource.data.name is string;
-        allow update: if validRevisionedUpdate()
-          && epochScopedWrite(projectId, request.resource.data);
-        allow delete: if false;
+        allow create: if !hasV2Meta(projectId) || (validLabelSectionDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validLabelSectionDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /activity_log/{entryId} {
         allow read: if true;
-        allow create: if epochScopedWrite(projectId, request.resource.data)
-          && request.resource.data.action is string;
-        allow update: if epochScopedWrite(projectId, request.resource.data);
-        allow delete: if true; // Activity log entries can be replaced in bulk
+        allow create, update: if !hasV2Meta(projectId) || validActivityLogDoc(projectId);
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
-      // ─── Operation Lock ───
-      match /project_operations/current {
+      match /project_operations/{operationId} {
         allow read: if true;
-        allow create: if request.resource.data.type is string
-          && request.resource.data.ownerId is string
-          && request.resource.data.status == 'running';
-        allow update: if (
-          // Owner can update (heartbeat, release)
-          resource.data.ownerId == request.resource.data.ownerId
-          // Or lock is expired (anyone can take over)
-          // Note: timestamp comparison not possible in rules, handled in app logic
-        );
-        allow delete: if true; // Allow lock deletion for cleanup
+        allow create: if operationId == 'current' && validOperationLockCreate();
+        allow update: if operationId == 'current' && validOperationLockUpdate();
+        allow delete: if false;
       }
-    }
-
-    // ─── Catch-all for any other collections ───
-    match /{document=**} {
-      allow read: if true;
-      allow write: if true;
     }
   }
 }
