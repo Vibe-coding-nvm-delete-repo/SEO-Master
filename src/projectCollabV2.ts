@@ -1843,7 +1843,7 @@ export async function loadCanonicalProjectState(
         return {
           mode: 'legacy',
           base: null,
-          entities: emptyEntities(),
+          entities: { ...emptyEntities(), meta },
           resolved: legacyPayload,
           diagnostics: {
             recovery: {
@@ -1882,7 +1882,7 @@ export async function loadCanonicalProjectState(
         return {
           mode: 'legacy',
           base: null,
-          entities: emptyEntities(),
+          entities: { ...emptyEntities(), meta: recoveredMeta },
           resolved: legacyPayload,
           diagnostics: recoveryDiagnostics,
         };

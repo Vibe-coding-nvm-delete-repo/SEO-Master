@@ -62,6 +62,47 @@ describe('persistenceErrors', () => {
     spy.mockRestore();
   });
 
+  it('uses listener-focused copy for permission-denied listener failures', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const addToast = vi.fn();
+    reportPersistFailure(addToast, 'project groups listener', { code: 'permission-denied' }, { channel: 'listener' });
+    expect(addToast).toHaveBeenCalledWith(
+      'Shared sync listener blocked (project groups listener) [permission-denied]. Firestore denied access to this shared channel.',
+      'error',
+      expect.objectContaining({
+        notification: expect.objectContaining({
+          mode: 'shared',
+          source: 'system',
+        }),
+      }),
+    );
+    spy.mockRestore();
+  });
+
+  it('uses legacy-mirror copy and persists project metadata for legacy mirror failures', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const addToast = vi.fn();
+    reportPersistFailure(
+      addToast,
+      'legacy project snapshot save',
+      { code: 'permission-denied' },
+      { channel: 'legacy-mirror', projectId: 'p1', projectName: 'Biz Loans Test' },
+    );
+    expect(addToast).toHaveBeenCalledWith(
+      'Cloud mirror save blocked (legacy project snapshot save) [permission-denied]. Firestore denied the legacy project snapshot write. Latest state is still cached locally, but it was not mirrored to the cloud.',
+      'error',
+      expect.objectContaining({
+        notification: expect.objectContaining({
+          mode: 'shared',
+          source: 'system',
+          projectId: 'p1',
+          projectName: 'Biz Loans Test',
+        }),
+      }),
+    );
+    spy.mockRestore();
+  });
+
   it('extracts normalized code and tagged step details', () => {
     expect(getPersistErrorInfo({ code: 'firestore/permission-denied', persistStep: 'activate collab meta' })).toEqual({
       code: 'permission-denied',

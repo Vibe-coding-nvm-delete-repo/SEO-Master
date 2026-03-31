@@ -8,6 +8,7 @@ import {
 
 const storageMocks = vi.hoisted(() => ({
   saveToIDB: vi.fn(),
+  loadFromIDB: vi.fn(async () => null),
   saveProjectDataToFirestore: vi.fn(),
   saveProjectToFirestore: vi.fn(),
   buildProjectDataPayloadFromChunkDocs: vi.fn(() => null),
@@ -25,6 +26,7 @@ vi.mock('firebase/firestore', () => ({
 vi.mock('./projectStorage', () => ({
   saveProjectDataToFirestore: storageMocks.saveProjectDataToFirestore,
   saveToIDB: storageMocks.saveToIDB,
+  loadFromIDB: storageMocks.loadFromIDB,
   saveProjectToFirestore: storageMocks.saveProjectToFirestore,
   buildProjectDataPayloadFromChunkDocs: storageMocks.buildProjectDataPayloadFromChunkDocs,
   countGroupedPages: storageMocks.countGroupedPages,
@@ -33,6 +35,7 @@ vi.mock('./projectStorage', () => ({
 
 vi.mock('./projectWorkspace', () => ({
   loadProjectDataForView: vi.fn(async () => null),
+  loadProjectDataFromIDBOnly: vi.fn(async () => null),
   toProjectViewState: vi.fn(() => ({
     results: null,
     clusterSummary: null,
@@ -81,9 +84,11 @@ describe('useProjectPersistence stalled local writes', () => {
   beforeEach(() => {
     resetCloudSyncStateForTests();
     storageMocks.saveToIDB.mockReset();
+    storageMocks.loadFromIDB.mockReset();
     storageMocks.saveProjectDataToFirestore.mockReset();
     storageMocks.saveProjectToFirestore.mockReset();
     storageMocks.saveToIDB.mockResolvedValue(undefined);
+    storageMocks.loadFromIDB.mockResolvedValue(null);
     storageMocks.saveProjectDataToFirestore.mockResolvedValue(undefined);
     storageMocks.saveProjectToFirestore.mockResolvedValue(undefined);
     vi.useFakeTimers();
@@ -94,13 +99,14 @@ describe('useProjectPersistence stalled local writes', () => {
   });
 
   it('times out IDB writes, clears saving banner, and still flushes cloud writes', async () => {
+    const projects = [{ id: 'proj_1', name: 'P1', description: '', uid: 'u', createdAt: new Date().toISOString() }];
     storageMocks.saveToIDB.mockReturnValue(new Promise<void>(() => {
       /* never resolves */
     }));
 
     const { result } = renderHook(() =>
       useProjectPersistence({
-        projects: [{ id: 'proj_1', name: 'P1', description: '', uid: 'u', createdAt: new Date().toISOString() }],
+        projects,
         setProjects: vi.fn(),
         addToast: vi.fn(),
       }),
@@ -124,6 +130,10 @@ describe('useProjectPersistence stalled local writes', () => {
 
     act(() => {
       result.current.setActiveProjectId('proj_1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('proj_1', projects);
     });
 
     act(() => {
@@ -148,6 +158,7 @@ describe('useProjectPersistence stalled local writes', () => {
   }, 20_000);
 
   it('times out hung Firestore writes, clears pending state, and retries on the next save', async () => {
+    const projects = [{ id: 'proj_1', name: 'P1', description: '', uid: 'u', createdAt: new Date().toISOString() }];
     storageMocks.saveProjectDataToFirestore.mockImplementationOnce(
       () => new Promise<void>(() => {
         /* never resolves */
@@ -156,7 +167,7 @@ describe('useProjectPersistence stalled local writes', () => {
 
     const { result } = renderHook(() =>
       useProjectPersistence({
-        projects: [{ id: 'proj_1', name: 'P1', description: '', uid: 'u', createdAt: new Date().toISOString() }],
+        projects,
         setProjects: vi.fn(),
         addToast: vi.fn(),
       }),
@@ -180,6 +191,10 @@ describe('useProjectPersistence stalled local writes', () => {
 
     act(() => {
       result.current.setActiveProjectId('proj_1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('proj_1', projects);
     });
 
     act(() => {
