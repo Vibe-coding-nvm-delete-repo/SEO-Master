@@ -299,6 +299,13 @@ useEffect(() => {
   Instances fixed: pages table selection, grouped table selection, approved table selection, legacy bootstrap with no collab meta, legacy bootstrap with explicit legacy meta, and stale V2 bootstrap with missing `baseCommitId`.
   Validation: targeted component/storage regressions, `npx tsc --noEmit`, browser repro confirming clean project open, manual grouping persistence across reload, and filtered Auto Group re-enabling once filters are active.
 
+- [x] (2026-03-31) Fixed permanent read-only lockout for stuck V2 shared projects in `src/projectCollabV2.ts` and `src/projectCollabV2.storage.test.ts`.
+  Root cause: `loadCanonicalProjectState()` had an early return before `recoverStuckV2Meta()` when `migrationState === 'failed'` or `baseCommitId` was missing. Recovery — the only code that resets `readMode` from `'v2'` back to `'legacy'` in Firestore — was never reached. This caused every load to show "Shared project canonical state is incomplete" and lock both users into read-only permanently.
+  Additionally, `recoverStuckV2Meta` had a stuck state where `migrationState === 'failed'` but `readMode` was still `'v2'` — recovery returned 'unchanged' without fixing `readMode`. And when `commitState === 'ready'` / `migrationState === 'complete'` but the base commit was genuinely missing, recovery skipped itself entirely.
+  Three fixes: (1) removed early return so recovery always runs, (2) added `readMode: 'legacy'` repair when `migrationState` is 'failed' but `readMode` is still 'v2', (3) added `canonicalLoadFailed` hint so recovery doesn't skip when meta looks healthy but the base commit is actually broken.
+  After recovery, both users land in legacy mode with full write access via `onSnapshot` listeners. The meta listener on other clients detects the `readMode` change and calls `setWriteUnsafe(false)` automatically.
+  Prevention rule: no user should ever be permanently locked into read-only mode. Recovery must always attempt repair. Updated SHARED_PROJECT_COLLAB_V2.md section 9 accordingly.
+
 - **Work top to bottom.** Tier 1 items are blocking — nothing else matters if data is being lost.
 - **Tier 1 priority order:** 1.2 and 1.3 are CRITICAL (confirmed data loss). 1.4 is HIGH (timing-dependent). 1.6 is HIGH (multi-user race). 1.1 is MEDIUM (redundant, not data-losing). 1.5, 1.7, 1.8 are important but less urgent.
 - **Tier 3.1 (split App.tsx) should happen BEFORE fixing remaining Tier 1 items** if possible, because most Tier 1 bugs live in App.tsx and the file is too large to modify safely at 5,731 lines. However, if splitting is too risky as a first step, fix Tier 1 items in-place first.

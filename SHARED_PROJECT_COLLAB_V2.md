@@ -171,18 +171,26 @@ When a project requires V2 schema:
 
 This prevents an older whole-project writer from reintroducing legacy overwrites into a V2 project.
 
-### 9. Recovery workflow is fail-closed
+### 9. Recovery workflow actively repairs stuck V2 meta
 
-When a V2 project cannot load a ready canonical epoch:
-- keep the last good canonical or cached view visible if one exists
-- keep shared writes read-only
-- treat `commitState: 'writing'`, a missing commit, or a mismatched epoch as unsafe to write
-- rely on the meta/epoch listeners to retry when the canonical state becomes valid again
+When a V2 project cannot load a ready canonical epoch, the recovery workflow **actively repairs** the Firestore `collab/meta` doc rather than leaving the user locked out:
+
+1. `loadCanonicalProjectState` calls `loadCanonicalEpoch` — if it returns null, recovery always runs
+2. `recoverStuckV2Meta` runs inside a Firestore transaction and inspects the actual meta state:
+   - If the base commit exists and is valid + lock is available → finalize: set `commitState: 'ready'`, `migrationState: 'complete'`
+   - If the base commit is missing/broken, OR `migrationState` is already `'failed'` but `readMode` is still `'v2'` → repair: reset `readMode: 'legacy'`, `migrationState: 'failed'`
+3. After recovery writes, the next `loadCollabMeta` read picks up the repaired state
+4. With `readMode: 'legacy'`, the project falls to the pure legacy persistence path — both users get full write access via `onSnapshot` chunk listeners
+5. Other connected clients' meta listeners detect the `readMode` change and call `setWriteUnsafe(false)` automatically
+
+**Critical invariant: no user is ever permanently locked into read-only mode.** Recovery must always attempt repair. The only legitimate read-only state is:
+- `legacyWritesBlocked`: client schema version is too old (user must update the app)
+- Temporary lock conflict during an active bulk operation by another client (resolves automatically)
 
 Guardrails for the live meta listener:
 - meta-driven reloads must use the same recovery-capable canonical path as bootstrap/conflict reloads when a lightweight epoch load is null or unresolved; do not rely on `loadCanonicalEpoch` alone for listener-driven recovery
 - when a listener sees a newer `collab/meta` revision, only attach new epoch listeners from the final authoritative resolved meta state for that epoch
-- if the canonical state is still unresolved after recovery, remain fail-closed/read-only rather than forcing shared writes through
+- when a listener sees `readMode` change from `'v2'` to `'legacy'`, immediately clear `isWriteUnsafe` and unlock writes
 - UI success messaging for grouping/approve/unapprove/ungroup flows must only run after the mutation is actually accepted by the persistence boundary; blocked shared writes must preserve user selection/input and surface only the read-only warning
 
 ### 9a. Startup bootstrap must not mix legacy and V2 writes
