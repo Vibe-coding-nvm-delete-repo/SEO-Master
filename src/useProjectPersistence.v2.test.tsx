@@ -230,6 +230,10 @@ function makeLegacyState(blockedTokens: string[] = []) {
   return {
     ...makeCanonical(1, blockedTokens),
     mode: 'legacy' as const,
+    entities: {
+      ...makeCanonical(1, blockedTokens).entities,
+      meta: null,
+    },
   };
 }
 
@@ -1132,6 +1136,88 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('keeps V2 fallback payloads in read-only shared mode instead of writable legacy mode', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue({
+      mode: 'legacy',
+      base: null,
+      entities: {
+        groups: [],
+        blockedTokens: [],
+        manualBlockedKeywords: [],
+        tokenMergeRules: [],
+        labelSections: [],
+        activityLog: [],
+        meta: {
+          ...makeMeta(1, 2),
+          commitState: 'writing',
+          migrationState: 'running',
+        },
+      },
+      resolved: {
+        results: [],
+        clusterSummary: [],
+        tokenSummary: [],
+        groupedClusters: [],
+        approvedGroups: [],
+        blockedTokens: ['cached'],
+        blockedKeywords: [],
+        labelSections: [],
+        activityLog: [],
+        tokenMergeRules: [],
+        autoGroupSuggestions: [],
+        autoMergeRecommendations: [],
+        groupMergeRecommendations: [],
+        stats: null,
+        datasetStats: null,
+        updatedAt: '2026-03-31T00:00:00.000Z',
+        lastSaveId: 0,
+      },
+      diagnostics: {
+        recovery: {
+          attempted: true,
+          outcome: 'failed',
+          code: 'permission-denied',
+          step: 'repair collab meta',
+        },
+      },
+    } as any);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    expect(result.current.storageMode).toBe('v2');
+    expect(result.current.isSharedProjectReadOnly).toBe(true);
+    expect(Array.from(result.current.blockedTokens)).toEqual(['cached']);
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('Showing the last local snapshot in read-only mode'),
+      'warning',
+    );
+
+    await act(async () => {
+      await result.current.bulkSet({
+        results: [{ tokens: 'alpha' } as any],
+        fileName: 'Should stay read-only',
+      });
+    });
+
+    expect(storageMocks.saveProjectDataToFirestore).not.toHaveBeenCalled();
+    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
+  });
+
   it('suppresses legacy chunk writes while project storage mode is unresolved', async () => {
     const canonicalLoad = deferred<ReturnType<typeof makeCanonical>>();
     collabMocks.loadCanonicalProjectState.mockImplementation(() => canonicalLoad.promise);
@@ -1382,19 +1468,8 @@ describe('useProjectPersistence V2 hardening', () => {
 
     await waitFor(() => expect(result.current.storageMode).toBe('v2'));
 
-    act(() => {
-      result.current.blockTokens(['Alpha']);
-    });
-
-    let flushed = false;
-    const flushPromise = result.current.flushNow().then(() => {
-      flushed = true;
-    });
-
-    await flush();
-    expect(flushed).toBe(false);
-
     await act(async () => {
+      const mutationPromise = result.current.blockTokens(['Alpha']);
       ack.resolve([{
         kind: 'upsert',
         id: blockedTokenDocId('Alpha'),
@@ -1412,6 +1487,12 @@ describe('useProjectPersistence V2 hardening', () => {
       }]);
       await ack.promise;
       await Promise.resolve();
+      await mutationPromise;
+    });
+
+    let flushed = false;
+    const flushPromise = result.current.flushNow().then(() => {
+      flushed = true;
     });
 
     expect(flushed).toBe(false);

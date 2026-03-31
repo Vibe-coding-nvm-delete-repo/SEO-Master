@@ -4,6 +4,7 @@
  */
 
 import type { ToastOptions } from './ToastContext';
+import type { NotificationSource } from './notificationStorage';
 
 export type PersistToastFn = (
   msg: string,
@@ -21,6 +22,13 @@ export interface PersistErrorInfo {
   code?: string;
   kind: PersistErrorKind;
   step?: string;
+}
+
+export interface PersistFailureOptions {
+  channel?: 'write' | 'listener' | 'lock' | 'legacy-mirror';
+  projectId?: string | null;
+  projectName?: string | null;
+  notificationSource?: NotificationSource;
 }
 
 function normalizePersistErrorCode(code: unknown): string | undefined {
@@ -70,14 +78,36 @@ export function tagPersistErrorStep(err: unknown, step: string): Error {
   return tagged;
 }
 
-function buildPersistFailureMessage(context: string, err: unknown): string {
+function buildPersistFailureMessage(context: string, err: unknown, options?: PersistFailureOptions): string {
   const errorInfo = getPersistErrorInfo(err);
   const details = errorInfo.code ? ` [${errorInfo.code}]` : '';
+  const channel = options?.channel ?? 'write';
   if (errorInfo.kind === 'invalid-argument') {
+    if (channel === 'legacy-mirror') {
+      return `Cloud mirror save failed (${context})${details}. Firestore rejected the legacy project snapshot payload. Latest state is still cached locally.`;
+    }
     return `Cloud sync failed (${context})${details}. Firestore rejected the data payload.`;
   }
   if (errorInfo.kind === 'permission-denied') {
+    if (channel === 'listener') {
+      return `Shared sync listener blocked (${context})${details}. Firestore denied access to this shared channel.`;
+    }
+    if (channel === 'lock') {
+      return `Project lock sync blocked (${context})${details}. Firestore denied the operation-lock update.`;
+    }
+    if (channel === 'legacy-mirror') {
+      return `Cloud mirror save blocked (${context})${details}. Firestore denied the legacy project snapshot write. Latest state is still cached locally, but it was not mirrored to the cloud.`;
+    }
     return `Cloud sync blocked (${context})${details}. Firestore denied this write. Check shared-project recovery or deployed rules.`;
+  }
+  if (channel === 'listener') {
+    return `Shared sync listener failed (${context})${details}. Check your connection and try again.`;
+  }
+  if (channel === 'lock') {
+    return `Project lock sync failed (${context})${details}. Check your connection and try again.`;
+  }
+  if (channel === 'legacy-mirror') {
+    return `Cloud mirror save failed (${context})${details}. Latest state is still cached locally, but it was not mirrored to the cloud.`;
   }
   return `Cloud sync failed (${context})${details}. Check your connection and try again.`;
 }
@@ -86,13 +116,16 @@ export function reportPersistFailure(
   addToast: PersistToastFn | undefined,
   context: string,
   err: unknown,
+  options?: PersistFailureOptions,
 ): void {
   console.error(`[PERSIST] ${context}:`, err);
   if (addToast) {
-    addToast(buildPersistFailureMessage(context, err), 'error', {
+    addToast(buildPersistFailureMessage(context, err, options), 'error', {
       notification: {
         mode: 'shared',
-        source: 'system',
+        source: options?.notificationSource ?? 'system',
+        projectId: options?.projectId ?? null,
+        projectName: options?.projectName ?? null,
       },
     });
   }

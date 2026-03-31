@@ -648,6 +648,15 @@ export function useProjectPersistence(options: {
     return null;
   }, []);
 
+  const getActiveProjectNotificationMeta = useCallback(() => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) {
+      return { projectId: null, projectName: null };
+    }
+    const projectName = projectsRef.current.find((project) => project.id === projectId)?.name ?? null;
+    return { projectId, projectName };
+  }, []);
+
   /** Build a full ProjectDataPayload from `latest.current` + optional overrides. */
   const buildPayload = useCallback((overrides?: Partial<PersistedState>): ProjectDataPayload => {
     const s = { ...latest.current, ...overrides };
@@ -718,9 +727,10 @@ export function useProjectPersistence(options: {
    * writes (whatever fits between awaits), always reading `latest.current` at flush time.
    * Order is still strictly serialized — no parallel IDB/Firestore writes.
    */
-  const flushPersistQueue = useCallback(async () => {
-    const projectId = activeProjectIdRef.current;
+  const flushPersistQueue = useCallback(async (queuedProjectId?: string) => {
+    const projectId = queuedProjectId ?? activeProjectIdRef.current;
     if (!projectId) return;
+    if (activeProjectIdRef.current !== projectId) return;
     const traceId = activePersistTraceRef.current;
     const blockReason = getLegacyPersistBlockReason();
     if (blockReason) {
@@ -748,7 +758,7 @@ export function useProjectPersistence(options: {
     isFlushingRef.current = true;
     recordProjectFlushEnter();
     try {
-      while (needsPersistFlushRef.current) {
+      while (needsPersistFlushRef.current && activeProjectIdRef.current === projectId) {
         needsPersistFlushRef.current = false;
 
         // saveCounterRef is bumped in mutateAndSave (and suggestion checkpoints), not here —
@@ -840,7 +850,10 @@ export function useProjectPersistence(options: {
               data: { saveId, error: err instanceof Error ? err.message : String(err) },
             });
           }
-          reportPersistFailure(addToastRef.current, 'project data save', err);
+          reportPersistFailure(addToastRef.current, 'legacy project snapshot save', err, {
+            channel: 'legacy-mirror',
+            ...getActiveProjectNotificationMeta(),
+          });
         }
         // If mutateAndSave ran during the awaits above, needsPersistFlushRef is true → loop
       }
@@ -856,7 +869,7 @@ export function useProjectPersistence(options: {
         });
       }
     }
-  }, [buildPayload, getLegacyPersistBlockReason, persistProjectPayloadToIDB]);
+  }, [buildPayload, getActiveProjectNotificationMeta, getLegacyPersistBlockReason, persistProjectPayloadToIDB]);
 
   /** Queue Firestore + IDB flush (no debounce). `latest.current` is read at flush time. */
   const enqueueSave = useCallback((source: string = 'unknown', traceId?: string) => {
@@ -894,8 +907,9 @@ export function useProjectPersistence(options: {
       });
     }
     needsPersistFlushRef.current = true;
+    const queuedProjectId = projectId;
     pendingSaveRef.current = pendingSaveRef.current
-      .then(flushPersistQueue)
+      .then(() => flushPersistQueue(queuedProjectId))
       .catch((err) => logPersistError('persist queue flush', err));
   }, [flushPersistQueue, getLegacyPersistBlockReason]);
 
@@ -906,6 +920,7 @@ export function useProjectPersistence(options: {
   const flushNow = useCallback(async () => {
     if (!activeProjectIdRef.current) return;
     if (storageModeRef.current === 'v2') {
+      await Promise.resolve();
       // V2 writes can enqueue canonical-cache persists after cloud acks.
       // Keep draining until both queues stabilize so callers get a true
       // "cloud + canonical local cache" durability barrier.
@@ -1392,13 +1407,17 @@ export function useProjectPersistence(options: {
           addToastRef.current,
           errorInfo.step ? `${label} (${errorInfo.step})` : label,
           err,
+          {
+            channel: 'write',
+            ...getActiveProjectNotificationMeta(),
+          },
         );
         resolveResult(failedSharedMutation(getBlockedMutationReason(message, errorInfo.code)));
         await reloadCanonicalStateFromCloud();
       }
     });
     return resultPromise;
-  }, [getBlockedMutationReason, isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation, rollbackPendingDocKeys, setWriteUnsafe]);
+  }, [getActiveProjectNotificationMeta, getBlockedMutationReason, isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation, rollbackPendingDocKeys, setWriteUnsafe]);
 
   const persistCanonicalPayloadV2 = useCallback((payload: ProjectDataPayload, options?: { requireOwnedLock?: boolean }): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
@@ -1530,7 +1549,10 @@ export function useProjectPersistence(options: {
         setActiveOperation(nextLock);
       }).catch((err) => {
         invalidateOwnedActiveOperationLock();
-        reportPersistFailure(addToastRef.current, 'project lock heartbeat', err);
+        reportPersistFailure(addToastRef.current, 'project lock heartbeat', err, {
+          channel: 'lock',
+          ...getActiveProjectNotificationMeta(),
+        });
       });
     }, 5_000);
     try {
@@ -1561,7 +1583,7 @@ export function useProjectPersistence(options: {
       setActiveOperation(null);
       activeOperationRef.current = null;
     }
-  }, [flushNow, hasOwnedActiveOperationLock, invalidateOwnedActiveOperationLock, reloadCanonicalStateFromCloud]);
+  }, [flushNow, getActiveProjectNotificationMeta, hasOwnedActiveOperationLock, invalidateOwnedActiveOperationLock, reloadCanonicalStateFromCloud]);
 
   // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
   useEffect(() => {
@@ -1680,10 +1702,10 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
     if ('fileName' in changes) setFileName(changes.fileName!);
-    if (options?.checkpoint && storageModeRef.current !== 'v2' && !getLegacyPersistBlockReason()) {
+    if (options?.checkpoint && storageModeRef.current === 'v2') {
       pendingV2LocalRef.current = checkpointToIDB(changes);
     }
-  }, [checkpointToIDB, getLegacyPersistBlockReason]);
+  }, [checkpointToIDB]);
 
   // ── applyViewState: batch-set all 14 fields from a ProjectViewState ──
   const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]): Promise<SharedMutationResult> => {
@@ -1877,7 +1899,7 @@ export function useProjectPersistence(options: {
 
   const setActiveProjectId = useCallback((id: string | null) => {
     activeProjectIdRef.current = id;
-    projectStorageModeResolvedRef.current = Boolean(id);
+    projectStorageModeResolvedRef.current = false;
     if (!id) {
       clearWritableCanonical();
       setCanonicalReloading(false);
@@ -1949,21 +1971,48 @@ export function useProjectPersistence(options: {
       return;
     }
 
-    if (canonical.mode === 'v2') {
+    const legacyFallbackMeta = canonical.mode === 'legacy' && canonical.entities.meta?.readMode === 'v2'
+      ? canonical.entities.meta
+      : null;
+
+    if (canonical.mode === 'v2' || legacyFallbackMeta) {
       setStorageMode('v2');
       storageModeRef.current = 'v2';
       projectStorageModeResolvedRef.current = true;
-      applyCanonicalState(canonical);
+      if (canonical.mode === 'v2') {
+        applyCanonicalState(canonical);
+      } else {
+        collabMetaRef.current = legacyFallbackMeta;
+        baseSnapshotRef.current = null;
+        groupDocsRef.current = [];
+        blockedTokenDocsRef.current = [];
+        manualBlockedKeywordDocsRef.current = [];
+        tokenMergeRuleDocsRef.current = [];
+        labelSectionDocsRef.current = [];
+        activityLogDocsRef.current = [];
+        activeEpochRef.current = legacyFallbackMeta?.datasetEpoch ?? null;
+        lastKnownGoodWritableStateRef.current = null;
+        setLegacyWritesBlocked(Boolean(
+          legacyFallbackMeta &&
+          (legacyFallbackMeta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
+        ));
+        clearWritableCanonical();
+        setCanonicalReloading(false);
+      }
       if (canonical.resolved) {
         const viewState = toProjectViewState(canonical.resolved, project);
+        applyViewState(viewState);
         loadFenceRef.current = countGroupedPages(viewState);
-        if (canonical.entities.meta) {
-          updateCanonicalCache(canonical.resolved, canonical.entities.meta);
+        const cacheMeta = canonical.mode === 'v2' ? canonical.entities.meta : legacyFallbackMeta;
+        if (cacheMeta) {
+          updateCanonicalCache(canonical.resolved, cacheMeta);
         }
       } else {
+        const recoveryDiagnostics = canonical.diagnostics?.recovery;
+        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
         setWriteUnsafe(
           true,
-          canonical.diagnostics?.recovery?.outcome === 'failed' && canonical.diagnostics?.recovery?.code === 'permission-denied'
+          recoveryBlockedByPermissions
             ? 'permission-denied'
             : 'canonical-unresolved',
         );
@@ -1971,12 +2020,21 @@ export function useProjectPersistence(options: {
           applyViewState(createEmptyProjectViewState());
           loadFenceRef.current = 0;
         }
-        const recoveryDiagnostics = canonical.diagnostics?.recovery;
-        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
         addToastRef.current(
           recoveryBlockedByPermissions
             ? 'Shared project recovery is blocked by Firestore permissions. Edits are temporarily read-only until the shared rules or deployment are repaired.'
             : 'Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.',
+          'warning',
+        );
+      }
+      if (legacyFallbackMeta) {
+        const recoveryDiagnostics = canonical.diagnostics?.recovery;
+        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
+        setWriteUnsafe(true, recoveryBlockedByPermissions ? 'permission-denied' : 'canonical-unresolved');
+        addToastRef.current(
+          recoveryBlockedByPermissions
+            ? 'Shared project recovery is blocked by Firestore permissions. Showing the last local snapshot in read-only mode until the shared state is repaired.'
+            : 'Shared project canonical state is incomplete. Showing the last local snapshot in read-only mode until the shared state is repaired.',
           'warning',
         );
       }
@@ -2257,7 +2315,10 @@ export function useProjectPersistence(options: {
       },
       (err) => {
         markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-        reportPersistFailure(addToastRef.current, 'project chunks listener', err);
+        reportPersistFailure(addToastRef.current, 'project chunks listener', err, {
+          channel: 'listener',
+          ...getActiveProjectNotificationMeta(),
+        });
       },
     );
     return () => {
@@ -2349,7 +2410,10 @@ export function useProjectPersistence(options: {
           },
           (err) => {
             markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-            reportPersistFailure(addToastRef.current, 'project groups listener', err);
+            reportPersistFailure(addToastRef.current, 'project groups listener', err, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
           },
         ),
         onSnapshot(
@@ -2365,7 +2429,10 @@ export function useProjectPersistence(options: {
           },
           (err) => {
             markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-            reportPersistFailure(addToastRef.current, 'blocked tokens listener', err);
+            reportPersistFailure(addToastRef.current, 'blocked tokens listener', err, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
           },
         ),
         onSnapshot(
@@ -2381,7 +2448,10 @@ export function useProjectPersistence(options: {
           },
           (err) => {
             markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-            reportPersistFailure(addToastRef.current, 'manual blocked keywords listener', err);
+            reportPersistFailure(addToastRef.current, 'manual blocked keywords listener', err, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
           },
         ),
         onSnapshot(
@@ -2397,7 +2467,10 @@ export function useProjectPersistence(options: {
           },
           (err) => {
             markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-            reportPersistFailure(addToastRef.current, 'token merge rules listener', err);
+            reportPersistFailure(addToastRef.current, 'token merge rules listener', err, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
           },
         ),
         onSnapshot(
@@ -2413,7 +2486,10 @@ export function useProjectPersistence(options: {
           },
           (err) => {
             markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-            reportPersistFailure(addToastRef.current, 'label sections listener', err);
+            reportPersistFailure(addToastRef.current, 'label sections listener', err, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
           },
         ),
         onSnapshot(
@@ -2429,7 +2505,10 @@ export function useProjectPersistence(options: {
           },
           (err) => {
             markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-            reportPersistFailure(addToastRef.current, 'activity log listener', err);
+            reportPersistFailure(addToastRef.current, 'activity log listener', err, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
           },
         ),
       ];
@@ -2532,12 +2611,18 @@ export function useProjectPersistence(options: {
           if (abortController.signal.aborted) {
             return;
           }
-          reportPersistFailure(addToastRef.current, 'project collab meta listener', err);
+          reportPersistFailure(addToastRef.current, 'project collab meta listener', err, {
+            channel: 'listener',
+            ...getActiveProjectNotificationMeta(),
+          });
           if (!lastKnownGoodWritableStateRef.current) {
             setWriteUnsafe(true, 'recovery-failed');
           }
           void reloadCanonicalStateFromCloud().catch((reloadErr) => {
-            reportPersistFailure(addToastRef.current, 'project collab meta listener recovery reload', reloadErr);
+            reportPersistFailure(addToastRef.current, 'project collab meta listener recovery reload', reloadErr, {
+              channel: 'listener',
+              ...getActiveProjectNotificationMeta(),
+            });
             if (!lastKnownGoodWritableStateRef.current) {
               setWriteUnsafe(true, 'recovery-failed');
             }
@@ -2546,7 +2631,10 @@ export function useProjectPersistence(options: {
       },
       (err) => {
         markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-        reportPersistFailure(addToastRef.current, 'project collab meta listener', err);
+        reportPersistFailure(addToastRef.current, 'project collab meta listener', err, {
+          channel: 'listener',
+          ...getActiveProjectNotificationMeta(),
+        });
       },
     );
 
@@ -2567,7 +2655,10 @@ export function useProjectPersistence(options: {
       },
       (err) => {
         markListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
-        reportPersistFailure(addToastRef.current, 'project operation listener', err);
+        reportPersistFailure(addToastRef.current, 'project operation listener', err, {
+          channel: 'listener',
+          ...getActiveProjectNotificationMeta(),
+        });
       },
     );
 
@@ -2582,7 +2673,7 @@ export function useProjectPersistence(options: {
       operationUnsub();
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
-  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, storageMode, updateCanonicalCache, v2DocKey]);
+  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, getActiveProjectNotificationMeta, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, storageMode, updateCanonicalCache, v2DocKey]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
@@ -3096,7 +3187,10 @@ export function useProjectPersistence(options: {
         const proj = updatedProjects.find(p => p.id === projectId);
         if (proj) {
           saveProjectToFirestore(proj).catch((err) => {
-            reportPersistFailure(addToastRef.current, 'project metadata save', err);
+            reportPersistFailure(addToastRef.current, 'project metadata save', err, {
+              channel: 'write',
+              ...getActiveProjectNotificationMeta(),
+            });
           });
         }
       }
@@ -3112,7 +3206,7 @@ export function useProjectPersistence(options: {
     }
     mutateAndSave(() => changes);
     return SHARED_MUTATION_ACCEPTED;
-  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, getActiveProjectNotificationMeta, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
   const isProjectBusy = Boolean(
