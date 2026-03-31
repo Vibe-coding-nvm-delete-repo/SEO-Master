@@ -64,3 +64,28 @@ export function reportLocalPersistFailure(
 export function logPersistError(context: string, err: unknown): void {
   console.error(`[PERSIST] ${context}:`, err);
 }
+
+import { WriteBlockedError, EpochMismatchError } from './collabV2WriteGuard';
+
+/**
+ * Check if an error is a V2 write guard error (not a crash, but an expected block).
+ * Callers can use this to show a toast instead of an error boundary.
+ */
+export function isV2WriteGuardError(err: unknown): err is WriteBlockedError | EpochMismatchError {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: string }).code;
+  return code === 'write-blocked' || code === 'epoch-mismatch';
+}
+
+/**
+ * Format a V2 error into a user-friendly toast message.
+ */
+export function formatV2ErrorForUser(err: WriteBlockedError | EpochMismatchError): string {
+  if (err instanceof WriteBlockedError) {
+    return `Save paused: ${err.message.replace('[V2 Write Guard] ', '')}`;
+  }
+  if (err instanceof EpochMismatchError) {
+    return 'Project data has been refreshed. Your changes will sync with the latest version.';
+  }
+  return 'An unexpected sync error occurred.';
+}

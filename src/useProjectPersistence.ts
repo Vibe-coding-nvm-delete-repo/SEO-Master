@@ -72,6 +72,12 @@ import {
   recordProjectFlushExit,
   isLocalWriteFailed,
 } from './cloudSyncStatus';
+import {
+  advanceGeneration,
+  isSnapshotSuppressed,
+  withSnapshotSuppression,
+  isGenerationCurrent,
+} from './collabV2WriteGuard';
 
 export const PROJECT_LOCAL_WRITE_TIMEOUT_MS = 15_000;
 export const PROJECT_CLOUD_WRITE_TIMEOUT_MS = 30_000;
@@ -536,6 +542,12 @@ export function useProjectPersistence(options: {
       while (needsPersistFlushRef.current) {
         needsPersistFlushRef.current = false;
 
+        // V2: If project switched during flush, abort remaining writes
+        if (activeProjectIdRef.current !== projectId) {
+          console.warn('[PERSIST] Project switched during flush, aborting');
+          break;
+        }
+
         // saveCounterRef is bumped in mutateAndSave (and suggestion checkpoints), not here —
         // otherwise IDB checkpoints would reuse the previous id and merge could prefer stale FS.
         const saveId = saveCounterRef.current;
@@ -557,11 +569,13 @@ export function useProjectPersistence(options: {
         await persistProjectPayloadToIDB(projectId, payload, { mode: 'flush' });
         try {
           recordProjectCloudWriteStart();
-          await withPersistTimeout(
-            saveProjectDataToFirestore(projectId, payload, { saveId, clientId }),
-            PROJECT_CLOUD_WRITE_TIMEOUT_MS,
-            `project cloud write (${projectId})`,
-          );
+          await withSnapshotSuppression(async () => {
+            await withPersistTimeout(
+              saveProjectDataToFirestore(projectId, payload, { saveId, clientId }),
+              PROJECT_CLOUD_WRITE_TIMEOUT_MS,
+              `project cloud write (${projectId})`,
+            );
+          });
           recordProjectFirestoreSaveOk();
           console.log(
             '[PERSIST] Firestore save OK - grouped:',
@@ -570,6 +584,11 @@ export function useProjectPersistence(options: {
             saveId,
           );
         } catch (err) {
+          // V2: Don't report write-blocked as an error — it's expected during migration/epoch changes
+          if ((err as { code?: string })?.code === 'write-blocked') {
+            console.warn('[PERSIST] Write blocked by V2 guard:', (err as Error).message);
+            break;
+          }
           recordProjectFirestoreSaveError();
           reportPersistFailure(addToast, 'project data save', err);
         }
@@ -725,6 +744,8 @@ export function useProjectPersistence(options: {
 
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
+    // V2: Advance generation to invalidate stale async completions from previous project
+    const loadGeneration = advanceGeneration(projectId);
     const project = projectList.find(p => p.id === projectId);
 
     // ── Phase 1: IDB-first fast path (~5ms) ──────────────────────────────
@@ -754,6 +775,7 @@ export function useProjectPersistence(options: {
       reconcileWithFirestore(projectId, idbData)
         .then((result) => {
           if (activeProjectIdRef.current !== projectId) return;   // user switched projects
+          if (!isGenerationCurrent(loadGeneration, projectId)) return; // V2: generation advanced
           if (saveCounterRef.current > saveIdAtLoad) return;      // user edited or onSnapshot advanced
           if (result.action === 'update' && result.data) {
             const fsSaveId = result.data.lastSaveId ?? 0;
@@ -790,6 +812,8 @@ export function useProjectPersistence(options: {
     // Cancel any pending flushes so stale mutations from the previous project
     // don't persist empty state to the NEW project's IDB/Firestore slot.
     needsPersistFlushRef.current = false;
+    // V2: Advance generation so stale async ops from cleared project are rejected
+    advanceGeneration('');
     applyViewState(createEmptyProjectViewState());
   }, [applyViewState]);
 
@@ -814,6 +838,10 @@ export function useProjectPersistence(options: {
       collection(db, 'projects', pid, 'chunks'),
       (snap) => {
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
+        // V2: Skip snapshot processing while our own writes are in flight
+        if (isSnapshotSuppressed()) {
+          return;
+        }
 
         const metaDoc = snap.docs.find((d) => (d.data() as any)?.type === 'meta');
         const meta = metaDoc ? (metaDoc.data() as any) : null;
