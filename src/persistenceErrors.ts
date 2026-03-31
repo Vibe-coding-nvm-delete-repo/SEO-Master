@@ -11,12 +11,73 @@ export type PersistToastFn = (
   options?: ToastOptions,
 ) => void;
 
-function buildPersistFailureMessage(context: string, err: unknown): string {
-  const e = err as any;
-  const code = typeof e?.code === 'string' ? e.code : undefined;
-  const details = code ? ` [${code}]` : '';
+type PersistErrorKind =
+  | 'invalid-argument'
+  | 'permission-denied'
+  | 'unavailable'
+  | 'other';
+
+export interface PersistErrorInfo {
+  code?: string;
+  kind: PersistErrorKind;
+  step?: string;
+}
+
+function normalizePersistErrorCode(code: unknown): string | undefined {
+  if (typeof code !== 'string' || !code.trim()) return undefined;
+  return code.startsWith('firestore/') ? code.slice('firestore/'.length) : code;
+}
+
+export function getPersistErrorInfo(err: unknown): PersistErrorInfo {
+  const e = err as { code?: unknown; persistStep?: unknown } | null | undefined;
+  const code = normalizePersistErrorCode(e?.code);
+  const step = typeof e?.persistStep === 'string' && e.persistStep.trim() ? e.persistStep : undefined;
   if (code === 'invalid-argument') {
+    return { code, kind: 'invalid-argument', step };
+  }
+  if (code === 'permission-denied') {
+    return { code, kind: 'permission-denied', step };
+  }
+  if (code === 'unavailable') {
+    return { code, kind: 'unavailable', step };
+  }
+  return { code, kind: 'other', step };
+}
+
+export function tagPersistErrorStep(err: unknown, step: string): Error {
+  const source = err as { code?: unknown; message?: unknown } | null | undefined;
+  const tagged = (err instanceof Error
+    ? err
+    : new Error(
+      typeof err === 'string'
+        ? err
+        : typeof source?.message === 'string' && source.message.trim()
+          ? source.message
+          : 'Unknown persistence error',
+    )) as Error & {
+    code?: string;
+    persistStep?: string;
+    cause?: unknown;
+  };
+  const code = normalizePersistErrorCode(source?.code);
+  if (code) {
+    tagged.code = code;
+  }
+  tagged.persistStep = step;
+  if (tagged.cause === undefined && err !== tagged) {
+    tagged.cause = err;
+  }
+  return tagged;
+}
+
+function buildPersistFailureMessage(context: string, err: unknown): string {
+  const errorInfo = getPersistErrorInfo(err);
+  const details = errorInfo.code ? ` [${errorInfo.code}]` : '';
+  if (errorInfo.kind === 'invalid-argument') {
     return `Cloud sync failed (${context})${details}. Firestore rejected the data payload.`;
+  }
+  if (errorInfo.kind === 'permission-denied') {
+    return `Cloud sync blocked (${context})${details}. Firestore denied this write. Check shared-project recovery or deployed rules.`;
   }
   return `Cloud sync failed (${context})${details}. Check your connection and try again.`;
 }

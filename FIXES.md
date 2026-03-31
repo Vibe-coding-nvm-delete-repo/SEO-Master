@@ -2,6 +2,9 @@
 
 > **Rule:** Map everything first, execute sequentially. Check off items as completed.
 > After each fix: `npx tsc --noEmit && npx vitest run && npx vite build`
+> Use [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md) for the current repo-wide ranking of refactor opportunities.
+> Use [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) for the structured refactor program.
+> Use this file for tactical bug fixes, confirmed failure modes, and concrete follow-up items.
 
 ---
 
@@ -280,6 +283,11 @@ useEffect(() => {
 ---
 
 ## Execution Notes
+
+- [x] (2026-03-31) Fixed local group/open regression in `src/App.tsx`, `src/projectCollabV2.ts`, `src/projectCollabV2.storage.test.ts`, `src/ClusterRow.test.tsx`, and `src/GroupedClusterRow.test.tsx`.
+  Root cause: `App.tsx` was still rendering stale inline row components whose checkbox callbacks no longer matched `handleClusterSelect` / `handleGroupSelect`, so page and group selection silently failed. In parallel, `loadCanonicalProjectState()` could still turn ordinary local project open into a V2 recovery write path when stale collab meta had no usable base commit, which caused startup `permission-denied` writes on `project_operations/current` and `collab/meta`.
+  Instances fixed: pages table selection, grouped table selection, approved table selection, legacy bootstrap with no collab meta, legacy bootstrap with explicit legacy meta, and stale V2 bootstrap with missing `baseCommitId`.
+  Validation: targeted component/storage regressions, `npx tsc --noEmit`, browser repro confirming clean project open, manual grouping persistence across reload, and filtered Auto Group re-enabling once filters are active.
 
 - **Work top to bottom.** Tier 1 items are blocking — nothing else matters if data is being lost.
 - **Tier 1 priority order:** 1.2 and 1.3 are CRITICAL (confirmed data loss). 1.4 is HIGH (timing-dependent). 1.6 is HIGH (multi-user race). 1.1 is MEDIUM (redundant, not data-losing). 1.5, 1.7, 1.8 are important but less urgent.

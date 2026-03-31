@@ -377,7 +377,6 @@ describe('projectCollabV2 storage contract', () => {
       return { exists: () => false, data: () => undefined };
     });
     firestoreMocks.getDocs.mockResolvedValue({ docs: [], empty: true });
-    firestoreMocks.runTransaction.mockRejectedValueOnce(new Error('recovery-unavailable'));
 
     const legacyLoader = vi.fn(async () => makePayload(9));
     const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader);
@@ -386,6 +385,149 @@ describe('projectCollabV2 storage contract', () => {
     expect(canonical.mode).toBe('v2');
     expect(canonical.resolved).toBeNull();
     expect(canonical.entities.meta?.readMode).toBe('v2');
+    expect(canonical.diagnostics?.recovery).toMatchObject({
+      attempted: false,
+      outcome: 'skipped',
+    });
+  });
+
+  it('preserves permission-denied recovery diagnostics for stuck V2 meta', async () => {
+    const meta = {
+      schemaVersion: 2 as const,
+      migrationState: 'running' as const,
+      datasetEpoch: 9,
+      baseCommitId: 'commit_9',
+      commitState: 'writing' as const,
+      lastMigratedAt: '2026-03-30T00:00:00.000Z',
+      migrationOwnerClientId: 'client-b',
+      migrationStartedAt: '2026-03-30T00:00:00.000Z',
+      migrationHeartbeatAt: '2026-03-30T00:00:00.000Z',
+      migrationExpiresAt: '2026-04-01T00:00:00.000Z',
+      readMode: 'v2' as const,
+      requiredClientSchema: CLIENT_SCHEMA_VERSION,
+      revision: 9,
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      updatedByClientId: 'client-a',
+      lastMutationId: null,
+    };
+
+    firestoreMocks.getDoc.mockImplementation(async (ref: { path: string }) => {
+      if (ref.path.endsWith('collab/meta')) {
+        return { exists: () => true, data: () => meta };
+      }
+      if (ref.path.endsWith('base_commits/commit_9')) {
+        return { exists: () => false, data: () => undefined };
+      }
+      return { exists: () => false, data: () => undefined };
+    });
+    firestoreMocks.getDocs.mockResolvedValue({ docs: [], empty: true });
+    // First runTransaction call is lock acquisition (fails — optional, caught),
+    // second is the recovery transaction (fails with permission-denied).
+    firestoreMocks.runTransaction
+      .mockRejectedValueOnce(new Error('lock failed'))
+      .mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'permission-denied' }));
+
+    const canonical = await loadCanonicalProjectState('project-1', 'client-a', vi.fn(async () => makePayload(9)));
+
+    expect(canonical.mode).toBe('v2');
+    expect(canonical.diagnostics?.recovery).toEqual({
+      attempted: true,
+      outcome: 'failed',
+      code: 'permission-denied',
+      step: 'repair collab meta',
+    });
+  });
+
+  it('keeps bootstrap read-only for legacy meta instead of retrying migration writes', async () => {
+    const meta = {
+      schemaVersion: 2 as const,
+      migrationState: 'failed' as const,
+      datasetEpoch: 9,
+      baseCommitId: null,
+      commitState: 'writing' as const,
+      lastMigratedAt: '2026-03-30T00:00:00.000Z',
+      migrationOwnerClientId: null,
+      migrationStartedAt: null,
+      migrationHeartbeatAt: null,
+      migrationExpiresAt: null,
+      readMode: 'legacy' as const,
+      requiredClientSchema: CLIENT_SCHEMA_VERSION,
+      revision: 9,
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      updatedByClientId: 'client-a',
+      lastMutationId: null,
+    };
+
+    firestoreMocks.getDoc.mockImplementation(async (ref: { path: string }) => {
+      if (ref.path.endsWith('collab/meta')) {
+        return { exists: () => true, data: () => meta };
+      }
+      return { exists: () => false, data: () => undefined };
+    });
+
+    const legacyLoader = vi.fn(async () => makePayload(9));
+    const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader);
+
+    expect(legacyLoader).toHaveBeenCalledTimes(1);
+    expect(firestoreMocks.runTransaction).not.toHaveBeenCalled();
+    expect(canonical.mode).toBe('legacy');
+    expect(canonical.resolved).toEqual(makePayload(9));
+  });
+
+  it('keeps bootstrap read-only when no collab meta exists yet', async () => {
+    firestoreMocks.getDoc.mockResolvedValue({
+      exists: () => false,
+      data: () => undefined,
+    });
+
+    const legacyLoader = vi.fn(async () => makePayload(9));
+    const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader);
+
+    expect(legacyLoader).toHaveBeenCalledTimes(1);
+    expect(firestoreMocks.runTransaction).not.toHaveBeenCalled();
+    expect(canonical.mode).toBe('legacy');
+    expect(canonical.resolved).toEqual(makePayload(9));
+  });
+
+  it('skips V2 recovery writes when the meta is missing a base commit', async () => {
+    const meta = {
+      schemaVersion: 2 as const,
+      migrationState: 'running' as const,
+      datasetEpoch: 9,
+      baseCommitId: null,
+      commitState: 'writing' as const,
+      lastMigratedAt: '2026-03-30T00:00:00.000Z',
+      migrationOwnerClientId: 'client-b',
+      migrationStartedAt: '2026-03-30T00:00:00.000Z',
+      migrationHeartbeatAt: '2026-03-30T00:00:00.000Z',
+      migrationExpiresAt: '2026-04-01T00:00:00.000Z',
+      readMode: 'v2' as const,
+      requiredClientSchema: CLIENT_SCHEMA_VERSION,
+      revision: 9,
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      updatedByClientId: 'client-a',
+      lastMutationId: null,
+    };
+
+    firestoreMocks.getDoc.mockImplementation(async (ref: { path: string }) => {
+      if (ref.path.endsWith('collab/meta')) {
+        return { exists: () => true, data: () => meta };
+      }
+      return { exists: () => false, data: () => undefined };
+    });
+    firestoreMocks.getDocs.mockResolvedValue({ docs: [], empty: true });
+
+    const legacyLoader = vi.fn(async () => makePayload(9));
+    const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader);
+
+    expect(legacyLoader).toHaveBeenCalledTimes(1);
+    expect(firestoreMocks.runTransaction).not.toHaveBeenCalled();
+    expect(canonical.mode).toBe('legacy');
+    expect(canonical.resolved).toEqual(makePayload(9));
+    expect(canonical.diagnostics?.recovery).toEqual({
+      attempted: false,
+      outcome: 'skipped',
+    });
   });
 
   it('writes datasetEpoch on every base-commit chunk document', async () => {
