@@ -347,7 +347,7 @@ describe('projectCollabV2 storage contract', () => {
     });
   });
 
-  it('keeps strict V2 mode when canonical commit is unavailable and never calls legacy loader', async () => {
+  it('attempts recovery when V2 meta says ready/complete but base commit is missing', async () => {
     const meta = {
       schemaVersion: 2 as const,
       migrationState: 'complete' as const,
@@ -367,9 +367,17 @@ describe('projectCollabV2 storage contract', () => {
       lastMutationId: null,
     };
 
+    // After recovery resets readMode to 'legacy', the re-read returns updated meta
+    const repairedMeta = { ...meta, readMode: 'legacy' as const, migrationState: 'failed' as const, revision: 10 };
+    let getDocCallCount = 0;
     firestoreMocks.getDoc.mockImplementation(async (ref: { path: string }) => {
       if (ref.path.endsWith('collab/meta')) {
-        return { exists: () => true, data: () => meta };
+        // First call returns original stuck meta, subsequent calls return repaired meta
+        getDocCallCount++;
+        if (getDocCallCount <= 1) {
+          return { exists: () => true, data: () => meta };
+        }
+        return { exists: () => true, data: () => repairedMeta };
       }
       if (ref.path.endsWith('base_commits/commit_9')) {
         return { exists: () => false, data: () => undefined };
@@ -377,18 +385,36 @@ describe('projectCollabV2 storage contract', () => {
       return { exists: () => false, data: () => undefined };
     });
     firestoreMocks.getDocs.mockResolvedValue({ docs: [], empty: true });
+    // Recovery transaction runs and resets readMode to 'legacy'
+    firestoreMocks.runTransaction.mockImplementation(async (_, fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        get: async (ref: { path: string }) => {
+          if (ref.path.endsWith('collab/meta')) {
+            return { exists: () => true, data: () => meta };
+          }
+          if (ref.path.includes('project_operations')) {
+            return { exists: () => false, data: () => undefined };
+          }
+          if (ref.path.endsWith('base_commits/commit_9')) {
+            return { exists: () => false, data: () => undefined };
+          }
+          return { exists: () => false, data: () => undefined };
+        },
+        set: vi.fn(),
+      };
+      return fn(tx);
+    });
 
     const legacyLoader = vi.fn(async () => makePayload(9));
     const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader);
 
-    expect(legacyLoader).not.toHaveBeenCalled();
-    expect(canonical.mode).toBe('v2');
-    expect(canonical.resolved).toBeNull();
-    expect(canonical.entities.meta?.readMode).toBe('v2');
-    expect(canonical.diagnostics?.recovery).toMatchObject({
-      attempted: false,
-      outcome: 'skipped',
-    });
+    // Recovery should have run (not skipped)
+    expect(firestoreMocks.runTransaction).toHaveBeenCalled();
+    expect(canonical.diagnostics?.recovery?.attempted).toBe(true);
+    // After recovery, legacy loader is called to provide the fallback data
+    expect(legacyLoader).toHaveBeenCalledTimes(1);
+    expect(canonical.mode).toBe('legacy');
+    expect(canonical.resolved).toEqual(makePayload(9));
   });
 
   it('preserves permission-denied recovery diagnostics for stuck V2 meta', async () => {
@@ -489,7 +515,7 @@ describe('projectCollabV2 storage contract', () => {
     expect(canonical.resolved).toEqual(makePayload(9));
   });
 
-  it('skips V2 recovery writes when the meta is missing a base commit', async () => {
+  it('runs recovery to reset readMode when meta is stuck at v2 with missing base commit', async () => {
     const meta = {
       schemaVersion: 2 as const,
       migrationState: 'running' as const,
@@ -509,25 +535,45 @@ describe('projectCollabV2 storage contract', () => {
       lastMutationId: null,
     };
 
+    const repairedMeta = { ...meta, readMode: 'legacy' as const, migrationState: 'failed' as const, revision: 10 };
+    let getDocCallCount = 0;
     firestoreMocks.getDoc.mockImplementation(async (ref: { path: string }) => {
       if (ref.path.endsWith('collab/meta')) {
-        return { exists: () => true, data: () => meta };
+        getDocCallCount++;
+        if (getDocCallCount <= 1) {
+          return { exists: () => true, data: () => meta };
+        }
+        return { exists: () => true, data: () => repairedMeta };
       }
       return { exists: () => false, data: () => undefined };
     });
     firestoreMocks.getDocs.mockResolvedValue({ docs: [], empty: true });
+    firestoreMocks.runTransaction.mockImplementation(async (_, fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        get: async (ref: { path: string }) => {
+          if (ref.path.endsWith('collab/meta')) {
+            return { exists: () => true, data: () => meta };
+          }
+          if (ref.path.includes('project_operations')) {
+            // No active lock — migration owner expired
+            return { exists: () => false, data: () => undefined };
+          }
+          return { exists: () => false, data: () => undefined };
+        },
+        set: vi.fn(),
+      };
+      return fn(tx);
+    });
 
     const legacyLoader = vi.fn(async () => makePayload(9));
     const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader);
 
+    // Recovery should run and reset readMode to legacy
+    expect(firestoreMocks.runTransaction).toHaveBeenCalled();
     expect(legacyLoader).toHaveBeenCalledTimes(1);
-    expect(firestoreMocks.runTransaction).not.toHaveBeenCalled();
     expect(canonical.mode).toBe('legacy');
     expect(canonical.resolved).toEqual(makePayload(9));
-    expect(canonical.diagnostics?.recovery).toEqual({
-      attempted: false,
-      outcome: 'skipped',
-    });
+    expect(canonical.diagnostics?.recovery?.attempted).toBe(true);
   });
 
   it('writes datasetEpoch on every base-commit chunk document', async () => {
