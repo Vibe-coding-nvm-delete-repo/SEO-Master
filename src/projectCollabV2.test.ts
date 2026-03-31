@@ -213,9 +213,10 @@ describe('projectCollabV2', () => {
       id: 'group-1',
       expectedRevision: 4,
     });
+    expect(changes[0].kind === 'upsert' ? changes[0].value : null).not.toHaveProperty('clusters');
 
     const deletes = buildGroupDocChanges(previous, [], [], 'client-b', 3);
-    expect(deletes).toEqual([{ kind: 'delete', id: 'group-1', expectedRevision: 4 }]);
+    expect(deletes).toEqual([{ kind: 'delete', id: 'group-1', expectedRevision: 4, datasetEpoch: 3 }]);
   });
 
   it('buildManualBlockedKeywordDocChanges normalizes identical manual exclusions into stable ids', () => {

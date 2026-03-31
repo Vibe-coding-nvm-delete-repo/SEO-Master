@@ -268,6 +268,8 @@ export interface ProjectCollabMetaDoc extends ProjectRevisionFields {
   schemaVersion: 2;
   migrationState: 'running' | 'complete' | 'failed';
   datasetEpoch: number;
+  baseCommitId: string | null;
+  commitState: 'writing' | 'ready';
   lastMigratedAt: string;
   migrationOwnerClientId: string | null;
   migrationStartedAt: string | null;
@@ -287,7 +289,7 @@ export interface ProjectGroupDoc extends ProjectRevisionFields {
   lastWriterClientId?: string | null;
   lastWriterUserId?: string | null;
   clusterTokens: string[];
-  clusters: ClusterSummary[];
+  clusters?: ClusterSummary[];
   reviewStatus?: 'pending' | 'reviewing' | 'approve' | 'mismatch' | 'error';
   reviewMismatchedPages?: string[];
   reviewReason?: string;
@@ -354,6 +356,34 @@ export interface ProjectActivityLogDoc {
   datasetEpoch: number;
   createdByClientId?: string | null;
   mutationId?: string | null;
+}
+
+export interface ProjectBaseCommitManifestDoc extends ProjectRevisionFields {
+  id: string;
+  commitId: string;
+  datasetEpoch: number;
+  commitState: 'writing' | 'ready';
+  resultChunkIds: string[];
+  resultChunkCount: number;
+  clusterChunkIds: string[];
+  clusterChunkCount: number;
+  suggestionChunkIds: string[];
+  suggestionChunkCount: number;
+  autoMergeChunkIds: string[];
+  autoMergeChunkCount: number;
+  groupMergeChunkIds: string[];
+  groupMergeChunkCount: number;
+  contentHash?: string | null;
+  saveId?: number | string | null;
+  clientId?: string | null;
+  type?: 'meta';
+}
+
+export interface ProjectV2CacheMetadata {
+  schemaVersion: number;
+  datasetEpoch: number;
+  baseCommitId: string;
+  cachedAt: string;
 }
 
 export interface ProjectOperationLockDoc {
