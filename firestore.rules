@@ -1,10 +1,219 @@
 rules_version = '2';
-// Open access for this workspace app. Includes `projects/*`, `app_settings/*` (e.g. user_preferences,
-// universal_blocked, project_folders), and generate/autogroup docs. Tighten before production if needed.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
+
+    // ─── Helper functions ───
+
+    // Check if a project has V2 collab meta
+    function hasMeta(projectId) {
+      return exists(/databases/$(database)/documents/projects/$(projectId)/collab/meta);
+    }
+
+    function currentMeta(projectId) {
+      return get(/databases/$(database)/documents/projects/$(projectId)/collab/meta).data;
+    }
+
+    function hasV2Meta(projectId) {
+      return hasMeta(projectId) && currentMeta(projectId).readMode == 'v2';
+    }
+
+    function activeEpoch(projectId) {
+      return currentMeta(projectId).datasetEpoch;
+    }
+
+    // Validate revision increment (CAS semantics)
+    function validRevisionIncrement() {
+      return request.resource.data.revision == resource.data.revision + 1;
+    }
+
+    function validRevisionedCreate() {
+      return request.resource.data.revision == 1
+        && request.resource.data.updatedAt is string
+        && request.resource.data.updatedByClientId is string;
+    }
+
+    function validRevisionedUpdate() {
+      return validRevisionIncrement()
+        && request.resource.data.updatedAt is string
+        && request.resource.data.updatedByClientId is string;
+    }
+
+    // Epoch scoping — prevent writes to wrong epoch
+    function epochScopedWrite(projectId, data) {
+      return !hasV2Meta(projectId) || data.datasetEpoch == activeEpoch(projectId);
+    }
+
+    // Validate collab meta updates
+    function validCollabMetaUpdate() {
+      let current = resource.data;
+      let next = request.resource.data;
+
+      return next.schemaVersion == 2
+        && next.revision == current.revision + 1
+        // readMode can only transition legacy → v2, never back
+        && (current.readMode == 'v2' ? next.readMode == 'v2' : true)
+        // Epoch must be >= current (monotonically increasing)
+        && next.datasetEpoch >= current.datasetEpoch;
+    }
+
+    // ─── App settings (open access) ───
+    match /app_settings/{docId} {
       allow read, write: if true;
+    }
+
+    // ─── Changelog ───
+    match /changelog/{docId} {
+      allow read, write: if true;
+    }
+
+    // ─── Build info ───
+    match /build_info/{docId} {
+      allow read, write: if true;
+    }
+
+    // ─── Feedback ───
+    match /feedback/{docId} {
+      allow read, write: if true;
+    }
+
+    // ─── Notifications ───
+    match /notifications/{docId} {
+      allow read, write: if true;
+    }
+
+    // ─── Generate/autogroup/content settings ───
+    match /generate_autogroup_settings/{docId} {
+      allow read, write: if true;
+    }
+
+    // ─── Projects ───
+    match /projects/{projectId} {
+      // Project metadata — always readable, writable
+      allow read, write: if true;
+
+      // ─── Legacy chunks (pre-V2) ───
+      match /chunks/{chunkId} {
+        allow read: if true;
+        // Block legacy writes once V2 is active
+        allow write: if !hasV2Meta(projectId);
+      }
+
+      // ─── V2 Collab Meta ───
+      match /collab/meta {
+        allow read: if true;
+        allow create: if request.resource.data.schemaVersion == 2
+          && request.resource.data.revision == 1
+          && request.resource.data.readMode in ['legacy', 'v2'];
+        allow update: if validCollabMetaUpdate();
+        // Never allow meta deletion
+        allow delete: if false;
+      }
+
+      // ─── Base Commits ───
+      match /base_commits/{commitId} {
+        allow read: if true;
+
+        // Manifest document
+        allow create: if request.resource.data.commitState == 'writing'
+          && request.resource.data.datasetEpoch is number;
+        allow update: if (
+          // Only allow writing → ready transition
+          resource.data.commitState == 'writing'
+          && request.resource.data.commitState == 'ready'
+        );
+        allow delete: if false;
+
+        // Chunks within a commit
+        match /chunks/{chunkId} {
+          allow read: if true;
+          allow create: if request.resource.data.datasetEpoch is number
+            && request.resource.data.type is string
+            && request.resource.data.index is number;
+          allow update: if false; // Chunks are immutable
+          allow delete: if false;
+        }
+      }
+
+      // ─── V2 Entity Collections (epoch-scoped, CAS revisioned) ───
+      match /groups/{groupId} {
+        allow read: if true;
+        allow create: if validRevisionedCreate()
+          && epochScopedWrite(projectId, request.resource.data)
+          && request.resource.data.groupName is string
+          && request.resource.data.status in ['grouped', 'approved'];
+        allow update: if validRevisionedUpdate()
+          && epochScopedWrite(projectId, request.resource.data);
+        allow delete: if false; // Soft-delete via revision update
+      }
+
+      match /blocked_tokens/{tokenId} {
+        allow read: if true;
+        allow create: if validRevisionedCreate()
+          && epochScopedWrite(projectId, request.resource.data)
+          && request.resource.data.token is string;
+        allow update: if validRevisionedUpdate()
+          && epochScopedWrite(projectId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /manual_blocked_keywords/{keywordId} {
+        allow read: if true;
+        allow create: if validRevisionedCreate()
+          && epochScopedWrite(projectId, request.resource.data)
+          && request.resource.data.keyword is string;
+        allow update: if validRevisionedUpdate()
+          && epochScopedWrite(projectId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /token_merge_rules/{ruleId} {
+        allow read: if true;
+        allow create: if validRevisionedCreate()
+          && epochScopedWrite(projectId, request.resource.data)
+          && request.resource.data.parentToken is string;
+        allow update: if validRevisionedUpdate()
+          && epochScopedWrite(projectId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /label_sections/{sectionId} {
+        allow read: if true;
+        allow create: if validRevisionedCreate()
+          && epochScopedWrite(projectId, request.resource.data)
+          && request.resource.data.name is string;
+        allow update: if validRevisionedUpdate()
+          && epochScopedWrite(projectId, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /activity_log/{entryId} {
+        allow read: if true;
+        allow create: if epochScopedWrite(projectId, request.resource.data)
+          && request.resource.data.action is string;
+        allow update: if epochScopedWrite(projectId, request.resource.data);
+        allow delete: if true; // Activity log entries can be replaced in bulk
+      }
+
+      // ─── Operation Lock ───
+      match /project_operations/current {
+        allow read: if true;
+        allow create: if request.resource.data.type is string
+          && request.resource.data.ownerId is string
+          && request.resource.data.status == 'running';
+        allow update: if (
+          // Owner can update (heartbeat, release)
+          resource.data.ownerId == request.resource.data.ownerId
+          // Or lock is expired (anyone can take over)
+          // Note: timestamp comparison not possible in rules, handled in app logic
+        );
+        allow delete: if true; // Allow lock deletion for cleanup
+      }
+    }
+
+    // ─── Catch-all for any other collections ───
+    match /{document=**} {
+      allow read: if true;
+      allow write: if true;
     }
   }
 }
