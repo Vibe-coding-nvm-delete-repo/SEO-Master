@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useCallback, useRef } from 'react';
 import Papa from 'papaparse';
 import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr } from '../processing';
@@ -8,6 +9,8 @@ import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, BlockedKeywor
 
 interface UseCsvImportParams {
   activeProjectIdRef: React.MutableRefObject<string | null>;
+  storageMode: string;
+  runWithExclusiveOperation?: (operationType: string, operation: () => Promise<void>) => Promise<void>;
   tokenMergeRules: TokenMergeRule[];
   syncFileNameLocal: (name: string) => void;
   bulkSet: (data: {
@@ -28,6 +31,7 @@ interface UseCsvImportParams {
     tokenMergeRules: never[];
     autoGroupSuggestions: never[];
     autoMergeRecommendations: never[];
+    groupMergeRecommendations: never[];
     labelSections: never[];
   }) => void;
   setActiveTab: (tab: string) => void;
@@ -35,6 +39,7 @@ interface UseCsvImportParams {
   setClusterSummary: (c: ClusterSummary[] | null) => void;
   setTokenSummary: (t: TokenSummary[] | null) => void;
   setAutoMergeRecommendations: (r: never[]) => void;
+  setGroupMergeRecommendations: (r: never[]) => void;
   setStats: (s: { original: number; valid: number; clusters: number; tokens: number; totalVolume: number } | null) => void;
   setDatasetStats: (d: {
     cities: number; states: number; numbers: number; faqs: number;
@@ -46,6 +51,8 @@ interface UseCsvImportParams {
 
 export function useCsvImport({
   activeProjectIdRef,
+  storageMode,
+  runWithExclusiveOperation,
   tokenMergeRules,
   syncFileNameLocal,
   bulkSet,
@@ -54,6 +61,7 @@ export function useCsvImport({
   setClusterSummary,
   setTokenSummary,
   setAutoMergeRecommendations,
+  setGroupMergeRecommendations,
   setStats,
   setDatasetStats,
   addToast,
@@ -63,11 +71,11 @@ export function useCsvImport({
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<number>(0);
 
-  const processCSV = (file: File) => {
+  const processCSV = (file: File): Promise<void> => {
     const importProjectId = activeProjectIdRef.current;
     if (!importProjectId) {
       setError('Select a project before importing a CSV file.');
-      return;
+      return Promise.resolve();
     }
 
     let importCancelledNotified = false;
@@ -82,7 +90,8 @@ export function useCsvImport({
     setError(null);
     syncFileNameLocal(file.name);
 
-    Papa.parse(file, {
+    return new Promise<void>((resolve) => {
+      Papa.parse(file, {
       skipEmptyLines: true,
       complete: (results) => {
         try {
@@ -123,6 +132,7 @@ export function useCsvImport({
               if (csvImportProjectMismatch(importProjectId, activeProjectIdRef.current)) {
                 notifyImportCancelled();
                 setIsProcessing(false);
+                resolve();
                 return;
               }
 
@@ -521,11 +531,13 @@ export function useCsvImport({
                   tokenMergeRules: [],
                   autoGroupSuggestions: [],
                   autoMergeRecommendations: [],
+                  groupMergeRecommendations: [],
                   labelSections: []
                 });
 
                 setActiveTab('pages');
                 setIsProcessing(false);
+                resolve();
               }
             } catch (err: any) {
               setError(err.message || "An error occurred while processing the CSV.");
@@ -533,9 +545,11 @@ export function useCsvImport({
               setClusterSummary(null);
               setTokenSummary(null);
               setAutoMergeRecommendations([]);
+              setGroupMergeRecommendations([]);
               setStats(null);
               setDatasetStats(null);
               setIsProcessing(false);
+              resolve();
             }
           };
 
@@ -546,9 +560,11 @@ export function useCsvImport({
           setClusterSummary(null);
           setTokenSummary(null);
           setAutoMergeRecommendations([]);
+          setGroupMergeRecommendations([]);
           setStats(null);
           setDatasetStats(null);
           setIsProcessing(false);
+          resolve();
         }
       },
       error: (err) => {
@@ -558,14 +574,31 @@ export function useCsvImport({
         setClusterSummary(null);
         setTokenSummary(null);
         setAutoMergeRecommendations([]);
+        setGroupMergeRecommendations([]);
         setStats(null);
+        setDatasetStats(null);
+        resolve();
       }
+    });
     });
   };
 
+  const runCsvImport = useCallback((file: File) => {
+    const runImport = async () => {
+      await processCSV(file);
+    };
+
+    if (storageMode === 'v2' && runWithExclusiveOperation) {
+      void runWithExclusiveOperation('csv-import', runImport);
+      return;
+    }
+
+    void runImport();
+  }, [processCSV, runWithExclusiveOperation, storageMode]);
+
   // Ref to always call the latest processCSV (avoids stale closure in useCallback)
-  const processCSVRef = useRef(processCSV);
-  processCSVRef.current = processCSV;
+  const processCSVRef = useRef(runCsvImport);
+  processCSVRef.current = runCsvImport;
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -602,6 +635,7 @@ export function useCsvImport({
     isProcessing,
     progress,
     processCSV,
+    runCsvImport,
     handleDragOver,
     handleDragLeave,
     handleDrop,
