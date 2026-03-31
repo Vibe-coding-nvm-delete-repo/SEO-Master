@@ -691,8 +691,18 @@ export function useProjectPersistence(options: {
   const flushNow = useCallback(async () => {
     if (!activeProjectIdRef.current) return;
     if (storageModeRef.current === 'v2') {
-      await pendingV2LocalRef.current;
-      await pendingV2WriteRef.current;
+      // V2 writes can enqueue canonical-cache persists after cloud acks.
+      // Keep draining until both queues stabilize so callers get a true
+      // "cloud + canonical local cache" durability barrier.
+      while (true) {
+        const writePromise = pendingV2WriteRef.current;
+        await writePromise;
+        const localPromise = pendingV2LocalRef.current;
+        await localPromise;
+        if (writePromise === pendingV2WriteRef.current && localPromise === pendingV2LocalRef.current) {
+          break;
+        }
+      }
       if (lastV2LocalErrorRef.current) {
         const err = lastV2LocalErrorRef.current;
         lastV2LocalErrorRef.current = null;
@@ -799,6 +809,26 @@ export function useProjectPersistence(options: {
     return activeEpochRef.current === context.datasetEpoch;
   }, []);
 
+  interface V2CacheContext {
+    projectId: string;
+    datasetEpoch: number;
+    baseCommitId: string;
+    metaRevision: number;
+  }
+
+  const isV2CacheContextCurrent = useCallback((context: V2CacheContext): boolean => {
+    if (activeProjectIdRef.current !== context.projectId) return false;
+    const currentMeta = collabMetaRef.current;
+    if (!currentMeta || currentMeta.readMode !== 'v2') return false;
+    return (
+      currentMeta.datasetEpoch === context.datasetEpoch &&
+      currentMeta.baseCommitId === context.baseCommitId &&
+      currentMeta.revision === context.metaRevision &&
+      currentMeta.commitState === 'ready' &&
+      currentMeta.migrationState === 'complete'
+    );
+  }, []);
+
   const persistCanonicalCacheToIDB = useCallback(async (
     projectId: string,
     payload: ProjectDataPayload,
@@ -827,9 +857,18 @@ export function useProjectPersistence(options: {
     if (!projectId) return;
     if (!meta || meta.readMode !== 'v2' || meta.commitState !== 'ready' || meta.migrationState !== 'complete') return;
     if (!meta.baseCommitId) return;
-    const expectedProjectId = projectId;
-    pendingV2LocalRef.current = persistCanonicalCacheToIDB(projectId, payload, meta).then((ok) => {
-      if (activeProjectIdRef.current !== expectedProjectId) {
+    const context: V2CacheContext = {
+      projectId,
+      datasetEpoch: meta.datasetEpoch,
+      baseCommitId: meta.baseCommitId,
+      metaRevision: meta.revision,
+    };
+    pendingV2LocalRef.current = pendingV2LocalRef.current.then(async () => {
+      if (!isV2CacheContextCurrent(context)) {
+        return;
+      }
+      const ok = await persistCanonicalCacheToIDB(projectId, payload, meta);
+      if (!isV2CacheContextCurrent(context)) {
         return;
       }
       if (!ok && !lastV2LocalErrorRef.current) {
@@ -839,7 +878,7 @@ export function useProjectPersistence(options: {
       lastV2LocalErrorRef.current = err instanceof Error ? err : new Error('v2-local-cache-failed');
       logPersistError('cache canonical V2 project to IDB', err);
     });
-  }, [persistCanonicalCacheToIDB]);
+  }, [isV2CacheContextCurrent, persistCanonicalCacheToIDB]);
 
   const resetEpochScopedMutationState = useCallback((activeEpoch: number | null) => {
     if (activeEpoch == null) {
@@ -911,6 +950,16 @@ export function useProjectPersistence(options: {
     return payload;
   }, [applyViewState]);
 
+  const rollbackConflictedMutation = useCallback((message: string, datasetEpoch: number | null) => {
+    if (datasetEpoch == null || !message.startsWith('conflict:')) return;
+    const [, subcollection, logicalId] = message.split(':', 3);
+    if (!subcollection || !logicalId) return;
+    const docKey = v2DocKey(datasetEpoch, subcollection, logicalId);
+    pendingMutationByDocKeyRef.current.delete(docKey);
+    optimisticOverlayByDocKeyRef.current.delete(docKey);
+    recomposeFromCanonicalRefs();
+  }, [recomposeFromCanonicalRefs, v2DocKey]);
+
   const applyCanonicalState = useCallback((canonical: CanonicalProjectState) => {
     if (canonical.mode !== 'v2') return;
     collabMetaRef.current = canonical.entities.meta;
@@ -948,6 +997,10 @@ export function useProjectPersistence(options: {
     const projectId = activeProjectIdRef.current;
     if (!projectId || storageModeRef.current !== 'v2') return;
     const meta = collabMetaRef.current;
+    const reloadGeneration = epochLoadGenerationRef.current;
+    const reloadMetaRevision = meta?.revision ?? null;
+    const reloadDatasetEpoch = meta?.datasetEpoch ?? null;
+    const reloadBaseCommitId = meta?.baseCommitId ?? null;
     const canonical = (
       meta ? await loadCanonicalEpoch(projectId, meta) : null
     ) ?? await loadCanonicalProjectState(
@@ -956,6 +1009,18 @@ export function useProjectPersistence(options: {
       () => loadProjectDataForView(projectId),
     );
     if (activeProjectIdRef.current !== projectId) return;
+    if (epochLoadGenerationRef.current !== reloadGeneration) return;
+    const currentMeta = collabMetaRef.current;
+    if (
+      currentMeta &&
+      (
+        currentMeta.revision !== reloadMetaRevision ||
+        currentMeta.datasetEpoch !== reloadDatasetEpoch ||
+        currentMeta.baseCommitId !== reloadBaseCommitId
+      )
+    ) {
+      return;
+    }
     if (!canonical) return;
     clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
     applyCanonicalState(canonical);
@@ -1016,6 +1081,7 @@ export function useProjectPersistence(options: {
         lastV2WriteErrorRef.current = err instanceof Error ? err : new Error(message || 'v2-write-failed');
 
         if (isConflict) {
+          rollbackConflictedMutation(message, context.datasetEpoch);
           addToastRef.current('Another client changed this project item. The latest shared state was reloaded.', 'warning');
           await reloadCanonicalStateFromCloud();
           return;
@@ -1028,7 +1094,7 @@ export function useProjectPersistence(options: {
         reportPersistFailure(addToastRef.current, label, err);
       }
     });
-  }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud]);
+  }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation]);
 
   const persistCanonicalPayloadV2 = useCallback((payload: ProjectDataPayload, options?: { requireOwnedLock?: boolean }) => {
     const projectId = activeProjectIdRef.current;
@@ -1722,6 +1788,7 @@ export function useProjectPersistence(options: {
     const pid = activeProjectIdRef.current;
     if (!pid) return;
     if (storageMode !== 'v2') return;
+    const listenerProjectId = pid;
     const mergeRevisionedDocs = <T extends { id: string; revision?: number; lastMutationId?: string | null }>(
       current: T[],
       changes: Array<{ type: string; doc: { id: string; data: () => unknown } }>,
@@ -1770,7 +1837,12 @@ export function useProjectPersistence(options: {
 
     const attachEpochListeners = (datasetEpoch: number, listenerMeta: ProjectCollabMetaDoc) => {
       entityListenersCleanupRef.current?.();
+      const listenerGeneration = epochLoadGenerationRef.current;
+      const isEntityListenerCurrent = () =>
+        activeProjectIdRef.current === listenerProjectId &&
+        epochLoadGenerationRef.current === listenerGeneration;
       const cacheCanonicalView = () => {
+        if (!isEntityListenerCurrent()) return;
         const currentMeta = collabMetaRef.current;
         if (!currentMeta || currentMeta.readMode !== 'v2') return;
         if (currentMeta.datasetEpoch !== datasetEpoch) return;
@@ -1785,6 +1857,7 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_GROUPS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
+            if (!isEntityListenerCurrent()) return;
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
             if (snap.metadata?.hasPendingWrites) return;
             const merged = mergeRevisionedDocs(groupDocsRef.current, snap.docChanges() as any, PROJECT_GROUPS_SUBCOLLECTION, datasetEpoch);
@@ -1800,6 +1873,7 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
+            if (!isEntityListenerCurrent()) return;
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
             if (snap.metadata?.hasPendingWrites) return;
             const merged = mergeRevisionedDocs(blockedTokenDocsRef.current, snap.docChanges() as any, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, datasetEpoch);
@@ -1815,6 +1889,7 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
+            if (!isEntityListenerCurrent()) return;
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
             if (snap.metadata?.hasPendingWrites) return;
             const merged = mergeRevisionedDocs(manualBlockedKeywordDocsRef.current, snap.docChanges() as any, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, datasetEpoch);
@@ -1830,6 +1905,7 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
+            if (!isEntityListenerCurrent()) return;
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
             if (snap.metadata?.hasPendingWrites) return;
             const merged = mergeRevisionedDocs(tokenMergeRuleDocsRef.current, snap.docChanges() as any, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, datasetEpoch);
@@ -1845,6 +1921,7 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_LABEL_SECTIONS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
+            if (!isEntityListenerCurrent()) return;
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
             if (snap.metadata?.hasPendingWrites) return;
             const merged = mergeRevisionedDocs(labelSectionDocsRef.current, snap.docChanges() as any, PROJECT_LABEL_SECTIONS_SUBCOLLECTION, datasetEpoch);
@@ -1860,6 +1937,7 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_ACTIVITY_LOG_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
+            if (!isEntityListenerCurrent()) return;
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
             if (snap.metadata?.hasPendingWrites) return;
             const merged = mergeRevisionedDocs(activityLogDocsRef.current as Array<ProjectActivityLogDoc & { revision?: number; lastMutationId?: string | null }>, snap.docChanges() as any, PROJECT_ACTIVITY_LOG_SUBCOLLECTION, datasetEpoch);
@@ -1894,6 +1972,7 @@ export function useProjectPersistence(options: {
     const metaUnsub = onSnapshot(
       doc(db, 'projects', pid, PROJECT_COLLAB_META_COLLECTION, PROJECT_COLLAB_META_DOC),
       (snap) => {
+        if (activeProjectIdRef.current !== listenerProjectId) return;
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
         if (snap.metadata?.hasPendingWrites) return;
         const nextMeta = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
@@ -1960,6 +2039,7 @@ export function useProjectPersistence(options: {
     const operationUnsub = onSnapshot(
       doc(db, 'projects', pid, PROJECT_OPERATIONS_SUBCOLLECTION, PROJECT_OPERATION_CURRENT_DOC),
       (snap) => {
+        if (activeProjectIdRef.current !== listenerProjectId) return;
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
         if (snap.metadata?.hasPendingWrites) return;
         const rawOperation = snap.exists() ? (snap.data() as ProjectOperationLockDoc) : null;
@@ -2492,6 +2572,78 @@ export function useProjectPersistence(options: {
     Date.parse(activeOperation.expiresAt || '0') > Date.now(),
   );
 
+  const canUseExternalSetter = useCallback((label: string): boolean => {
+    if (storageModeRef.current !== 'v2') return true;
+    if (!activeProjectIdRef.current) return true;
+    addToastRef.current(`${label} is blocked for shared V2 projects. Use the persistence action APIs instead.`, 'warning');
+    return false;
+  }, []);
+
+  const guardedSetResults: React.Dispatch<React.SetStateAction<ProcessedRow[] | null>> = (value) => {
+    if (!canUseExternalSetter('Direct result updates')) return;
+    setResults(value);
+  };
+  const guardedSetClusterSummary: React.Dispatch<React.SetStateAction<ClusterSummary[] | null>> = (value) => {
+    if (!canUseExternalSetter('Direct cluster updates')) return;
+    setClusterSummary(value);
+  };
+  const guardedSetTokenSummary: React.Dispatch<React.SetStateAction<TokenSummary[] | null>> = (value) => {
+    if (!canUseExternalSetter('Direct token-summary updates')) return;
+    setTokenSummary(value);
+  };
+  const guardedSetGroupedClusters: React.Dispatch<React.SetStateAction<GroupedCluster[]>> = (value) => {
+    if (!canUseExternalSetter('Direct grouped-cluster updates')) return;
+    setGroupedClusters(value);
+  };
+  const guardedSetApprovedGroups: React.Dispatch<React.SetStateAction<GroupedCluster[]>> = (value) => {
+    if (!canUseExternalSetter('Direct approved-group updates')) return;
+    setApprovedGroups(value);
+  };
+  const guardedSetBlockedKeywords: React.Dispatch<React.SetStateAction<BlockedKeyword[]>> = (value) => {
+    if (!canUseExternalSetter('Direct blocked-keyword updates')) return;
+    setBlockedKeywords(value);
+  };
+  const guardedSetActivityLog: React.Dispatch<React.SetStateAction<ActivityLogEntry[]>> = (value) => {
+    if (!canUseExternalSetter('Direct activity-log updates')) return;
+    setActivityLog(value);
+  };
+  const guardedSetStats: React.Dispatch<React.SetStateAction<Stats | null>> = (value) => {
+    if (!canUseExternalSetter('Direct stats updates')) return;
+    setStats(value);
+  };
+  const guardedSetDatasetStats: React.Dispatch<React.SetStateAction<any | null>> = (value) => {
+    if (!canUseExternalSetter('Direct dataset-stat updates')) return;
+    setDatasetStats(value);
+  };
+  const guardedSetAutoGroupSuggestions: React.Dispatch<React.SetStateAction<AutoGroupSuggestion[]>> = (value) => {
+    if (!canUseExternalSetter('Direct suggestion updates')) return;
+    setAutoGroupSuggestions(value);
+  };
+  const guardedSetAutoMergeRecommendations: React.Dispatch<React.SetStateAction<AutoMergeRecommendation[]>> = (value) => {
+    if (!canUseExternalSetter('Direct auto-merge updates')) return;
+    setAutoMergeRecommendations(value);
+  };
+  const guardedSetGroupMergeRecommendations: React.Dispatch<React.SetStateAction<GroupMergeRecommendation[]>> = (value) => {
+    if (!canUseExternalSetter('Direct group-merge updates')) return;
+    setGroupMergeRecommendations(value);
+  };
+  const guardedSetTokenMergeRules: React.Dispatch<React.SetStateAction<TokenMergeRule[]>> = (value) => {
+    if (!canUseExternalSetter('Direct token-merge updates')) return;
+    setTokenMergeRules(value);
+  };
+  const guardedSetBlockedTokens: React.Dispatch<React.SetStateAction<Set<string>>> = (value) => {
+    if (!canUseExternalSetter('Direct blocked-token updates')) return;
+    setBlockedTokens(value);
+  };
+  const guardedSetLabelSections: React.Dispatch<React.SetStateAction<LabelSection[]>> = (value) => {
+    if (!canUseExternalSetter('Direct label-section updates')) return;
+    setLabelSections(value);
+  };
+  const guardedSetFileName: React.Dispatch<React.SetStateAction<string | null>> = (value) => {
+    if (!canUseExternalSetter('Direct file-name updates')) return;
+    setFileName(value);
+  };
+
   return {
     // Read-only state
     results, clusterSummary, tokenSummary, groupedClusters,
@@ -2533,12 +2685,22 @@ export function useProjectPersistence(options: {
     bulkSet,
 
     // Transitional setters (for code not yet migrated to atomic mutations)
-    setResults, setClusterSummary, setTokenSummary, setGroupedClusters,
-    setApprovedGroups, setBlockedKeywords, setActivityLog, setStats,
-    setDatasetStats, setAutoGroupSuggestions, setTokenMergeRules,
-    setAutoMergeRecommendations,
-    setGroupMergeRecommendations,
-    setBlockedTokens, setLabelSections, setFileName,
+    setResults: guardedSetResults,
+    setClusterSummary: guardedSetClusterSummary,
+    setTokenSummary: guardedSetTokenSummary,
+    setGroupedClusters: guardedSetGroupedClusters,
+    setApprovedGroups: guardedSetApprovedGroups,
+    setBlockedKeywords: guardedSetBlockedKeywords,
+    setActivityLog: guardedSetActivityLog,
+    setStats: guardedSetStats,
+    setDatasetStats: guardedSetDatasetStats,
+    setAutoGroupSuggestions: guardedSetAutoGroupSuggestions,
+    setTokenMergeRules: guardedSetTokenMergeRules,
+    setAutoMergeRecommendations: guardedSetAutoMergeRecommendations,
+    setGroupMergeRecommendations: guardedSetGroupMergeRecommendations,
+    setBlockedTokens: guardedSetBlockedTokens,
+    setLabelSections: guardedSetLabelSections,
+    setFileName: guardedSetFileName,
 
     // Transitional refs
     refs: {

@@ -516,4 +516,13 @@ describe('projectCollabV2 storage contract', () => {
     const cachedEntry = storageMocks.saveToIDB.mock.calls[0] as unknown as [string, unknown] | undefined;
     expect(isProjectCanonicalCacheEntry(cachedEntry?.[1])).toBe(true);
   });
+
+  it('rejects legacy canonical cache entries that are missing V2 identity metadata', async () => {
+    storageMocks.loadFromIDB.mockResolvedValueOnce({
+      payload: makePayload(9),
+    });
+
+    await expect(loadCanonicalCacheFromIDB('project-1')).resolves.toBeNull();
+    expect(isProjectCanonicalCacheEntry({ payload: makePayload(9) })).toBe(false);
+  });
 });

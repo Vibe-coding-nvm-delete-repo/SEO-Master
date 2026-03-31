@@ -119,6 +119,7 @@ V2 cache entries now include:
 Important rule:
 - optimistic shared V2 edits are memory-only until Firestore acknowledges them
 - refresh should not reopen on a shared edit that never committed
+- canonical cache writes are serialized so an older cache persist cannot finish after and overwrite a newer canonical epoch/view
 
 ### 5. Revision-sensitive writes use CAS acknowledgements
 
@@ -147,6 +148,8 @@ So if:
 3. epoch 10 resolves late
 
 the stale epoch 10 load is ignored and cannot overwrite epoch 11 locally.
+
+Listener callbacks are also fenced to the active project/epoch generation so stale callbacks from a previous project or prior epoch cannot mutate the current workspace state.
 
 ### 7. Operation locks are enforced in the persistence boundary
 
@@ -229,7 +232,7 @@ File:
 
 Implemented:
 - storage regression tests for commit manifests and CAS acknowledgements
-- hook regression tests for stale epoch loads, lock rejection, acked-only cache behavior, and old-client cutover
+- hook regression tests for stale epoch loads, lock rejection, acked-only cache behavior, cache-write serialization, full flush barriers, stale listener callbacks after project switch, direct-setter blocking, and old-client cutover
 
 Files:
 - [src/projectCollabV2.storage.test.ts](/C:/Users/chris/Downloads/KWG/src/projectCollabV2.storage.test.ts)

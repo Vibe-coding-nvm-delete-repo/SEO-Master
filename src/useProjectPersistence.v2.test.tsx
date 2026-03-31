@@ -250,6 +250,7 @@ function emitQuerySnapshot(path: string, changes: any[], hasPendingWrites = fals
 
 const PROJECTS: Project[] = [
   { id: 'project-1', name: 'Project 1', description: '', uid: 'user-1', createdAt: '2026-03-30T00:00:00.000Z' },
+  { id: 'project-2', name: 'Project 2', description: '', uid: 'user-1', createdAt: '2026-03-30T00:00:00.000Z' },
 ];
 
 describe('useProjectPersistence V2 hardening', () => {
@@ -451,6 +452,92 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(Array.from(result.current.blockedTokens)).toEqual(['stable']);
   });
 
+  it('serializes canonical V2 cache writes so stale completions cannot overtake newer ones', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['Alpha']));
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['Alpha']));
+    const firstCacheWrite = deferred<void>();
+    const secondCacheWrite = deferred<void>();
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/blocked_tokens')).toBe(true),
+    );
+
+    collabMocks.saveCanonicalCacheToIDB.mockReset();
+    collabMocks.saveCanonicalCacheToIDB
+      .mockImplementationOnce(() => firstCacheWrite.promise)
+      .mockImplementationOnce(() => secondCacheWrite.promise);
+
+    act(() => {
+      emitQuerySnapshot('projects/project-1/blocked_tokens', [{
+        type: 'modified',
+        doc: {
+          id: `1::${blockedTokenDocId('Alpha')}`,
+          data: () => ({
+            id: blockedTokenDocId('Alpha'),
+            token: 'Alpha',
+            datasetEpoch: 1,
+            revision: 2,
+            updatedAt: '2026-03-30T00:00:00.000Z',
+            updatedByClientId: 'client-a',
+            lastMutationId: 'm-1',
+          }),
+        },
+      }]);
+      emitQuerySnapshot('projects/project-1/blocked_tokens', [{
+        type: 'added',
+        doc: {
+          id: `1::${blockedTokenDocId('Beta')}`,
+          data: () => ({
+            id: blockedTokenDocId('Beta'),
+            token: 'Beta',
+            datasetEpoch: 1,
+            revision: 1,
+            updatedAt: '2026-03-30T00:00:00.000Z',
+            updatedByClientId: 'client-a',
+            lastMutationId: 'm-2',
+          }),
+        },
+      }]);
+    });
+
+    await waitFor(() => expect(collabMocks.saveCanonicalCacheToIDB).toHaveBeenCalledTimes(1));
+    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha', 'Beta']);
+
+    await act(async () => {
+      firstCacheWrite.resolve();
+      await firstCacheWrite.promise;
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(collabMocks.saveCanonicalCacheToIDB).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      secondCacheWrite.resolve();
+      await secondCacheWrite.promise;
+    });
+  });
+
   it('suppresses idempotent listener echoes with unchanged revision and mutation id', async () => {
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['Alpha']));
     collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['Alpha']));
@@ -592,6 +679,45 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('rolls back the touched optimistic overlay before conflict reload completes', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    const canonicalReload = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalEpoch.mockImplementation(() => canonicalReload.promise);
+    collabMocks.commitRevisionedDocChanges.mockRejectedValueOnce(new Error(`conflict:blocked_tokens:${blockedTokenDocId('Alpha')}`));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    act(() => {
+      result.current.blockTokens(['Alpha']);
+    });
+
+    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual([]));
+
+    await act(async () => {
+      canonicalReload.resolve(makeCanonical(1, ['remote']));
+      await canonicalReload.promise;
+    });
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['remote']));
+  });
+
   it('ignores pending-write entity snapshots so unacked echoes do not recompose canonical view', async () => {
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['Alpha']));
     collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['Alpha']));
@@ -691,6 +817,180 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
     expect(addToast).toHaveBeenCalledWith(
       expect.stringContaining('newer client version'),
+      'warning',
+    );
+  });
+
+  it('treats flushNow as a full V2 cloud-plus-cache durability barrier', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    const ack = deferred<Array<{
+      kind: 'upsert' | 'delete';
+      id: string;
+      revision: number;
+      lastMutationId: string | null;
+      value?: Record<string, unknown>;
+    }>>();
+    const cacheWrite = deferred<void>();
+    collabMocks.commitRevisionedDocChanges.mockImplementationOnce(() => ack.promise);
+    collabMocks.saveCanonicalCacheToIDB.mockImplementationOnce(() => cacheWrite.promise);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    act(() => {
+      result.current.blockTokens(['Alpha']);
+    });
+
+    let flushed = false;
+    const flushPromise = result.current.flushNow().then(() => {
+      flushed = true;
+    });
+
+    await flush();
+    expect(flushed).toBe(false);
+
+    await act(async () => {
+      ack.resolve([{
+        kind: 'upsert',
+        id: blockedTokenDocId('Alpha'),
+        revision: 1,
+        lastMutationId: 'mutation-1',
+        value: {
+          id: blockedTokenDocId('Alpha'),
+          token: 'Alpha',
+          datasetEpoch: 1,
+          revision: 1,
+          updatedAt: '2026-03-30T00:00:00.000Z',
+          updatedByClientId: 'client-a',
+          lastMutationId: 'mutation-1',
+        },
+      }]);
+      await ack.promise;
+      await Promise.resolve();
+    });
+
+    expect(flushed).toBe(false);
+
+    await act(async () => {
+      cacheWrite.resolve();
+      await cacheWrite.promise;
+      await flushPromise;
+    });
+
+    expect(flushed).toBe(true);
+  });
+
+  it('ignores stale entity listener callbacks after switching projects', async () => {
+    collabMocks.loadCanonicalProjectState
+      .mockResolvedValueOnce(makeCanonical(1, ['Alpha']))
+      .mockResolvedValueOnce(makeCanonical(1, ['Project Two']));
+    collabMocks.loadCanonicalEpoch
+      .mockResolvedValueOnce(makeCanonical(1, ['Alpha']))
+      .mockResolvedValueOnce(makeCanonical(1, ['Project Two']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/blocked_tokens')).toBe(true),
+    );
+
+    const staleBlockedTokensListener = firestoreMocks.listeners.get('projects/project-1/blocked_tokens')?.[0];
+    expect(staleBlockedTokensListener).toBeTypeOf('function');
+
+    act(() => {
+      result.current.setActiveProjectId('project-2');
+    });
+    await act(async () => {
+      await result.current.loadProject('project-2', PROJECTS);
+    });
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['Project Two']));
+
+    act(() => {
+      staleBlockedTokensListener?.({
+        metadata: { hasPendingWrites: false },
+        docChanges: () => [{
+          type: 'added',
+          doc: {
+            id: `1::${blockedTokenDocId('Ghost')}`,
+            data: () => ({
+              id: blockedTokenDocId('Ghost'),
+              token: 'Ghost',
+              datasetEpoch: 1,
+              revision: 1,
+              updatedAt: '2026-03-30T00:00:00.000Z',
+              updatedByClientId: 'client-a',
+              lastMutationId: 'ghost',
+            }),
+          },
+        }],
+      });
+    });
+
+    expect(Array.from(result.current.blockedTokens)).toEqual(['Project Two']);
+  });
+
+  it('blocks transitional setter writes for active V2 projects', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    act(() => {
+      result.current.setBlockedTokens(new Set(['Bypass']));
+    });
+
+    expect(Array.from(result.current.blockedTokens)).toEqual([]);
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('blocked for shared V2 projects'),
       'warning',
     );
   });
