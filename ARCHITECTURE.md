@@ -188,6 +188,8 @@ Bootstrap rules:
 - cache fallback must stop once Firestore becomes authoritative
 - cache-only empty snapshots must not wipe a good local view during startup
 - stale async epoch loads must be fenced and ignored
+- legacy whole-project writes must stay blocked until the active project's storage mode is resolved; do not let V2 bootstrap fall through to legacy chunk saves
+- hidden idle Generate/Content surfaces must defer shared listeners, upstream auto-sync, model metadata fetches, and persistence effects until visible or actively busy
 
 ---
 

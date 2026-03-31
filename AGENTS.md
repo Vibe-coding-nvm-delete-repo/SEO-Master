@@ -18,6 +18,8 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 - **Bootstrap guards:** Any feature that combines async local fallback (IndexedDB/localStorage) with a Firestore listener must use an explicit “Firestore is authoritative” guard so an initial empty/missing snapshot cannot wipe good local state during startup.
 - **Multi-user:** Treat Firestore as source of truth for shared projects; design for concurrent editors.
 - **Shared-project V2:** Before touching shared-project persistence, read `SHARED_PROJECT_COLLAB_V2.md` and preserve the commit-barrier model. Do not reintroduce whole-project mutable snapshot semantics or legacy fallback reads in V2 mode.
+- **No mixed-mode bootstrap writes:** Shared-project bootstrap must not allow legacy whole-project writes before storage mode resolves. Preserve the startup write barrier in `useProjectPersistence.ts`.
+- **No hidden idle shared-runtime work:** Mounted-but-hidden Generate/Content surfaces must not perform shared listeners, upstream auto-sync, model metadata fetches, or persistence work unless visible or actively busy.
 - **Verification before “done”:** `npx tsc --noEmit`, `npx vitest run`, `npx vite build` — zero new errors/failures.
 - **FEATURES.md:** Update when user-visible behavior changes ([`FEATURES.md`](./FEATURES.md)).
 
@@ -49,10 +51,12 @@ If a feature touches **Firestore chunk layout** or **IDB schema**, you must upda
 
 - [ ] Types in `types.ts`; refs synced before saves; `suppressSnapshotRef` on writes.
 - [ ] If cache fallback + Firestore listener both exist, guard startup so async cache cannot overwrite Firestore and an initial empty/missing snapshot cannot erase cached state.
+- [ ] If shared-project bootstrap can still be in `legacy` mode locally, preserve the persistence-boundary write barrier so no legacy chunk save can fire before storage mode resolves.
 - [ ] Settings and per-row fields appear in **IDB + Firestore** (and localStorage only if appropriate for tiny metadata).
 - [ ] Column defs + filters in `tableConstants.ts` if it’s a table column.
 - [ ] LLM calls isolated in a **dedicated module** with tests for parsing and edge cases; concurrency/rate limits aligned with existing engines.
 - [ ] For shared-project persistence changes, document cache identity/invalidation, epoch activation behavior, and recovery steps.
+- [ ] If Generate/Content mount behavior changes, verify hidden idle surfaces still do not perform background shared sync/persist/model-fetch work.
 - [ ] `FEATURES.md` updated.
 - [ ] `tsc`, `vitest`, `vite build` all pass.
 
