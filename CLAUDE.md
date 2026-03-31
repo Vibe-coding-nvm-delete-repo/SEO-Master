@@ -116,8 +116,10 @@
 ## Recovery Workflow
 
 - Inspect `collab/meta`, the base commit manifest, the project operation lock, and the local cache identity first.
-- Treat `commitState: 'writing'`, a missing commit doc, or a mismatched epoch as unsafe to write.
-- If invariants cannot be re-established safely, fail closed and keep shared writes read-only until recovery or repair succeeds.
+- `recoverStuckV2Meta` ALWAYS runs when `loadCanonicalEpoch` returns null — never skip it.
+- Recovery repairs stuck meta by resetting `readMode` to `'legacy'` when the V2 canonical state is unrecoverable, restoring full write access for all users.
+- **No user should ever be permanently locked into read-only mode.** If V2 is broken, recovery must reset to legacy so both users can keep working.
+- The only legitimate read-only states are: client schema too old (`legacyWritesBlocked`), or a temporary bulk-operation lock held by another client.
 
 ## Deploy Order
 
