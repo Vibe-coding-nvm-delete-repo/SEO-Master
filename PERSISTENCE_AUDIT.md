@@ -33,14 +33,21 @@ Those fixes remain valid for legacy/local-first behavior.
 
 Shared-project persistence no longer relies on the legacy whole-project mutable snapshot design.
 
-The current shared-project model now uses:
+The current shared-project model uses:
 - immutable base commits
 - entity-level mutable collaboration docs
 - epoch activation through `collab/meta`
 - acked-only canonical V2 cache writes
 - compare-and-set revisioned writes for shared mutable entities
 
-This is the current source of truth for shared-project persistence.
+This is the current intended source of truth for shared-project persistence, with the remaining limits listed below.
+
+## Known Open Blockers
+
+- no real project-membership authorization model exists yet
+- project operation lock timing still uses client-authored timestamps
+- old commits and old epoch docs may remain until cleanup/retention is added
+- Firestore rules are structurally protective, not fully collaborator-authenticated
 
 ---
 
@@ -155,6 +162,18 @@ Implication:
 - correctness is preserved
 - storage cleanup is still future work
 
+## Recovery Workflow
+
+- inspect `collab/meta`, the base commit manifest, the operation lock, and the local cache identity first
+- treat `commitState: 'writing'`, a missing commit doc, or a mismatched epoch as unsafe to write
+- if invariants cannot be re-established safely, fail closed and keep shared writes read-only until recovery or repair succeeds
+
+## Deployment Order
+
+- deploy Firestore rules before the client when the shared-project contract changes
+- deploy the client before enabling or resuming migration/cutover
+- avoid mixed old/new writer rollouts on the same project when possible
+
 ---
 
 ## Validation And Coverage
@@ -165,8 +184,7 @@ Final validation run after the hardening + audit pass:
 - `npx vite build`
 
 Result:
-- `86` test files passed
-- `800` tests passed
+- use current CI output or a fresh local run; do not treat historic test counts in this document as authoritative
 
 Coverage added for this work includes:
 

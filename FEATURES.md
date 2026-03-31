@@ -23,14 +23,14 @@
 
 ## Shared Project Collaboration (Group)
 
-- Project persistence now has a V2 collaboration layer: large imported/base data remains chunked in Firestore, while groups, blocked tokens, manual keyword exclusions, token-merge rules, label sections, and activity log entries sync as independent entity docs instead of one whole-project snapshot blob.
-- V2 entity docs now carry per-entity `revision`, `datasetEpoch`, `lastMutationId`, and writer metadata so cross-user manual edits can use compare-and-set updates instead of browser-local last-write-wins.
-- V2 base snapshots now write as immutable commit sets under `base_commits/{commitId}` with a ready manifest, and the shared `collab/meta` doc is the only activation barrier for switching epochs. Clients no longer treat in-progress `base_chunks` writes as live shared truth.
-- Shared-project hydration now follows a meta-driven epoch load: the client keeps the previous committed epoch visible, fetches one exact `baseCommitId`, waits for the current-epoch entity listeners to reach their initial snapshot, and swaps to the new canonical view only after that epoch is fully ready.
-- IndexedDB now caches only server-acknowledged V2 canonical state and tags that cache with `schemaVersion`, `datasetEpoch`, and `baseCommitId`, so refreshes cannot reopen on optimistic shared edits that Firestore never accepted.
-- V2 mutation handling is now epoch-scoped and centralized: revision-sensitive shared edits go through one compare-and-set path, reuse canonical doc-id helpers, update local acked revisions immediately on success, and reload canonical state on conflicts instead of leaving optimistic drift behind.
-- Legacy projects now lazily migrate to the V2 collaboration model on open, V2 readers prefer entity overlays over legacy blob fields, and permanent delete clears both legacy chunk docs and V2 collaboration docs.
-- Shared project UI now surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
+- Project persistence uses a V2 collaboration layer: large imported/base data remains chunked in Firestore, while groups, blocked tokens, manual keyword exclusions, token-merge rules, label sections, and activity log entries sync as independent entity docs instead of one whole-project snapshot blob. See `SHARED_PROJECT_COLLAB_V2.md` for current limits and recovery rules.
+- V2 entity docs carry per-entity `revision`, `datasetEpoch`, `lastMutationId`, and writer metadata so cross-user manual edits can use compare-and-set updates instead of browser-local last-write-wins.
+- V2 base snapshots write as immutable commit sets under `base_commits/{commitId}` with a ready manifest, and the shared `collab/meta` doc is the activation barrier for switching epochs. Clients do not treat in-progress `base_chunks` writes as live shared truth.
+- Shared-project hydration follows a meta-driven epoch load: the client keeps the previous committed epoch visible, fetches one exact `baseCommitId`, waits for the current-epoch entity listeners to reach their initial snapshot, and swaps to the new canonical view only after that epoch is fully ready.
+- IndexedDB caches only server-acknowledged V2 canonical state and tags that cache with `schemaVersion`, `datasetEpoch`, and `baseCommitId`, so refreshes cannot reopen on optimistic shared edits that Firestore never accepted.
+- V2 mutation handling is epoch-scoped and centralized: revision-sensitive shared edits go through one compare-and-set path, reuse canonical doc-id helpers, update local acked revisions immediately on success, and reload canonical state on conflicts instead of leaving optimistic drift behind.
+- Legacy projects lazily migrate to the V2 collaboration model on open, V2 readers prefer entity overlays over legacy blob fields, and permanent delete clears both legacy chunk docs and V2 collaboration docs.
+- Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
 
 ---
 

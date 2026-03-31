@@ -49,7 +49,7 @@ const MAX_BATCH_OPS = 450;
 const OPERATION_TTL_MS = 15 * 60 * 1000;
 export const CLIENT_SCHEMA_VERSION = 2;
 
-export const PROJECT_BASE_SUBCOLLECTION = 'base_chunks';
+export const PROJECT_BASE_SUBCOLLECTION = 'chunks';
 export const PROJECT_BASE_COMMITS_COLLECTION = 'base_commits';
 export const PROJECT_BASE_COMMIT_CHUNKS_SUBCOLLECTION = 'chunks';
 export const PROJECT_GROUPS_SUBCOLLECTION = 'groups';
@@ -583,6 +583,83 @@ async function clearEpochSubcollection(projectId: string, subcollection: string,
   await Promise.all(commits);
 }
 
+async function clearDocsFromSnapshot(snapshot: Awaited<ReturnType<typeof getDocs>>): Promise<void> {
+  if (snapshot.empty) return;
+
+  let batch = writeBatch(db);
+  let ops = 0;
+  const commits: Promise<void>[] = [];
+  const flush = () => {
+    if (ops === 0) return;
+    commits.push(batch.commit());
+    batch = writeBatch(db);
+    ops = 0;
+  };
+
+  for (const docSnap of snapshot.docs) {
+    batch.delete(docSnap.ref);
+    ops += 1;
+    if (ops >= MAX_BATCH_OPS) flush();
+  }
+
+  flush();
+  await Promise.all(commits);
+}
+
+async function pruneHistoricalV2Artifacts(
+  projectId: string,
+  activeEpoch: number,
+  activeCommitId: string,
+): Promise<void> {
+  const minEpochToKeep = Math.max(1, activeEpoch - 1);
+  try {
+    const commitSnapshot = await getDocs(projectCollection(projectId, PROJECT_BASE_COMMITS_COLLECTION));
+    const commitDocs = commitSnapshot.docs.map((docSnap) => {
+      const data = docSnap.data() as Partial<ProjectBaseCommitManifestDoc>;
+      return {
+        ref: docSnap.ref,
+        id: docSnap.id,
+        commitId: typeof data.commitId === 'string' ? data.commitId : docSnap.id,
+        datasetEpoch: typeof data.datasetEpoch === 'number' ? data.datasetEpoch : Number.MIN_SAFE_INTEGER,
+      };
+    });
+
+    const keepCommitIds = new Set<string>([activeCommitId]);
+    for (const commitDoc of commitDocs
+      .slice()
+      .sort((a, b) => b.datasetEpoch - a.datasetEpoch)) {
+      if (keepCommitIds.size >= 2) break;
+      keepCommitIds.add(commitDoc.commitId);
+    }
+
+    for (const commitDoc of commitDocs) {
+      if (keepCommitIds.has(commitDoc.commitId) || keepCommitIds.has(commitDoc.id)) continue;
+      await clearNestedSubcollection(commitDoc.ref as ReturnType<typeof doc>, PROJECT_BASE_COMMIT_CHUNKS_SUBCOLLECTION).catch(() => undefined);
+      await deleteDoc(commitDoc.ref).catch(() => undefined);
+    }
+  } catch {
+    // Best-effort cleanup only.
+  }
+
+  const entityCollections = [
+    PROJECT_GROUPS_SUBCOLLECTION,
+    PROJECT_BLOCKED_TOKENS_SUBCOLLECTION,
+    PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION,
+    PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION,
+    PROJECT_LABEL_SECTIONS_SUBCOLLECTION,
+    PROJECT_ACTIVITY_LOG_SUBCOLLECTION,
+  ];
+
+  await Promise.all(entityCollections.map(async (subcollection) => {
+    try {
+      const staleDocs = await getDocs(query(projectCollection(projectId, subcollection), where('datasetEpoch', '<', minEpochToKeep)));
+      await clearDocsFromSnapshot(staleDocs);
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }));
+}
+
 async function loadCollectionDocs<T>(
   projectId: string,
   subcollection: string,
@@ -611,8 +688,18 @@ function isMetaDocV2(meta: unknown): meta is ProjectCollabMetaDoc {
 
 function lockIsActive(lock: ProjectOperationLockDoc | null, actorId?: string): boolean {
   if (!lock) return false;
+  if (lock.status === 'releasing') return false;
   const expiresAt = Date.parse(lock.expiresAt || '0');
-  return Number.isFinite(expiresAt) && expiresAt > Date.now() && lock.ownerId !== actorId;
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
+  if (!actorId) return true;
+  return lock.ownerId !== actorId && lock.ownerClientId !== actorId;
+}
+
+function lockIsUsable(lock: ProjectOperationLockDoc | null): boolean {
+  if (!lock) return false;
+  if (lock.status === 'releasing') return false;
+  const expiresAt = Date.parse(lock.expiresAt || '0');
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
 }
 
 function migrationLeaseActive(meta: ProjectCollabMetaDoc | null, actorId: string): boolean {
@@ -868,14 +955,15 @@ export async function saveBaseSnapshotToFirestore(
   const groupMergeChunks = chunkBySize(groupMergeRecommendations, CHUNK_SIZE);
 
   const docs = [
-    ...resultChunks.map((chunk, index) => ({ id: `results_${index}`, type: 'results', index, data: chunk })),
-    ...clusterChunks.map((chunk, index) => ({ id: `clusters_${index}`, type: 'clusters', index, data: chunk })),
-    ...suggestionChunks.map((chunk, index) => ({ id: `suggestions_${index}`, type: 'suggestions', index, data: chunk })),
-    ...autoMergeChunks.map((chunk, index) => ({ id: `auto_merge_${index}`, type: 'auto_merge', index, data: chunk })),
-    ...groupMergeChunks.map((chunk, index) => ({ id: `group_merge_${index}`, type: 'group_merge', index, data: chunk })),
+    ...resultChunks.map((chunk, index) => ({ id: `results_${index}`, type: 'results', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...clusterChunks.map((chunk, index) => ({ id: `clusters_${index}`, type: 'clusters', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...suggestionChunks.map((chunk, index) => ({ id: `suggestions_${index}`, type: 'suggestions', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...autoMergeChunks.map((chunk, index) => ({ id: `auto_merge_${index}`, type: 'auto_merge', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...groupMergeChunks.map((chunk, index) => ({ id: `group_merge_${index}`, type: 'group_merge', index, data: chunk, datasetEpoch: base.datasetEpoch })),
     {
       id: 'meta',
       type: 'meta',
+      datasetEpoch: base.datasetEpoch,
       saveId: options?.saveId ?? base.datasetEpoch,
       clientId: options?.clientId ?? null,
       stats: clean.stats ?? null,
@@ -922,11 +1010,11 @@ export async function saveBaseCommitToFirestore(
   await setDoc(baseCommitDoc(projectId, commitId), sanitizeJsonForFirestore(writingManifest));
 
   const chunkDocs = [
-    ...resultChunks.map((chunk, index) => ({ id: `results_${index}`, type: 'results', index, data: chunk })),
-    ...clusterChunks.map((chunk, index) => ({ id: `clusters_${index}`, type: 'clusters', index, data: chunk })),
-    ...suggestionChunks.map((chunk, index) => ({ id: `suggestions_${index}`, type: 'suggestions', index, data: chunk })),
-    ...autoMergeChunks.map((chunk, index) => ({ id: `auto_merge_${index}`, type: 'auto_merge', index, data: chunk })),
-    ...groupMergeChunks.map((chunk, index) => ({ id: `group_merge_${index}`, type: 'group_merge', index, data: chunk })),
+    ...resultChunks.map((chunk, index) => ({ id: `results_${index}`, type: 'results', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...clusterChunks.map((chunk, index) => ({ id: `clusters_${index}`, type: 'clusters', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...suggestionChunks.map((chunk, index) => ({ id: `suggestions_${index}`, type: 'suggestions', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...autoMergeChunks.map((chunk, index) => ({ id: `auto_merge_${index}`, type: 'auto_merge', index, data: chunk, datasetEpoch: base.datasetEpoch })),
+    ...groupMergeChunks.map((chunk, index) => ({ id: `group_merge_${index}`, type: 'group_merge', index, data: chunk, datasetEpoch: base.datasetEpoch })),
   ];
   await replaceNestedSubcollectionDocs(baseCommitDoc(projectId, commitId), PROJECT_BASE_COMMIT_CHUNKS_SUBCOLLECTION, chunkDocs);
 
@@ -1149,7 +1237,7 @@ export async function loadCollabEntitiesFromFirestore(
     tokenMergeRules,
     labelSections,
     activityLog,
-    activeOperation: lockData,
+    activeOperation: lockIsUsable(lockData) ? lockData : null,
   };
 }
 
@@ -1258,6 +1346,7 @@ export async function flipProjectMetaToCommit(
     }
     if (
       !currentLock ||
+      currentLock.status === 'releasing' ||
       (currentLock.ownerId !== actorId && currentLock.ownerClientId !== actorId) ||
       Date.parse(currentLock.expiresAt || '0') <= Date.now()
     ) {
@@ -1299,6 +1388,7 @@ export async function heartbeatProjectOperationLock(
     if (!snap.exists()) return null;
     const existing = snap.data() as ProjectOperationLockDoc;
     if (existing.ownerId !== actorId && existing.ownerClientId !== actorId) return null;
+    if (existing.status === 'releasing') return null;
 
     const now = nowIso();
     const nextLock: ProjectOperationLockDoc = {
@@ -1339,6 +1429,7 @@ export async function commitCanonicalProjectState(
     nextEpoch,
     baseCommitId,
   );
+  void pruneHistoricalV2Artifacts(projectId, nextEpoch, baseCommitId);
 
   return {
     mode: 'v2',
@@ -1353,64 +1444,114 @@ export async function migrateLegacyProjectToV2(
   payload: ProjectDataPayload,
   actorId: string,
 ): Promise<CanonicalProjectState> {
+  const lock = await acquireProjectOperationLock(projectId, 'bulk-update', actorId);
+  if (!lock) {
+    throw new Error('migration-in-progress');
+  }
+
+  let lockLost = false;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    void heartbeatProjectOperationLock(projectId, actorId)
+      .then((nextLock) => {
+        if (!nextLock) {
+          lockLost = true;
+        }
+      })
+      .catch(() => {
+        lockLost = true;
+      });
+  }, 5_000);
+
   const datasetEpoch = Math.max(payload.lastSaveId ?? 1, 1);
   const baseCommitId = createBaseCommitId(datasetEpoch, actorId);
-  const leaseExpiresAt = new Date(Date.now() + OPERATION_TTL_MS).toISOString();
-  const existingMeta = await loadCollabMeta(projectId);
-  const runningRevision = (existingMeta?.revision ?? 0) + 1;
+  try {
+    const bootstrap = await runTransaction(
+      db,
+      async (tx): Promise<
+        | { state: 'already-v2'; meta: ProjectCollabMetaDoc }
+        | { state: 'started'; runningRevision: number }
+      > => {
+        const ref = collabMetaDoc(projectId);
+        const snap = await tx.get(ref);
+        const existing = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
+        if (isMetaDocV2(existing) && existing.migrationState === 'complete' && existing.readMode === 'v2') {
+          return { state: 'already-v2', meta: existing };
+        }
+        if (migrationLeaseActive(existing, actorId)) {
+          throw new Error('migration-in-progress');
+        }
 
-  await runTransaction(db, async (tx) => {
-    const ref = collabMetaDoc(projectId);
-    const snap = await tx.get(ref);
-    const existing = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
-    if (isMetaDocV2(existing) && existing.migrationState === 'complete' && existing.readMode === 'v2') {
-      return;
-    }
-    if (migrationLeaseActive(existing, actorId)) {
-      throw new Error('migration-in-progress');
+        const now = nowIso();
+        const runningRevision = (existing?.revision ?? 0) + 1;
+        tx.set(ref, sanitizeJsonForFirestore({
+          schemaVersion: 2,
+          migrationState: 'running',
+          datasetEpoch,
+          baseCommitId,
+          commitState: 'writing',
+          lastMigratedAt: now,
+          migrationOwnerClientId: actorId,
+          migrationStartedAt: now,
+          migrationHeartbeatAt: now,
+          migrationExpiresAt: new Date(Date.now() + OPERATION_TTL_MS).toISOString(),
+          readMode: 'v2',
+          requiredClientSchema: CLIENT_SCHEMA_VERSION,
+          lastWriterClientId: actorId,
+          revision: runningRevision,
+          updatedAt: now,
+          updatedByClientId: actorId,
+          lastMutationId: createMutationId(actorId),
+        }));
+        return { state: 'started', runningRevision };
+      },
+    );
+
+    if (bootstrap.state === 'already-v2') {
+      const canonical = await loadCanonicalEpoch(projectId, bootstrap.meta);
+      if (canonical) return canonical;
+      const entities = await loadCollabEntitiesFromFirestore(projectId, bootstrap.meta.datasetEpoch).catch(() => emptyEntities());
+      return {
+        mode: 'v2',
+        base: null,
+        entities: { ...entities, meta: bootstrap.meta },
+        resolved: null,
+      };
     }
 
-    tx.set(ref, sanitizeJsonForFirestore({
-      schemaVersion: 2,
-      migrationState: 'running',
+    if (lockLost) {
+      throw new Error('lock-conflict');
+    }
+
+    const base = buildBaseSnapshotFromResolvedPayload(payload);
+    base.datasetEpoch = datasetEpoch;
+    const entities = buildEntityStateFromResolvedPayload(payload, actorId, datasetEpoch);
+    await saveBaseCommitToFirestore(projectId, base, { commitId: baseCommitId, saveId: datasetEpoch, clientId: actorId });
+    await saveCollabEntityDocs(projectId, entities, actorId, datasetEpoch);
+    if (lockLost) {
+      throw new Error('lock-conflict');
+    }
+    const meta = await flipProjectMetaToCommit(
+      projectId,
+      actorId,
+      bootstrap.runningRevision,
+      datasetEpoch,
       datasetEpoch,
       baseCommitId,
-      commitState: 'writing',
-      lastMigratedAt: nowIso(),
-      migrationOwnerClientId: actorId,
-      migrationStartedAt: nowIso(),
-      migrationHeartbeatAt: nowIso(),
-      migrationExpiresAt: leaseExpiresAt,
-      readMode: 'legacy',
-      requiredClientSchema: CLIENT_SCHEMA_VERSION,
-      lastWriterClientId: actorId,
-      revision: runningRevision,
-      updatedAt: nowIso(),
-      updatedByClientId: actorId,
-      lastMutationId: createMutationId(actorId),
-    }));
-  });
+    );
+    void pruneHistoricalV2Artifacts(projectId, datasetEpoch, baseCommitId);
 
-  const base = buildBaseSnapshotFromResolvedPayload(payload);
-  base.datasetEpoch = datasetEpoch;
-  const entities = buildEntityStateFromResolvedPayload(payload, actorId, datasetEpoch);
-  await saveBaseCommitToFirestore(projectId, base, { commitId: baseCommitId, saveId: datasetEpoch, clientId: actorId });
-  await saveCollabEntityDocs(projectId, entities, actorId, datasetEpoch);
-  const meta = await flipProjectMetaToCommit(
-    projectId,
-    actorId,
-    runningRevision,
-    datasetEpoch,
-    datasetEpoch,
-    baseCommitId,
-  );
-
-  return {
-    mode: 'v2',
-    base,
-    entities: { ...entities, meta, activeOperation: null },
-    resolved: assembleCanonicalPayload(base, { ...entities, meta, activeOperation: null }),
-  };
+    return {
+      mode: 'v2',
+      base,
+      entities: { ...entities, meta, activeOperation: null },
+      resolved: assembleCanonicalPayload(base, { ...entities, meta, activeOperation: null }),
+    };
+  } finally {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
+    await releaseProjectOperationLock(projectId, actorId).catch(() => undefined);
+  }
 }
 
 async function rewriteLegacyGroupDocs(
@@ -1488,6 +1629,84 @@ export async function loadCanonicalEpoch(
   return null;
 }
 
+async function recoverStuckV2Meta(
+  projectId: string,
+  meta: ProjectCollabMetaDoc,
+  actorId: string,
+): Promise<ProjectCollabMetaDoc> {
+  if (meta.readMode !== 'v2') return meta;
+  if (meta.commitState === 'ready' && meta.migrationState === 'complete') return meta;
+
+  try {
+    return await runTransaction(db, async (tx): Promise<ProjectCollabMetaDoc> => {
+      const metaRef = collabMetaDoc(projectId);
+      const lockRef = operationLockDoc(projectId);
+      const metaSnap = await tx.get(metaRef);
+      if (!metaSnap.exists()) return meta;
+      const current = metaSnap.data() as ProjectCollabMetaDoc;
+      if (!isMetaDocV2(current) || current.readMode !== 'v2') return current;
+      if (current.commitState === 'ready' && current.migrationState === 'complete') return current;
+
+      const lockSnap = await tx.get(lockRef);
+      const currentLock = lockSnap.exists() ? (lockSnap.data() as ProjectOperationLockDoc) : null;
+      const lockActive = lockIsActive(currentLock, actorId);
+      if (lockActive) return current;
+
+      let canFinalize = false;
+      if (current.baseCommitId) {
+        const commitSnap = await tx.get(baseCommitDoc(projectId, current.baseCommitId));
+        if (commitSnap.exists()) {
+          const manifest = commitSnap.data() as ProjectBaseCommitManifestDoc;
+          canFinalize = (
+            manifest.commitState === 'ready' &&
+            manifest.commitId === current.baseCommitId &&
+            manifest.datasetEpoch === current.datasetEpoch
+          );
+        }
+      }
+
+      if (!canFinalize && current.migrationState === 'failed') {
+        return current;
+      }
+
+      const now = nowIso();
+      const nextMeta: ProjectCollabMetaDoc = canFinalize
+        ? {
+          ...current,
+          migrationState: 'complete',
+          commitState: 'ready',
+          readMode: 'v2',
+          requiredClientSchema: CLIENT_SCHEMA_VERSION,
+          lastMigratedAt: now,
+          migrationOwnerClientId: null,
+          migrationStartedAt: null,
+          migrationHeartbeatAt: null,
+          migrationExpiresAt: null,
+          lastWriterClientId: actorId,
+          revision: current.revision + 1,
+          updatedAt: now,
+          updatedByClientId: actorId,
+          lastMutationId: createMutationId(actorId),
+        }
+        : {
+          ...current,
+          migrationState: 'failed',
+          lastMigratedAt: now,
+          lastWriterClientId: actorId,
+          revision: current.revision + 1,
+          updatedAt: now,
+          updatedByClientId: actorId,
+          lastMutationId: createMutationId(actorId),
+        };
+
+      tx.set(metaRef, sanitizeJsonForFirestore(nextMeta));
+      return nextMeta;
+    });
+  } catch {
+    return meta;
+  }
+}
+
 export async function loadCanonicalProjectState(
   projectId: string,
   actorId: string,
@@ -1495,10 +1714,30 @@ export async function loadCanonicalProjectState(
 ): Promise<CanonicalProjectState> {
   const meta = await loadCollabMeta(projectId);
   if (meta?.readMode === 'v2') {
-    const canonical = await loadCanonicalEpoch(projectId, meta);
+    let canonical = await loadCanonicalEpoch(projectId, meta);
     if (canonical) {
       return canonical;
     }
+
+    const recoveredMeta = await recoverStuckV2Meta(projectId, meta, actorId);
+    if (
+      recoveredMeta.revision !== meta.revision ||
+      recoveredMeta.migrationState !== meta.migrationState ||
+      recoveredMeta.commitState !== meta.commitState
+    ) {
+      canonical = await loadCanonicalEpoch(projectId, recoveredMeta);
+      if (canonical) {
+        return canonical;
+      }
+    }
+
+    const entities = await loadCollabEntitiesFromFirestore(projectId, recoveredMeta.datasetEpoch).catch(() => emptyEntities());
+    return {
+      mode: 'v2',
+      base: null,
+      entities: { ...entities, meta: recoveredMeta },
+      resolved: null,
+    };
   }
 
   const legacyPayload = await legacyLoader();
@@ -1675,7 +1914,7 @@ export async function commitRevisionedDocChanges<T extends { revision?: number }
     const ref = change.datasetEpoch != null
       ? scopedProjectDoc(projectId, subcollection, change.datasetEpoch, change.id)
       : projectDoc(projectId, subcollection, change.id);
-    await runTransaction(db, async (tx) => {
+    const ack = await runTransaction(db, async (tx): Promise<RevisionedDocAck<T>> => {
       const snap = await tx.get(ref);
       const currentRevision = snap.exists() ? ((snap.data() as { revision?: number }).revision ?? 0) : 0;
       if (currentRevision !== change.expectedRevision) {
@@ -1683,13 +1922,12 @@ export async function commitRevisionedDocChanges<T extends { revision?: number }
       }
       if (change.kind === 'delete') {
         tx.delete(ref);
-        acknowledgements.push({
+        return {
           kind: 'delete',
           id: change.id,
           revision: currentRevision + 1,
           lastMutationId: change.mutationId ?? null,
-        });
-        return;
+        };
       }
       const nextValue = {
         ...(change.value as object),
@@ -1701,14 +1939,15 @@ export async function commitRevisionedDocChanges<T extends { revision?: number }
         lastMutationId: change.mutationId ?? null,
       };
       tx.set(ref, sanitizeJsonForFirestore(nextValue));
-      acknowledgements.push({
+      return {
         kind: 'upsert',
         id: change.id,
         revision: currentRevision + 1,
         lastMutationId: change.mutationId ?? null,
         value: nextValue as unknown as T,
-      });
+      };
     });
+    acknowledgements.push(ack);
   }
   return acknowledgements;
 }
@@ -1778,7 +2017,7 @@ export async function deleteProjectV2Data(projectId: string): Promise<void> {
     clearSubcollection(projectId, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION),
     clearSubcollection(projectId, PROJECT_LABEL_SECTIONS_SUBCOLLECTION),
     clearSubcollection(projectId, PROJECT_ACTIVITY_LOG_SUBCOLLECTION),
-    clearSubcollection(projectId, PROJECT_OPERATIONS_SUBCOLLECTION),
+    clearSubcollection(projectId, PROJECT_OPERATIONS_SUBCOLLECTION).catch(() => undefined),
   ]);
 
   await deleteDoc(collabMetaDoc(projectId)).catch(() => undefined);
@@ -1819,6 +2058,12 @@ export async function releaseProjectOperationLock(projectId: string, actorId: st
     if (!snap.exists()) return;
     const existing = snap.data() as ProjectOperationLockDoc;
     if (existing.ownerId !== actorId && existing.ownerClientId !== actorId) return;
-    tx.delete(ref);
+    const now = nowIso();
+    tx.set(ref, sanitizeJsonForFirestore({
+      ...existing,
+      status: 'releasing',
+      heartbeatAt: now,
+      expiresAt: now,
+    }));
   });
 }

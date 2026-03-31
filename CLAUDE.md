@@ -105,6 +105,26 @@
 
 ---
 
+## Shared-project V2
+
+- Shared-project persistence must follow [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md).
+- Do not reintroduce whole-project mutable snapshot writes or legacy fallback reads in V2 mode.
+- V2 canonical IDB cache entries must be tagged with `schemaVersion`, `datasetEpoch`, `baseCommitId`, and `cachedAt`.
+- Optimistic shared edits stay in memory only until Firestore acknowledges them.
+- Epoch-changing rewrites are lock-owned and activate only after the final meta flip.
+
+## Recovery Workflow
+
+- Inspect `collab/meta`, the base commit manifest, the project operation lock, and the local cache identity first.
+- Treat `commitState: 'writing'`, a missing commit doc, or a mismatched epoch as unsafe to write.
+- If invariants cannot be re-established safely, fail closed and keep shared writes read-only until recovery or repair succeeds.
+
+## Deploy Order
+
+- Deploy Firestore rules before the client when the shared-project contract changes.
+- Deploy the client before enabling or resuming migration/cutover.
+- Avoid mixed old/new writer rollouts on the same project when possible.
+
 ## Dev Environment Setup (CRITICAL)
 
 ### WDAC (Windows Application Control) is enforced on this machine

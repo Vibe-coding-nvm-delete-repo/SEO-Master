@@ -58,8 +58,39 @@ service cloud.firestore {
         && data.requiredClientSchema >= 2;
     }
 
+    function hasOwnedCurrentOperationLock(projectId, ownerId) {
+      return isString(ownerId)
+        && exists(/databases/$(database)/documents/projects/$(projectId)/project_operations/current)
+        && get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.ownerId == ownerId
+        && (
+          get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.ownerClientId == null
+          || get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.ownerClientId == ownerId
+        )
+        && (
+          get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.status == null
+          || get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.status == 'running'
+        );
+    }
+
+    function collabEpochActivationWrite() {
+      return resource != null
+        && resource.data.readMode == 'v2'
+        && request.resource.data.readMode == 'v2'
+        && (
+          request.resource.data.datasetEpoch != resource.data.datasetEpoch
+          || request.resource.data.baseCommitId != resource.data.baseCommitId
+          || request.resource.data.commitState != resource.data.commitState
+          || request.resource.data.migrationState != resource.data.migrationState
+        );
+    }
+
     function validCollabMetaUpdate(projectId) {
       return validCollabMetaCreate(request.resource.data)
+        && (
+          resource != null
+          || request.resource.data.readMode != 'v2'
+          || hasOwnedCurrentOperationLock(projectId, request.resource.data.updatedByClientId)
+        )
         && (
           resource == null
           || request.resource.data.revision == resource.data.revision + 1
@@ -77,6 +108,23 @@ service cloud.firestore {
           resource == null
           || !hasV2Meta(projectId)
           || request.resource.data.datasetEpoch >= resource.data.datasetEpoch
+        )
+        && (
+          request.resource.data.readMode != 'v2'
+          || request.resource.data.baseCommitId == null
+          || (
+            exists(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(request.resource.data.baseCommitId))
+            && get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(request.resource.data.baseCommitId)).data.datasetEpoch == request.resource.data.datasetEpoch
+            && (
+              request.resource.data.commitState != 'ready'
+              || get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(request.resource.data.baseCommitId)).data.commitState == 'ready'
+            )
+          )
+        )
+        && (
+          request.resource.data.readMode != 'v2'
+          || !collabEpochActivationWrite()
+          || hasOwnedCurrentOperationLock(projectId, request.resource.data.updatedByClientId)
         );
     }
 
@@ -106,6 +154,7 @@ service cloud.firestore {
       return validBaseCommitManifestCreate(commitId)
         && resource != null
         && resource.data.commitState == 'writing'
+        && request.resource.data.revision == resource.data.revision + 1
         && request.resource.data.datasetEpoch == resource.data.datasetEpoch
         && request.resource.data.commitId == resource.data.commitId
         && request.resource.data.id == resource.data.id
@@ -124,6 +173,19 @@ service cloud.firestore {
         && isInt(data.revision)
         && isString(data.updatedAt)
         && isString(data.updatedByClientId);
+    }
+
+    function validRevisionedCreate(projectId) {
+      return resource == null
+        && request.resource.data.revision == 1;
+    }
+
+    function validRevisionedUpdate(projectId) {
+      return resource != null
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.datasetEpoch == resource.data.datasetEpoch
+        && request.resource.data.revision == resource.data.revision + 1
+        && epochScopedWrite(projectId, request.resource.data);
     }
 
     function validGroupDoc(projectId) {
@@ -182,6 +244,25 @@ service cloud.firestore {
         && (request.resource.data.status == null || request.resource.data.status in ['running', 'releasing']);
     }
 
+    function validOperationLockCreate() {
+      return resource == null
+        && validOperationLockDoc();
+    }
+
+    function validOperationLockUpdate() {
+      return resource != null
+        && validOperationLockDoc()
+        && (
+          (
+            request.resource.data.type == resource.data.type
+            && request.resource.data.ownerId == resource.data.ownerId
+            && request.resource.data.ownerClientId == resource.data.ownerClientId
+            && request.resource.data.startedAt == resource.data.startedAt
+          )
+          || request.resource.data.status == 'running'
+        );
+    }
+
     match /app_settings/{document=**} {
       allow read, write: if true;
     }
@@ -205,6 +286,12 @@ service cloud.firestore {
     match /projects/{projectId} {
       allow read, write: if true;
 
+      match /chunks/{chunkId} {
+        allow read: if true;
+        allow create, update: if !hasV2Meta(projectId);
+        allow delete: if true;
+      }
+
       match /base_chunks/{chunkId} {
         allow read: if true;
         allow create, update: if !hasV2Meta(projectId);
@@ -215,7 +302,7 @@ service cloud.firestore {
         allow read: if true;
         allow create: if validBaseCommitManifestCreate(commitId);
         allow update: if validBaseCommitManifestUpdate(commitId);
-        allow delete: if true;
+        allow delete: if !hasV2Meta(projectId) || currentMeta(projectId).baseCommitId != commitId;
 
         match /chunks/{chunkId} {
           allow read: if true;
@@ -223,58 +310,65 @@ service cloud.firestore {
             && request.resource.data.id == chunkId
             && isString(request.resource.data.type)
             && isInt(request.resource.data.index)
+            && isInt(request.resource.data.datasetEpoch)
             && request.resource.data.data is list
             && get(/databases/$(database)/documents/projects/$(projectId)/base_commits/$(commitId)).data.datasetEpoch == request.resource.data.datasetEpoch;
-          allow delete: if true;
+          allow delete: if !hasV2Meta(projectId) || currentMeta(projectId).baseCommitId != commitId;
         }
       }
 
       match /collab/meta {
         allow read: if true;
         allow create, update: if validCollabMetaUpdate(projectId);
-        allow delete: if true;
+        allow delete: if false;
       }
 
       match /groups/{groupId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId) || validGroupDoc(projectId);
-        allow delete: if true;
+        allow create: if !hasV2Meta(projectId) || (validGroupDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validGroupDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /blocked_tokens/{tokenId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId) || validBlockedTokenDoc(projectId);
-        allow delete: if true;
+        allow create: if !hasV2Meta(projectId) || (validBlockedTokenDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validBlockedTokenDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /manual_blocked_keywords/{keywordId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId) || validBlockedKeywordDoc(projectId);
-        allow delete: if true;
+        allow create: if !hasV2Meta(projectId) || (validBlockedKeywordDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validBlockedKeywordDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /token_merge_rules/{ruleId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId) || validTokenMergeRuleDoc(projectId);
-        allow delete: if true;
+        allow create: if !hasV2Meta(projectId) || (validTokenMergeRuleDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validTokenMergeRuleDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /label_sections/{sectionId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId) || validLabelSectionDoc(projectId);
-        allow delete: if true;
+        allow create: if !hasV2Meta(projectId) || (validLabelSectionDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if !hasV2Meta(projectId) || (validLabelSectionDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /activity_log/{entryId} {
         allow read: if true;
         allow create, update: if !hasV2Meta(projectId) || validActivityLogDoc(projectId);
-        allow delete: if true;
+        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /project_operations/{operationId} {
         allow read: if true;
-        allow create, update: if operationId == 'current' && validOperationLockDoc();
-        allow delete: if true;
+        allow create: if operationId == 'current' && validOperationLockCreate();
+        allow update: if operationId == 'current' && validOperationLockUpdate();
+        allow delete: if false;
       }
     }
   }

@@ -14,18 +14,22 @@ If this file disagrees with older persistence notes, follow this file for shared
 
 ## Status
 
-**Current state:** implemented and validated in this repo.
+**Current state:** target architecture implemented; known open blockers remain.
 
-The shared-project persistence path now uses a **V2 commit-barrier model** instead of a whole-project mutable snapshot model.
+The shared-project persistence path uses a **V2 commit-barrier model** instead of a whole-project mutable snapshot model.
 
-Validation completed after the final hardening pass:
+Known open blockers:
+- no real collaborator-membership authorization model yet
+- lock and migration timing still use client-authored timestamps
+- old commits and old epoch docs may remain until cleanup/retention is added
+- deploy and recovery behavior still depends on the rest of the app staying aligned with this contract
+
+Validation gate for this contract:
 - `npx tsc --noEmit`
 - `npx vitest run`
 - `npx vite build`
 
-Latest validation result:
-- `86` test files passed
-- `800` tests passed
+Latest run status should always be read from CI or the most recent local run output, not from hard-coded counts in this document.
 
 ---
 
@@ -163,6 +167,22 @@ When a project requires V2 schema:
 - the client becomes read-only for unsupported schema versions
 
 This prevents an older whole-project writer from reintroducing legacy overwrites into a V2 project.
+
+### 9. Recovery workflow is fail-closed
+
+When a V2 project cannot load a ready canonical epoch:
+- keep the last good canonical or cached view visible if one exists
+- keep shared writes read-only
+- treat `commitState: 'writing'`, a missing commit, or a mismatched epoch as unsafe to write
+- rely on the meta/epoch listeners to retry when the canonical state becomes valid again
+
+### 10. Deployment order matters
+
+Rollout order for shared-project V2 changes:
+1. deploy Firestore rules
+2. deploy the client with the V2 reader/writer behavior
+3. enable migration or cutover
+4. monitor for stale legacy writers and recovery states
 
 ---
 

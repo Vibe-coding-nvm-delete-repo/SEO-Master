@@ -226,11 +226,25 @@ function makeCanonical(epoch: number, blockedTokens: string[] = []) {
   };
 }
 
-function emitDocSnapshot(path: string, data: any) {
+function makeLegacyState(blockedTokens: string[] = []) {
+  return {
+    ...makeCanonical(1, blockedTokens),
+    mode: 'legacy' as const,
+  };
+}
+
+function emitDocSnapshot(path: string, data: any, hasPendingWrites = false) {
   firestoreMocks.emit(path, {
     exists: () => data != null,
     data: () => data,
-    metadata: { hasPendingWrites: false },
+    metadata: { hasPendingWrites },
+  });
+}
+
+function emitQuerySnapshot(path: string, changes: any[], hasPendingWrites = false) {
+  firestoreMocks.emit(path, {
+    metadata: { hasPendingWrites },
+    docChanges: () => changes,
   });
 }
 
@@ -242,6 +256,8 @@ describe('useProjectPersistence V2 hardening', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     firestoreMocks.listeners.clear();
+    collabMocks.loadCanonicalProjectState.mockReset();
+    collabMocks.loadCanonicalEpoch.mockReset();
     collabMocks.loadCanonicalCacheFromIDB.mockResolvedValue(null);
     collabMocks.saveCanonicalCacheToIDB.mockResolvedValue(undefined);
     collabMocks.commitRevisionedDocChanges.mockReset();
@@ -271,6 +287,7 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
     await waitFor(() =>
       expect(firestoreMocks.listeners.has('projects/project-1/project_operations/current')).toBe(true),
     );
@@ -302,6 +319,49 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('does not resubscribe the legacy chunks listener when addToast changes identity', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeLegacyState());
+    const setProjects = vi.fn();
+
+    const { result, rerender } = renderHook(
+      ({ addToast }: { addToast: (msg: string, type: 'error' | 'info' | 'success' | 'warning') => void }) =>
+        useProjectPersistence({
+          projects: PROJECTS,
+          setProjects,
+          addToast,
+        }),
+      {
+        initialProps: {
+          addToast: vi.fn() as (msg: string, type: 'error' | 'info' | 'success' | 'warning') => void,
+        },
+      },
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('legacy'));
+    await waitFor(() =>
+      expect(firestoreMocks.onSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ path: 'projects/project-1/chunks' }),
+        expect.any(Function),
+        expect.any(Function),
+      ),
+    );
+
+    const subscribeCount = firestoreMocks.onSnapshot.mock.calls.length;
+
+    rerender({ addToast: vi.fn() });
+    await flush();
+
+    expect(firestoreMocks.onSnapshot.mock.calls.length).toBe(subscribeCount);
+  });
+
   it('ignores stale epoch loads that resolve after a newer meta commit barrier', async () => {
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['initial']));
     const epoch10 = deferred<ReturnType<typeof makeCanonical>>();
@@ -327,6 +387,7 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
     await waitFor(() =>
       expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
     );
@@ -335,6 +396,8 @@ describe('useProjectPersistence V2 hardening', () => {
       emitDocSnapshot('projects/project-1/collab/meta', makeMeta(10, 10));
       emitDocSnapshot('projects/project-1/collab/meta', makeMeta(11, 11));
     });
+
+    expect(Array.from(result.current.blockedTokens)).toEqual(['initial']);
 
     await act(async () => {
       epoch11.resolve(makeCanonical(11, ['epoch-11']));
@@ -352,16 +415,9 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(Array.from(result.current.blockedTokens)).toEqual(['epoch-11']);
   });
 
-  it('does not write V2 canonical cache before a revisioned mutation is acknowledged', async () => {
-    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
-    const ack = deferred<Array<{
-      kind: 'upsert' | 'delete';
-      id: string;
-      revision: number;
-      lastMutationId: string | null;
-      value?: Record<string, unknown>;
-    }>>();
-    collabMocks.commitRevisionedDocChanges.mockImplementationOnce(() => ack.promise);
+  it('ignores pending-write meta snapshots for epoch activation', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['stable']));
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(2, ['epoch-2']));
 
     const { result } = renderHook(() =>
       useProjectPersistence({
@@ -380,37 +436,216 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    collabMocks.loadCanonicalEpoch.mockClear();
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(2, 2), true);
+    });
+    await flush();
+
+    expect(collabMocks.loadCanonicalEpoch).not.toHaveBeenCalled();
+    expect(Array.from(result.current.blockedTokens)).toEqual(['stable']);
+  });
+
+  it('suppresses idempotent listener echoes with unchanged revision and mutation id', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['Alpha']));
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['Alpha']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/blocked_tokens')).toBe(true),
+    );
+
     collabMocks.saveCanonicalCacheToIDB.mockClear();
 
     act(() => {
-      result.current.blockTokens(['Alpha']);
-    });
-
-    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
-    expect(collabMocks.saveCanonicalCacheToIDB).not.toHaveBeenCalled();
-
-    await act(async () => {
-      ack.resolve([
-        {
-          kind: 'upsert',
-          id: blockedTokenDocId('Alpha'),
-          revision: 1,
-          lastMutationId: 'mutation-1',
-          value: {
+      emitQuerySnapshot('projects/project-1/blocked_tokens', [{
+        type: 'modified',
+        doc: {
+          id: `1::${blockedTokenDocId('Alpha')}`,
+          data: () => ({
             id: blockedTokenDocId('Alpha'),
             token: 'Alpha',
             datasetEpoch: 1,
             revision: 1,
             updatedAt: '2026-03-30T00:00:00.000Z',
             updatedByClientId: 'client-a',
-            lastMutationId: 'mutation-1',
-          },
+            lastMutationId: null,
+          }),
         },
-      ]);
-      await ack.promise;
+      }]);
     });
 
-    await waitFor(() => expect(collabMocks.saveCanonicalCacheToIDB).toHaveBeenCalled());
+    await flush();
+    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
+    expect(collabMocks.saveCanonicalCacheToIDB).not.toHaveBeenCalled();
+  });
+
+  it('keeps prior view visible when V2 canonical load is unresolved (commit writing)', async () => {
+    collabMocks.loadCanonicalCacheFromIDB.mockResolvedValue({
+      schemaVersion: CLIENT_SCHEMA_VERSION,
+      datasetEpoch: 1,
+      baseCommitId: 'commit_1',
+      cachedAt: '2026-03-30T00:00:00.000Z',
+      payload: {
+        ...makeCanonical(1, ['cached']).resolved,
+      },
+    });
+    collabMocks.loadCanonicalProjectState.mockResolvedValue({
+      ...makeCanonical(1),
+      entities: {
+        ...makeCanonical(1).entities,
+        meta: {
+          ...makeMeta(1, 2),
+          commitState: 'writing',
+          migrationState: 'running',
+        },
+      },
+      resolved: null,
+    });
+
+    const addToast = vi.fn();
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    expect(result.current.storageMode).toBe('v2');
+    expect(Array.from(result.current.blockedTokens)).toEqual(['cached']);
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('recovering from an incomplete cloud commit'),
+      'warning',
+    );
+  });
+
+  it('drops conflicted optimistic state and reloads canonical docs from cloud', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['remote']));
+    collabMocks.commitRevisionedDocChanges.mockRejectedValueOnce(new Error(`conflict:blocked_tokens:${blockedTokenDocId('Alpha')}`));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+    act(() => {
+      result.current.blockTokens(['Alpha']);
+    });
+    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['remote']));
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('Another client changed this project item'),
+      'warning',
+    );
+  });
+
+  it('ignores pending-write entity snapshots so unacked echoes do not recompose canonical view', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['Alpha']));
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['Alpha']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/blocked_tokens')).toBe(true),
+    );
+
+    collabMocks.saveCanonicalCacheToIDB.mockClear();
+    act(() => {
+      emitQuerySnapshot('projects/project-1/blocked_tokens', [{
+        type: 'modified',
+        doc: {
+          id: `1::${blockedTokenDocId('Beta')}`,
+          data: () => ({
+            id: blockedTokenDocId('Beta'),
+            token: 'Beta',
+            datasetEpoch: 1,
+            revision: 2,
+            updatedAt: '2026-03-30T00:00:00.000Z',
+            updatedByClientId: 'client-a',
+            lastMutationId: 'pending',
+          }),
+        },
+      }], true);
+    });
+
+    await flush();
+    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
+    expect(collabMocks.saveCanonicalCacheToIDB).not.toHaveBeenCalled();
   });
 
   it('rejects V2 writes before optimistic local apply when the project requires a newer client schema', async () => {
@@ -459,4 +694,5 @@ describe('useProjectPersistence V2 hardening', () => {
       'warning',
     );
   });
+
 });

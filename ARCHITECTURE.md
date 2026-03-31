@@ -5,6 +5,7 @@
 This file gives the high-level system shape.
 
 For the exact shared-project persistence contract, use [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md).
+That doc also lists the current known limits and recovery rules for shared-project changes.
 
 ---
 
@@ -74,7 +75,7 @@ This is no longer the shared-project source of truth after V2 cutover.
 
 ### Shared project V2 mode
 
-V2 is the current shared-project model.
+V2 is the current shared-project model for shared collaboration.
 
 Design rules:
 - large base data stays chunked
@@ -82,6 +83,7 @@ Design rules:
 - mutable collaboration state lives in smaller entity docs
 - `collab/meta` is the only epoch activation barrier
 - IndexedDB caches only server-acknowledged canonical V2 state
+- consult `SHARED_PROJECT_COLLAB_V2.md` before changing this flow, because that file also records the known limits and recovery behavior
 
 See [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) for the precise current contract.
 
