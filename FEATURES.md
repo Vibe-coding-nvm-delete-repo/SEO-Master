@@ -21,6 +21,15 @@
 
 ---
 
+## Shared Project Collaboration (Group)
+
+- Project persistence now has a V2 collaboration layer: large imported/base data remains chunked in Firestore, while groups, blocked tokens, manual keyword exclusions, token-merge rules, label sections, and activity log entries sync as independent entity docs instead of one whole-project snapshot blob.
+- V2 entity docs now carry per-entity `revision`, `datasetEpoch`, `lastMutationId`, and writer metadata so cross-user manual edits can use compare-and-set updates instead of browser-local last-write-wins.
+- Legacy projects now lazily migrate to the V2 collaboration model on open, V2 readers prefer entity overlays over legacy blob fields, and permanent delete clears both legacy chunk docs and V2 collaboration docs.
+- Shared project UI now surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
+
+---
+
 ## Content Pipeline (Generate > Content)
 
 - Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts, and timed-out IndexedDB project writes now abort and reopen the cached DB connection before retrying so local durability does not keep hammering a poisoned transaction handle.

@@ -24,6 +24,7 @@ import {
   saveProjectToFirestore,
   softDeleteProjectInFirestore,
 } from '../projectStorage';
+import { deleteProjectV2Data } from '../projectCollabV2';
 import { loadSavedWorkspacePrefs } from '../projectWorkspace';
 import { parseAppPath, buildMainPath, type MainTab, type GroupSubTab, type SettingsSubTab } from '../appRouting';
 import { projectUrlKey, projectUrlKeySuffixFromId } from '../projectUrlKey';
@@ -462,6 +463,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     await Promise.all([
       deleteProjectFromFirestore(projectId),
       deleteProjectDataFromFirestore(projectId),
+      deleteProjectV2Data(projectId),
       deleteFromIDB(projectId),
     ]);
   };
