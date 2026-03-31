@@ -7,7 +7,8 @@ export function cleanGeneratedContent(value: unknown): string {
   if (typeof value !== 'string') return '';
   const trimmed = value.trim();
   const answerMatch = trimmed.match(/^<answer>\s*([\s\S]*?)\s*<\/answer>$/i);
-  return (answerMatch ? answerMatch[1] : trimmed).trim();
+  let content = answerMatch ? answerMatch[1] : trimmed;
+  return content.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
 }
 
 export function hasMeaningfulContent(value: unknown): boolean {

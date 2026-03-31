@@ -29,6 +29,7 @@ import { loadSavedWorkspacePrefs } from '../projectWorkspace';
 import { parseAppPath, buildMainPath, type MainTab, type GroupSubTab, type SettingsSubTab } from '../appRouting';
 import { projectUrlKey, projectUrlKeySuffixFromId } from '../projectUrlKey';
 import { isUsableActiveProjectId } from '../projectLifecyclePolicy';
+import { advanceGeneration } from '../collabV2WriteGuard';
 import { beginRuntimeTrace, traceRuntimeEvent } from '../runtimeTrace';
 
 export interface UseProjectLifecycleInput {
@@ -504,6 +505,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     const target = projectsRef.current.find(p => p.id === projectId);
     if (target?.deletedAt) return;
     if (!allowProjectChange()) return;
+    advanceGeneration(projectId);
     const traceId = beginRuntimeTrace('useProjectLifecycle.selectProject', projectId);
     setActiveProjectId(projectId);
     // Clear immediately so the UI never shows another project’s keywords while the new one loads.

@@ -5,6 +5,7 @@ import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, det
 import { stateFullNames, stateAbbrToFull, stopWords } from '../dictionaries';
 import { applyMergeRulesToTokenArr } from '../tokenMerge';
 import { csvImportProjectMismatch } from '../csvImportProjectScope';
+import { createGenerationGuard } from '../collabV2WriteGuard';
 import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, BlockedKeyword, TokenMergeRule } from '../types';
 
 interface UseCsvImportParams {
@@ -77,6 +78,9 @@ export function useCsvImport({
       setError('Select a project before importing a CSV file.');
       return Promise.resolve();
     }
+
+    // V2: Capture generation to detect project switch during async processing
+    const importGuard = createGenerationGuard(importProjectId);
 
     let importCancelledNotified = false;
     const notifyImportCancelled = () => {
@@ -510,6 +514,13 @@ export function useCsvImport({
                 };
 
                 if (csvImportProjectMismatch(importProjectId, activeProjectIdRef.current)) {
+                  notifyImportCancelled();
+                  setIsProcessing(false);
+                  return;
+                }
+
+                // V2: If project switched during CSV processing, abort the import
+                if (!importGuard.isCurrent()) {
                   notifyImportCancelled();
                   setIsProcessing(false);
                   return;
