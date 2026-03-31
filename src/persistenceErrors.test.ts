@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { reportPersistFailure, logPersistError } from './persistenceErrors';
+import { getPersistErrorInfo, reportPersistFailure, logPersistError } from './persistenceErrors';
 
 describe('persistenceErrors', () => {
   it('reportPersistFailure logs and invokes toast when provided', () => {
@@ -43,6 +43,31 @@ describe('persistenceErrors', () => {
       }),
     );
     spy.mockRestore();
+  });
+
+  it('uses rules-focused copy for permission-denied failures', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const addToast = vi.fn();
+    reportPersistFailure(addToast, 'project V2 save (activate collab meta)', { code: 'permission-denied' });
+    expect(addToast).toHaveBeenCalledWith(
+      'Cloud sync blocked (project V2 save (activate collab meta)) [permission-denied]. Firestore denied this write. Check shared-project recovery or deployed rules.',
+      'error',
+      expect.objectContaining({
+        notification: expect.objectContaining({
+          mode: 'shared',
+          source: 'system',
+        }),
+      }),
+    );
+    spy.mockRestore();
+  });
+
+  it('extracts normalized code and tagged step details', () => {
+    expect(getPersistErrorInfo({ code: 'firestore/permission-denied', persistStep: 'activate collab meta' })).toEqual({
+      code: 'permission-denied',
+      kind: 'permission-denied',
+      step: 'activate collab meta',
+    });
   });
 
   it('logPersistError logs without throwing', () => {

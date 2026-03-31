@@ -21,6 +21,7 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import {
+  APP_SETTINGS_LOCAL_DURABILITY_TIMEOUT_MS,
   cacheStateLocally,
   loadCachedState,
   persistLocalCachedState,
@@ -95,8 +96,9 @@ describe('appSettingsPersistence', () => {
     expect(deriveCloudStatusLine(true, snap, false).label).toBe('Saving… don’t refresh');
 
     local.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(getCloudSyncSnapshot().unsafeToRefresh).toBe(false);
+    });
 
     snap = getCloudSyncSnapshot();
     expect(snap.unsafeToRefresh).toBe(false);
@@ -109,6 +111,32 @@ describe('appSettingsPersistence', () => {
     snap = getCloudSyncSnapshot();
     expect(snap.shared.cloudWritePendingCount).toBe(0);
     expect(snap.local.failed).toBe(false);
+  });
+
+  it('releases local pending when IDB never completes (outer durability timeout)', async () => {
+    vi.useFakeTimers();
+    try {
+      storageMocks.saveToIDB.mockReturnValue(new Promise<void>(() => {}));
+      const remote = vi.fn(async () => undefined);
+
+      const persistPromise = persistTrackedState({
+        idbKey: 'idb-key',
+        value: { stuck: true },
+        localContext: 'test stuck idb',
+        cloudContext: 'test stuck idb',
+        writeRemote: remote,
+      });
+
+      await vi.advanceTimersByTimeAsync(APP_SETTINGS_LOCAL_DURABILITY_TIMEOUT_MS + 1_000);
+      await persistPromise;
+
+      const snap = getCloudSyncSnapshot();
+      expect(snap.local.pendingCount).toBe(0);
+      expect(snap.local.failed).toBe(true);
+      expect(remote).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('flags local failure when the IDB durability write rejects', async () => {

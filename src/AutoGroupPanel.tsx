@@ -65,12 +65,13 @@ import { reportPersistFailure } from './persistenceErrors';
 
 interface AutoGroupPanelProps {
   effectiveClusters: ClusterSummary[] | null;
-  onApproveGroups: (groups: GroupedCluster[]) => void;
+  onApproveGroups: (groups: GroupedCluster[]) => boolean;
   groupReviewSettingsRef: React.RefObject<GroupReviewSettingsRef | null>;
   logAndToast: (action: ActivityAction, details: string, count: number, toastMsg: string, toastType?: 'success' | 'info' | 'warning' | 'error') => void;
   persistedSuggestions?: AutoGroupSuggestion[];
   onSuggestionsChange?: (suggestions: AutoGroupSuggestion[]) => void;
   isProjectBusy?: boolean;
+  isSharedProjectReadOnly?: boolean;
   runWithExclusiveOperation?: <T>(type: 'auto-group', task: () => Promise<T>) => Promise<T | null>;
 }
 
@@ -304,9 +305,11 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   persistedSuggestions,
   onSuggestionsChange,
   isProjectBusy = false,
+  isSharedProjectReadOnly = false,
   runWithExclusiveOperation,
 }) => {
   const { addToast } = useToast();
+  const isGroupingReadOnly = isProjectBusy || isSharedProjectReadOnly;
   const [subTab, setSubTab] = useState<'auto-group' | 'cosine-test'>('auto-group');
   const [autoGroupTab, setAutoGroupTab] = useState<'ungrouped' | 'grouped'>('ungrouped');
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
@@ -321,12 +324,13 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   // Wrapper that syncs to parent for persistence
   const setSuggestions = useCallback((update: AutoGroupSuggestion[] | ((prev: AutoGroupSuggestion[]) => AutoGroupSuggestion[])) => {
     setSuggestionsInternal(prev => {
+      if (isGroupingReadOnly) return prev;
       const next = typeof update === 'function' ? update(prev) : update;
       const normalized = normalizeAutoGroupSuggestions(next);
       if (onSuggestionsChange) onSuggestionsChange(normalized);
       return normalized;
     });
-  }, [onSuggestionsChange]);
+  }, [isGroupingReadOnly, onSuggestionsChange]);
   const [selectedSuggestions, setSelectedSuggestions] = useState<Set<string>>(new Set());
 
   // Sort state for Token Clusters
@@ -410,6 +414,17 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       if (typeof d.assignmentPrompt === 'string' && d.assignmentPrompt.trim()) setAgAssignmentPrompt(d.assignmentPrompt);
       if (typeof d.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
       if (typeof d.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
+      lastAgSavedRef.current = JSON.stringify({
+        apiKey: typeof d.apiKey === 'string' ? d.apiKey : '',
+        model: typeof d.model === 'string' ? d.model : '',
+        temperature: d.temperature !== undefined ? Number(d.temperature) : 1,
+        concurrency: d.concurrency !== undefined ? Math.min(250, Math.max(1, Number(d.concurrency) || 5)) : 5,
+        batchSize: d.batchSize !== undefined ? Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))) : 5,
+        reasoning: d.reasoning === 'low' || d.reasoning === 'medium' || d.reasoning === 'high' ? d.reasoning : 'off',
+        assignmentPrompt: typeof d.assignmentPrompt === 'string' ? d.assignmentPrompt : DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT,
+        qaPrompt: typeof d.qaPrompt === 'string' ? d.qaPrompt : DEFAULT_AUTO_GROUP_QA_PROMPT,
+        cosineSummaryPrompt: typeof d.cosineSummaryPrompt === 'string' ? d.cosineSummaryPrompt : DEFAULT_COSINE_SUMMARY_PROMPT,
+      });
       setAgSettingsHydrated(true);
     });
     const unsub = subscribeAppSettingsDoc({
@@ -433,6 +448,17 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         if (typeof d?.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
         if (typeof d?.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
         if (d) {
+          lastAgSavedRef.current = JSON.stringify({
+            apiKey: typeof d.apiKey === 'string' ? d.apiKey : '',
+            model: typeof d.model === 'string' ? d.model : '',
+            temperature: d.temperature !== undefined ? Number(d.temperature) : 1,
+            concurrency: d.concurrency !== undefined ? Math.min(250, Math.max(1, Number(d.concurrency) || 5)) : 5,
+            batchSize: d.batchSize !== undefined ? Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))) : 5,
+            reasoning: d.reasoning === 'low' || d.reasoning === 'medium' || d.reasoning === 'high' ? d.reasoning : 'off',
+            assignmentPrompt: typeof d.assignmentPrompt === 'string' ? d.assignmentPrompt : DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT,
+            qaPrompt: typeof d.qaPrompt === 'string' ? d.qaPrompt : DEFAULT_AUTO_GROUP_QA_PROMPT,
+            cosineSummaryPrompt: typeof d.cosineSummaryPrompt === 'string' ? d.cosineSummaryPrompt : DEFAULT_COSINE_SUMMARY_PROMPT,
+          });
           cacheStateLocallyBestEffort({
             idbKey: appSettingsIdbKey('autogroup_settings'),
             value: d,
@@ -2449,7 +2475,8 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       reviewMismatchedPages: s.qaMismatchedPages || qaMismatchPages.get(s.id),
     }));
 
-    onApproveGroups(newGroups);
+    const applied = onApproveGroups(newGroups);
+    if (!applied) return;
 
     // Remove approved from suggestions
     setSuggestions(prev => prev.filter(s => !ids.has(s.id)));
@@ -2926,7 +2953,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                     }
                     void handleRunAutoGroup();
                   }}
-                  disabled={isProjectBusy || !agHasApiKey || ungroupedPages.length === 0}
+                  disabled={isGroupingReadOnly || !agHasApiKey || ungroupedPages.length === 0}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                 >
                   <Play className="w-3 h-3" />
@@ -2951,7 +2978,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                     }
                     void handleRunAutoGroupQA();
                   }}
-                  disabled={isProjectBusy || !agHasApiKey || multiPageSuggestions.length === 0 || isRunning}
+                  disabled={isGroupingReadOnly || !agHasApiKey || multiPageSuggestions.length === 0 || isRunning}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                 >
                   <CheckCircle2 className="w-3 h-3" />
@@ -2961,7 +2988,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
               <button
                 onClick={handleRemoveMismatches}
-                disabled={totalQAMismatchPages === 0 || isRunning || isRunningQA}
+                disabled={isGroupingReadOnly || totalQAMismatchPages === 0 || isRunning || isRunningQA}
                 className="px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 Remove Mismatches ({totalQAMismatchPages})
@@ -2969,7 +2996,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
               <button
                 onClick={() => handleApprove(new Set(suggestions.map(s => s.id)))}
-                disabled={suggestions.length === 0 || isRunning || isRunningQA}
+                disabled={isGroupingReadOnly || suggestions.length === 0 || isRunning || isRunningQA}
                 className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 Approve All ({suggestions.length})
@@ -2987,7 +3014,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               {selectedSuggestions.size > 0 && (
                 <button
                   onClick={() => handleApprove(selectedSuggestions)}
-                  disabled={isRunning || isRunningQA}
+                  disabled={isGroupingReadOnly || isRunning || isRunningQA}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Approve Selected ({selectedSuggestions.size})
@@ -3289,7 +3316,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                   }
                   void handleRunAutoGroup();
                 }}
-                disabled={isProjectBusy || !hasApiKey || totalPages === 0}
+                disabled={isGroupingReadOnly || !hasApiKey || totalPages === 0}
                 className="px-3 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
               >
                 <Play className="w-3 h-3" />
@@ -3381,7 +3408,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                     }
                     void handleRunReconciliation();
                   }}
-                  disabled={isProjectBusy || !hasApiKey || suggestions.length < 2}
+                  disabled={isGroupingReadOnly || !hasApiKey || suggestions.length < 2}
                   className="px-2.5 py-1 text-[11px] font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                   title="Compare all groups against each other to find semantic duplicates"
                 >
@@ -3408,7 +3435,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                       }
                       void handleRunQA();
                     }}
-                    disabled={isProjectBusy || !hasApiKey}
+                    disabled={isGroupingReadOnly || !hasApiKey}
                     className="px-2.5 py-1 text-[11px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                   >
                     <CheckCircle2 className="w-3 h-3" />
@@ -3425,21 +3452,24 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                 {/* Approve / Dismiss */}
                 <button
                   onClick={() => handleApprove(new Set(suggestions.map(s => s.id)))}
-                  className="px-2.5 py-1 text-[11px] font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors"
+                  disabled={isGroupingReadOnly || suggestions.length === 0}
+                  className="px-2.5 py-1 text-[11px] font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Approve All ({suggestions.length})
                 </button>
                 {selectedSuggestions.size > 0 && (
                   <button
                     onClick={() => handleApprove(selectedSuggestions)}
-                    className="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+                    disabled={isGroupingReadOnly}
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     Approve Selected ({selectedSuggestions.size})
                   </button>
                 )}
                 <button
                   onClick={() => { setSuggestions([]); setSelectedSuggestions(new Set()); setQaResults(new Map()); setQaMismatchPages(new Map()); }}
-                  className="px-3 py-1.5 text-xs font-medium text-zinc-600 bg-zinc-100 rounded-lg hover:bg-zinc-200 transition-colors"
+                  disabled={isGroupingReadOnly}
+                  className="px-3 py-1.5 text-xs font-medium text-zinc-600 bg-zinc-100 rounded-lg hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Dismiss All
                 </button>

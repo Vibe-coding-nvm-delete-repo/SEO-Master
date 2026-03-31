@@ -99,6 +99,11 @@ service cloud.firestore {
           resource == null
           || resource.data.readMode != 'v2'
           || request.resource.data.readMode == 'v2'
+          // Allow V2→legacy recovery when migration failed and writer holds a lock
+          || (
+            request.resource.data.migrationState == 'failed'
+            && hasOwnedCurrentOperationLock(projectId, request.resource.data.updatedByClientId)
+          )
         )
         && (
           request.resource.data.readMode != 'v2'

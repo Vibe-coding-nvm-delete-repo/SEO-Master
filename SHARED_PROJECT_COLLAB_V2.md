@@ -179,6 +179,30 @@ When a V2 project cannot load a ready canonical epoch:
 - treat `commitState: 'writing'`, a missing commit, or a mismatched epoch as unsafe to write
 - rely on the meta/epoch listeners to retry when the canonical state becomes valid again
 
+Guardrails for the live meta listener:
+- meta-driven reloads must use the same recovery-capable canonical path as bootstrap/conflict reloads when a lightweight epoch load is null or unresolved; do not rely on `loadCanonicalEpoch` alone for listener-driven recovery
+- when a listener sees a newer `collab/meta` revision, only attach new epoch listeners from the final authoritative resolved meta state for that epoch
+- if the canonical state is still unresolved after recovery, remain fail-closed/read-only rather than forcing shared writes through
+- UI success messaging for grouping/approve/unapprove/ungroup flows must only run after the mutation is actually accepted by the persistence boundary; blocked shared writes must preserve user selection/input and surface only the read-only warning
+
+### 9a. Startup bootstrap must not mix legacy and V2 writes
+
+Root cause of the March 2026 startup sync incident:
+- the active project started bootstrap in a temporary local `legacy` mode before canonical V2 state finished resolving
+- hidden Generate/Content surfaces were still mounted and performing real startup subscriptions, upstream sync, and persistence work
+- that background work reached the legacy whole-project chunk writer during V2 bootstrap
+- Firestore rules correctly rejected the write with `permission-denied` because the project was already V2
+- the client then surfaced recovery/read-only state because `collab/meta` was not yet safely writable
+
+Permanent guardrails:
+- block legacy whole-project writes in the persistence boundary until the active project's storage mode is resolved
+- if `collab/meta` or canonical cache indicates V2, do not allow fallback legacy chunk writes during bootstrap
+- hidden idle Generate/Content surfaces must not attach shared listeners, run upstream auto-sync, fetch model metadata, or persist state until they are visible or actively busy
+- `permission-denied` during V2 recovery/write paths must be surfaced as a rules/deployment/recovery problem, not a generic connectivity message
+
+Do not replace this with a UI-only delay or debounce.
+The fix must remain at the persistence boundary plus runtime-activity gating.
+
 ### 10. Deployment order matters
 
 Rollout order for shared-project V2 changes:
@@ -214,6 +238,9 @@ Implemented:
 - no raw `base_chunks` live-truth listener in V2 mode
 - optimistic V2 shared state kept out of IDB until ack
 - mutation-boundary lock/schema rejection before optimistic local apply
+- startup write barrier so legacy chunk writes stay blocked until storage mode is resolved
+- hidden Generate/Content runtime gating so idle mounted surfaces do not do background shared work during bootstrap
+- step-aware recovery diagnostics for V2 permission/rules failures
 
 File:
 - [src/useProjectPersistence.ts](/C:/Users/chris/Downloads/KWG/src/useProjectPersistence.ts)

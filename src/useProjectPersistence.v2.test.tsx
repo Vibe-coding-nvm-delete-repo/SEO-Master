@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Project, ProjectCollabMetaDoc, ProjectOperationLockDoc } from './types';
+import type { ClusterSummary, GroupedCluster, Project, ProjectCollabMetaDoc, ProjectOperationLockDoc } from './types';
 
 const firestoreMocks = vi.hoisted(() => {
   const listeners = new Map<string, Array<(snap: any) => void>>();
@@ -320,6 +320,215 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('rejects group edits before optimistic local apply when a foreign operation lock is active', async () => {
+    const addToast = vi.fn();
+    const cluster: ClusterSummary = {
+      pageName: 'Alpha',
+      pageNameLower: 'alpha',
+      pageNameLen: 5,
+      tokens: 'alpha',
+      tokenArr: ['alpha'],
+      keywordCount: 1,
+      totalVolume: 10,
+      avgKd: 20,
+      avgKwRating: 1,
+      label: '',
+      labelArr: [],
+      locationCity: null,
+      locationState: null,
+      keywords: [],
+    };
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [cluster];
+    canonical.resolved.clusterSummary = [cluster];
+    canonical.base.results = [{
+      pageName: 'Alpha',
+      pageNameLower: 'alpha',
+      pageNameLen: 5,
+      tokens: 'alpha',
+      tokenArr: ['alpha'],
+      keyword: 'alpha keyword',
+      keywordLower: 'alpha keyword',
+      searchVolume: 10,
+      kd: 20,
+      kwRating: 1,
+      label: '',
+      labelArr: [],
+      locationCity: '',
+      locationState: '',
+    }] as any;
+    canonical.resolved.results = canonical.base.results;
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/project_operations/current')).toBe(true),
+    );
+
+    const foreignLock: ProjectOperationLockDoc = {
+      type: 'bulk-update',
+      ownerId: 'other-client',
+      ownerClientId: 'other-client',
+      ownerUserId: null,
+      startedAt: '2026-03-30T00:00:00.000Z',
+      heartbeatAt: '2026-03-30T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      status: 'running',
+    };
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/project_operations/current', foreignLock);
+    });
+
+    const newGroup: GroupedCluster = {
+      id: 'group-1',
+      groupName: 'Group 1',
+      clusters: [cluster],
+      totalVolume: 10,
+      keywordCount: 1,
+      avgKd: 20,
+      avgKwRating: 1,
+    };
+
+    let applied = true;
+    act(() => {
+      applied = result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
+    });
+
+    expect(applied).toBe(false);
+    expect(result.current.groupedClusters).toEqual([]);
+    expect(result.current.clusterSummary?.map((item) => item.tokens)).toEqual(['alpha']);
+    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('Group edits is temporarily read-only'),
+      'warning',
+    );
+  });
+
+  it('rejects merge-by-name edits before optimistic local apply when a foreign operation lock is active', async () => {
+    const addToast = vi.fn();
+    const cluster: ClusterSummary = {
+      pageName: 'Alpha',
+      pageNameLower: 'alpha',
+      pageNameLen: 5,
+      tokens: 'alpha',
+      tokenArr: ['alpha'],
+      keywordCount: 1,
+      totalVolume: 10,
+      avgKd: 20,
+      avgKwRating: 1,
+      label: '',
+      labelArr: [],
+      locationCity: null,
+      locationState: null,
+      keywords: [],
+    };
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [cluster];
+    canonical.resolved.clusterSummary = [cluster];
+    canonical.base.results = [{
+      pageName: 'Alpha',
+      pageNameLower: 'alpha',
+      pageNameLen: 5,
+      tokens: 'alpha',
+      tokenArr: ['alpha'],
+      keyword: 'alpha keyword',
+      keywordLower: 'alpha keyword',
+      searchVolume: 10,
+      kd: 20,
+      kwRating: 1,
+      label: '',
+      labelArr: [],
+      locationCity: '',
+      locationState: '',
+    }] as any;
+    canonical.resolved.results = canonical.base.results;
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/project_operations/current')).toBe(true),
+    );
+
+    const foreignLock: ProjectOperationLockDoc = {
+      type: 'bulk-update',
+      ownerId: 'other-client',
+      ownerClientId: 'other-client',
+      ownerUserId: null,
+      startedAt: '2026-03-30T00:00:00.000Z',
+      heartbeatAt: '2026-03-30T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      status: 'running',
+    };
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/project_operations/current', foreignLock);
+    });
+
+    const incomingGroup: GroupedCluster = {
+      id: 'group-1',
+      groupName: 'Group 1',
+      clusters: [cluster],
+      totalVolume: 10,
+      keywordCount: 1,
+      avgKd: 20,
+      avgKwRating: 1,
+    };
+
+    let applied = true;
+    act(() => {
+      applied = result.current.mergeGroupsByName({
+        incoming: [incomingGroup],
+        removedTokens: new Set(['alpha']),
+        hasReviewApi: false,
+        mergeFn: (_existing, incoming) => incoming,
+      });
+    });
+
+    expect(applied).toBe(false);
+    expect(result.current.groupedClusters).toEqual([]);
+    expect(result.current.clusterSummary?.map((item) => item.tokens)).toEqual(['alpha']);
+    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('Group edits is temporarily read-only'),
+      'warning',
+    );
+  });
+
   it('does not resubscribe the legacy chunks listener when addToast changes identity', async () => {
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeLegacyState());
     const setProjects = vi.fn();
@@ -414,6 +623,82 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     expect(Array.from(result.current.blockedTokens)).toEqual(['epoch-11']);
+  });
+
+  it('falls back to full canonical recovery when a meta listener epoch load is unresolved', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['stable']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    collabMocks.loadCanonicalEpoch.mockResolvedValueOnce(null);
+    collabMocks.loadCanonicalProjectState.mockClear();
+    collabMocks.loadCanonicalProjectState.mockResolvedValueOnce(makeCanonical(2, ['recovered']));
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(2, 2));
+    });
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['recovered']));
+    expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries full canonical recovery when a meta listener epoch load throws', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1, ['stable']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    collabMocks.loadCanonicalEpoch
+      .mockRejectedValueOnce(new Error('epoch load failed'))
+      .mockResolvedValueOnce(null);
+    collabMocks.loadCanonicalProjectState.mockClear();
+    collabMocks.loadCanonicalProjectState.mockResolvedValueOnce(makeCanonical(2, ['recovered-after-error']));
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(2, 2));
+    });
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['recovered-after-error']));
+    expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
   });
 
   it('ignores pending-write meta snapshots for epoch activation', async () => {
@@ -638,6 +923,89 @@ describe('useProjectPersistence V2 hardening', () => {
       expect.stringContaining('recovering from an incomplete cloud commit'),
       'warning',
     );
+  });
+
+  it('surfaces a rules-focused warning when shared-project recovery is blocked by permissions', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue({
+      ...makeCanonical(1),
+      entities: {
+        ...makeCanonical(1).entities,
+        meta: {
+          ...makeMeta(1, 2),
+          commitState: 'writing',
+          migrationState: 'running',
+        },
+      },
+      resolved: null,
+      diagnostics: {
+        recovery: {
+          attempted: true,
+          outcome: 'failed',
+          code: 'permission-denied',
+          step: 'repair collab meta',
+        },
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('recovery is blocked by Firestore permissions'),
+      'warning',
+    );
+  });
+
+  it('suppresses legacy chunk writes while project storage mode is unresolved', async () => {
+    const canonicalLoad = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalProjectState.mockImplementation(() => canonicalLoad.promise);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+      void result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await flush();
+
+    act(() => {
+      result.current.bulkSet({
+        results: [{ tokens: 'alpha' } as any],
+        fileName: 'Suppressed during bootstrap',
+      });
+    });
+
+    await flush();
+
+    expect(storageMocks.saveProjectDataToFirestore).not.toHaveBeenCalled();
+    expect(storageMocks.saveProjectToFirestore).not.toHaveBeenCalled();
+    expect(storageMocks.saveToIDB).not.toHaveBeenCalled();
+
+    await act(async () => {
+      canonicalLoad.resolve(makeCanonical(1));
+      await canonicalLoad.promise;
+    });
   });
 
   it('drops conflicted optimistic state and reloads canonical docs from cloud', async () => {

@@ -102,7 +102,7 @@ describe('deriveCloudStatusLine', () => {
     expect(r.tone).toBe('amber');
   });
 
-  it('does not turn the active-project headline red for auxiliary listener issues', () => {
+  it('shows background sync issue for auxiliary listener issues when a project is active', () => {
     const auxiliaryChannel = {
       id: CLOUD_SYNC_CHANNELS.notifications,
       label: 'Notifications',
@@ -122,8 +122,8 @@ describe('deriveCloudStatusLine', () => {
         auxiliaryErrors: [auxiliaryChannel],
       },
     }, true);
-    expect(r.label).toBe('Cloud: synced');
-    expect(r.tone).toBe('emerald');
+    expect(r.label).toBe('Background sync issue');
+    expect(r.tone).toBe('amber');
   });
 
   it('turns the headline red for critical project listener issues', () => {
@@ -185,7 +185,7 @@ describe('deriveCloudStatusLine', () => {
     expect(r.tone).toBe('amber');
   });
 
-  it('treats shared-doc failure as primary only when no project is open', () => {
+  it('treats shared-doc failure as primary even when project is open', () => {
     const snap: CloudSyncDerived = {
       ...makeBase(),
       shared: {
@@ -194,7 +194,7 @@ describe('deriveCloudStatusLine', () => {
       },
     };
     expect(deriveCloudStatusLine(true, snap, false).label).toBe('Cloud sync failed — needs attention');
-    expect(deriveCloudStatusLine(true, snap, true).label).toBe('Cloud: synced');
+    expect(deriveCloudStatusLine(true, snap, true).label).toBe('Cloud sync failed — needs attention');
   });
 
   it('shows background sync issue when only auxiliary listeners are failing without an active project', () => {

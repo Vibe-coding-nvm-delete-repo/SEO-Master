@@ -16,6 +16,9 @@ import {
   CLOUD_SYNC_CHANNELS,
   markListenerError,
   markListenerSnapshot,
+  recordSharedCloudWriteError,
+  recordSharedCloudWriteOk,
+  recordSharedCloudWriteStart,
 } from './cloudSyncStatus';
 import { FEEDBACK_MAX_ATTACHMENTS } from './feedbackConstants';
 import type { FeedbackEntry } from './types';
@@ -199,7 +202,14 @@ export async function addFeedback(
   };
 
   if (imageFiles.length === 0) {
-    await setDoc(docRef, basePayload);
+    recordSharedCloudWriteStart();
+    try {
+      await setDoc(docRef, basePayload);
+      recordSharedCloudWriteOk();
+    } catch (err) {
+      recordSharedCloudWriteError();
+      throw err;
+    }
     return { imagesRequested: 0, imagesSaved: false };
   }
 
@@ -218,14 +228,28 @@ export async function addFeedback(
       uploadedPaths.push(path);
       urls.push(await getDownloadURL(storageRef));
     }
-    await setDoc(docRef, { ...basePayload, attachmentUrls: urls });
+    recordSharedCloudWriteStart();
+    try {
+      await setDoc(docRef, { ...basePayload, attachmentUrls: urls });
+      recordSharedCloudWriteOk();
+    } catch (err) {
+      recordSharedCloudWriteError();
+      throw err;
+    }
     return { imagesRequested: imageFiles.length, imagesSaved: true };
   } catch (e) {
     // Never lose the written feedback because image auth/storage is unavailable.
     // Best-effort cleanup for any partial uploads that might exist.
     await deleteFeedbackStoragePaths(uploadedPaths);
     console.warn('Feedback image upload failed; saving feedback without images.', e);
-    await setDoc(docRef, basePayload);
+    recordSharedCloudWriteStart();
+    try {
+      await setDoc(docRef, basePayload);
+      recordSharedCloudWriteOk();
+    } catch (err) {
+      recordSharedCloudWriteError();
+      throw err;
+    }
     return { imagesRequested: imageFiles.length, imagesSaved: false };
   }
 }
@@ -236,5 +260,12 @@ export async function swapFeedbackPriority(a: FeedbackEntry, b: FeedbackEntry): 
   const refB = doc(db, FEEDBACK_COLLECTION, b.id);
   batch.update(refA, { priority: b.priority });
   batch.update(refB, { priority: a.priority });
-  await batch.commit();
+  recordSharedCloudWriteStart();
+  try {
+    await batch.commit();
+    recordSharedCloudWriteOk();
+  } catch (err) {
+    recordSharedCloudWriteError();
+    throw err;
+  }
 }

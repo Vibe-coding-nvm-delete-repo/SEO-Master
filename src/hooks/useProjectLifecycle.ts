@@ -30,6 +30,7 @@ import { parseAppPath, buildMainPath, type MainTab, type GroupSubTab, type Setti
 import { projectUrlKey, projectUrlKeySuffixFromId } from '../projectUrlKey';
 import { isUsableActiveProjectId } from '../projectLifecyclePolicy';
 import { advanceGeneration } from '../collabV2WriteGuard';
+import { beginRuntimeTrace, traceRuntimeEvent } from '../runtimeTrace';
 
 export interface UseProjectLifecycleInput {
   projects: Project[];
@@ -187,8 +188,25 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         if (nextProjectId) {
           setActiveProjectId(nextProjectId);
           setGroupSubTab('data');
+          const traceId = beginRuntimeTrace('useProjectLifecycle.mountRestore', nextProjectId, {
+            requestedProjectKey,
+          });
+          traceRuntimeEvent({
+            traceId,
+            event: 'lifecycle:mount-load-start',
+            source: 'useProjectLifecycle.mountRestore',
+            projectId: nextProjectId,
+            data: { requestedProjectKey },
+          });
           setIsProjectLoading(true);
           loadProject(nextProjectId, loadedProjects).finally(() => {
+            traceRuntimeEvent({
+              traceId,
+              event: 'lifecycle:mount-load-finished',
+              source: 'useProjectLifecycle.mountRestore',
+              projectId: nextProjectId,
+              data: { cancelled },
+            });
             if (!cancelled) setIsProjectLoading(false);
           });
         }
@@ -239,12 +257,26 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
           syncProjectIdToUrl(activeProjectIdRef.current, projectsRef.current);
           return;
         }
+        const traceId = beginRuntimeTrace('useProjectLifecycle.popstate', projectIdFromUrl, { key });
         setActiveProjectId(projectIdFromUrl);
         clearProject();
+        traceRuntimeEvent({
+          traceId,
+          event: 'lifecycle:popstate-load-start',
+          source: 'useProjectLifecycle.popstate',
+          projectId: projectIdFromUrl,
+          data: { key },
+        });
         setIsProjectLoading(true);
         try {
           await loadProject(projectIdFromUrl, projectsRef.current);
         } finally {
+          traceRuntimeEvent({
+            traceId,
+            event: 'lifecycle:popstate-load-finished',
+            source: 'useProjectLifecycle.popstate',
+            projectId: projectIdFromUrl,
+          });
           setIsProjectLoading(false);
         }
         return;
@@ -473,11 +505,17 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     const target = projectsRef.current.find(p => p.id === projectId);
     if (target?.deletedAt) return;
     if (!allowProjectChange()) return;
-    // V2: Invalidate stale async operations from previous project
     advanceGeneration(projectId);
+    const traceId = beginRuntimeTrace('useProjectLifecycle.selectProject', projectId);
     setActiveProjectId(projectId);
     // Clear immediately so the UI never shows another project’s keywords while the new one loads.
     clearProject();
+    traceRuntimeEvent({
+      traceId,
+      event: 'lifecycle:select-load-start',
+      source: 'useProjectLifecycle.selectProject',
+      projectId,
+    });
     setIsProjectLoading(true);
     setMainTab('group');
     setGroupSubTab('data');
@@ -489,6 +527,12 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     try {
       await loadProject(projectId, projectsRef.current);
     } finally {
+      traceRuntimeEvent({
+        traceId,
+        event: 'lifecycle:select-load-finished',
+        source: 'useProjectLifecycle.selectProject',
+        projectId,
+      });
       setIsProjectLoading(false);
     }
   };

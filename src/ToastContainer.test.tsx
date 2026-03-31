@@ -11,6 +11,15 @@ function Harness() {
       <button onClick={() => addToast('Cloud sync failed (generate rows) [invalid-argument]. Firestore rejected the data payload.', 'error')}>
         Add error
       </button>
+      <button
+        onClick={() => {
+          addToast('Local save failed (generate rows) [persist-timeout]. Refresh may lose your latest changes.', 'error');
+          addToast('Local save failed (generate rows) [persist-timeout]. Refresh may lose your latest changes.', 'error');
+          addToast('Local save failed (generate rows) [persist-timeout]. Refresh may lose your latest changes.', 'error');
+        }}
+      >
+        Add burst
+      </button>
     </div>
   );
 }
@@ -46,6 +55,20 @@ describe('ToastContainer', () => {
     expect(screen.getByText('x2')).toBeTruthy();
     expect(screen.getByText(/Local \| /)).toBeTruthy();
     expect(screen.getByText(/US Eastern \| /)).toBeTruthy();
+  });
+
+  it('dedupes identical toasts fired back-to-back in the same tick', () => {
+    render(
+      <ToastProvider>
+        <ToastContainer />
+        <Harness />
+      </ToastProvider>,
+    );
+
+    fireEvent.click(screen.getByText('Add burst'));
+
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByText('x3')).toBeTruthy();
   });
 
   it('marks toasts exiting before removing them after the longer dwell time', () => {

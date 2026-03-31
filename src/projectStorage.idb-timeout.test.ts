@@ -128,4 +128,70 @@ describe('saveToIDB timeout recovery', () => {
     expect(indexedDbMock.open).toHaveBeenCalledTimes(2);
     expect(secondDb.transaction).toHaveBeenCalledTimes(1);
   }, 15_000);
+
+  it('serializes concurrent writes so later saves do not start timing out while waiting in line', async () => {
+    const firstTx: FakeTx = {
+      objectStore: () => ({ put: vi.fn() }),
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      abort: vi.fn(),
+      error: null,
+    };
+    const secondTx: FakeTx = {
+      objectStore: () => ({ put: vi.fn() }),
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      abort: vi.fn(),
+      error: null,
+    };
+
+    const txs = [firstTx, secondTx];
+    const db = makeDb(() => {
+      const next = txs.shift();
+      if (!next) {
+        throw new Error('unexpected transaction');
+      }
+      return next;
+    });
+    const openRequests: FakeOpenRequest[] = [];
+
+    const indexedDbMock = {
+      open: vi.fn(() => {
+        const req: FakeOpenRequest = {
+          onupgradeneeded: null,
+          onsuccess: null,
+          onerror: null,
+          error: null,
+        };
+        openRequests.push(req);
+        queueMicrotask(() => {
+          req.result = db;
+          req.onsuccess?.();
+        });
+        return req;
+      }),
+    };
+
+    vi.stubGlobal('indexedDB', indexedDbMock);
+
+    const firstSave = saveToIDB('proj_one', { rows: [{ id: 1 }] });
+    await vi.advanceTimersByTimeAsync(0);
+    const secondSave = saveToIDB('proj_two', { rows: [{ id: 2 }] });
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+
+    queueMicrotask(() => firstTx.oncomplete?.());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+
+    queueMicrotask(() => secondTx.oncomplete?.());
+    await vi.advanceTimersByTimeAsync(0);
+
+    await firstSave;
+    await secondSave;
+    expect(indexedDbMock.open).toHaveBeenCalledTimes(1);
+  }, 15_000);
 });

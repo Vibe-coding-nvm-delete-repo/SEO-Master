@@ -15,6 +15,7 @@ vi.mock('./GenerateTab', () => ({
             activeExternalView: props.activeExternalView ?? null,
             controlledTableView: props.controlledTableView ?? null,
             controlledGenSubTab: props.controlledGenSubTab ?? null,
+            runtimeEffectsActive: props.runtimeEffectsActive ?? null,
           })}
         </div>
         {typeof props.onTableViewChange === 'function' && (
@@ -44,6 +45,16 @@ vi.mock('./GenerateTab', () => ({
             </button>
             <button type="button" data-testid={`panel-table-${storageKey}`} onClick={() => (props.onGenSubTabChange as (tab: 'table' | 'log') => void)('table')}>
               Table
+            </button>
+          </>
+        )}
+        {typeof props.onBusyStateChange === 'function' && (
+          <>
+            <button type="button" data-testid={`mock-busy-on-${storageKey}`} onClick={() => (props.onBusyStateChange as (b: boolean) => void)(true)}>
+              Busy on
+            </button>
+            <button type="button" data-testid={`mock-busy-off-${storageKey}`} onClick={() => (props.onBusyStateChange as (b: boolean) => void)(false)}>
+              Busy off
             </button>
           </>
         )}
@@ -103,6 +114,14 @@ async function readPageShellState() {
     activeExternalView: string | null;
     controlledTableView: string | null;
     controlledGenSubTab: 'table' | 'log' | null;
+    runtimeEffectsActive: boolean | null;
+  };
+}
+
+async function readGenerateState(storageKey: string) {
+  const stateNode = await screen.findByTestId(`generate-state-${storageKey}`);
+  return JSON.parse(stateNode.textContent ?? '{}') as {
+    runtimeEffectsActive: boolean | null;
   };
 }
 
@@ -141,6 +160,56 @@ describe('ContentTab', () => {
       activeExternalView: externalView,
       controlledTableView: tableView,
       controlledGenSubTab: panel,
+    });
+  });
+
+  it('aggregates per-instance busy into a single parent onBusyStateChange', async () => {
+    setContentPath('?subtab=pages');
+    const onBusy = vi.fn();
+    render(<ContentTab activeProjectId="proj-1" starredModels={new Set()} onToggleStar={() => undefined} onBusyStateChange={onBusy} />);
+
+    fireEvent.click(await screen.findByTestId('mock-busy-on-_page_names'));
+    await waitFor(() => {
+      expect(onBusy).toHaveBeenCalledWith(true);
+    });
+
+    fireEvent.click(screen.getByTestId('mock-busy-off-_page_names'));
+    await waitFor(() => {
+      expect(onBusy).toHaveBeenLastCalledWith(false);
+    });
+
+    expect(onBusy.mock.calls.length).toBeLessThanOrEqual(5);
+  });
+
+  it('activates only the visible or busy content stages while hidden', async () => {
+    setContentPath('?subtab=pages');
+
+    render(
+      <ContentTab
+        activeProjectId="proj-1"
+        isVisible={false}
+        runtimeEffectsActive
+        starredModels={new Set()}
+        onToggleStar={() => undefined}
+      />,
+    );
+
+    await expect(readGenerateState('_page_names')).resolves.toMatchObject({
+      runtimeEffectsActive: false,
+    });
+    await expect(readGenerateState('_h2_content')).resolves.toMatchObject({
+      runtimeEffectsActive: false,
+    });
+
+    fireEvent.click(await screen.findByTestId('mock-busy-on-_h2_content'));
+
+    await waitFor(async () => {
+      expect(await readGenerateState('_page_names')).toMatchObject({
+        runtimeEffectsActive: false,
+      });
+      expect(await readGenerateState('_h2_content')).toMatchObject({
+        runtimeEffectsActive: true,
+      });
     });
   });
 

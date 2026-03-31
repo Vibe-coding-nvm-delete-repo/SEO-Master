@@ -1,6 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { awaitPersistWithTimeout, classifyRowsSnapshotHandling, getExtraColumnValue, hasActiveGeneration, resolveGenerateControlModeFromPhase, shouldDiscardGenerationResult, waitForDelayOrAbort } from './GenerateTab';
+import { awaitPersistWithTimeout, classifyRowsSnapshotHandling, getExtraColumnValue, hasActiveGeneration, resolveGenerateControlModeFromPhase, shouldDiscardGenerationResult, shouldSkipUpstreamEmptyApply, waitForDelayOrAbort } from './GenerateTab';
+
+function makeRow(partial: Partial<{ id: string; input: string; output: string; status: string }> = {}) {
+  return {
+    id: partial.id ?? 'r1',
+    input: partial.input ?? '',
+    output: partial.output ?? '',
+    status: partial.status ?? 'pending',
+  };
+}
+
+describe('GenerateTab upstream empty guards', () => {
+  it('skips empty upstream when local rows still have synced inputs', () => {
+    expect(shouldSkipUpstreamEmptyApply([], [makeRow({ input: 'title one' })] as any)).toBe(true);
+  });
+
+  it('allows empty upstream when local rows are truly empty', () => {
+    expect(shouldSkipUpstreamEmptyApply([], [makeRow(), makeRow({ id: 'r2' })] as any)).toBe(false);
+  });
+});
 
 describe('GenerateTab upstream sync guard', () => {
   it('treats primary generation as active', () => {

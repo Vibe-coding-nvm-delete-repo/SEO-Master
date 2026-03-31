@@ -55,7 +55,7 @@ import type {
   ProjectCollabMetaDoc,
 } from './types';
 import { parseSubClusterKey } from './subClusterKeys';
-import { logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
+import { getPersistErrorInfo, logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
 import { withPersistTimeout } from './persistTimeout';
 import {
   clearListenerError,
@@ -72,6 +72,7 @@ import {
   recordProjectFlushExit,
   isLocalWriteFailed,
 } from './cloudSyncStatus';
+import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
 import {
   acquireProjectOperationLock,
   activityLogDocId,
@@ -235,27 +236,28 @@ export interface ProjectPersistence extends PersistedState {
   storageMode: 'legacy' | 'v2';
   activeOperation: ProjectOperationLockDoc | null;
   isProjectBusy: boolean;
+  isSharedProjectReadOnly: boolean;
   runWithExclusiveOperation: <T>(
     type: ProjectOperationLockDoc['type'],
     task: () => Promise<T>,
   ) => Promise<T | null>;
 
   // Atomic mutations
-  addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => void;
-  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => void;
+  addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => boolean;
+  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => boolean;
   updateGroups: (updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => void;
-  approveGroup: (groupName: string) => GroupedCluster | null;
-  unapproveGroup: (groupName: string) => GroupedCluster | null;
+  approveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
+  unapproveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
   removeFromApproved: (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => { clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] };
+  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] };
   ungroupPages: (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => { clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
+  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
   blockTokens: (tokens: string[]) => void;
   unblockTokens: (tokens: string[]) => void;
   applyMergeCascade: (cascade: {
@@ -365,10 +367,13 @@ export type SnapshotGuardInput = {
   incomingApprovedChunkCount: number | null;
   incomingDataGroupedCount: number;
   incomingDataApprovedCount: number;
+  incomingResultsCount: number;
+  incomingClusterCount: number;
   loadFence: number;
   incomingGroupedPageMass: number;
   incomingSaveId: number;
   localSaveId: number;
+  incomingFromCache: boolean;
 };
 
 export type SnapshotGuardResult =
@@ -386,6 +391,29 @@ export function evaluateSnapshotGuards(input: SnapshotGuardInput): SnapshotGuard
     if (input.localGroupedCount > 0) return { action: 'skip', guard: '3:emptySnap_hasGrouped' };
     if (input.localApprovedCount > 0) return { action: 'skip', guard: '3:emptySnap_hasApproved' };
     if (input.localClusterCount > 0) return { action: 'skip', guard: '3:emptySnap_hasClusters' };
+  }
+
+  if (input.dataExists) {
+    const localHasData =
+      input.localResults > 0 ||
+      input.localGroupedCount > 0 ||
+      input.localApprovedCount > 0 ||
+      input.localClusterCount > 0;
+    const incomingHasData =
+      input.incomingResultsCount > 0 ||
+      input.incomingDataGroupedCount > 0 ||
+      input.incomingDataApprovedCount > 0 ||
+      input.incomingClusterCount > 0;
+    if (localHasData && !incomingHasData) {
+      const authoritativeDestructiveApply =
+        !input.incomingFromCache &&
+        input.incomingSaveId > 0 &&
+        input.localSaveId > 0 &&
+        input.incomingSaveId >= input.localSaveId;
+      if (!authoritativeDestructiveApply) {
+        return { action: 'skip', guard: '3b:effectiveEmpty_hasLocal' };
+      }
+    }
   }
 
   if (input.dataExists) {
@@ -449,6 +477,8 @@ export function useProjectPersistence(options: {
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
   const [storageMode, setStorageModeState] = useState<'legacy' | 'v2'>('legacy');
   const [activeOperation, setActiveOperation] = useState<ProjectOperationLockDoc | null>(null);
+  const [legacyWritesBlocked, setLegacyWritesBlockedState] = useState(false);
+  const [v2RecoveryMode, setV2RecoveryModeState] = useState(false);
   const activeProjectIdRef = useRef<string | null>(null);
   const storageModeRef = useRef<'legacy' | 'v2'>('legacy');
   const addToastRef = useRef(addToast);
@@ -471,6 +501,7 @@ export function useProjectPersistence(options: {
   const lastAckedMutationByDocKeyRef = useRef<Map<string, string | null>>(new Map());
   const legacyWritesBlockedRef = useRef(false);
   const v2RecoveryModeRef = useRef(false);
+  const projectStorageModeResolvedRef = useRef(false);
   const lockHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lockHeartbeatLostRef = useRef(false);
   const activeOperationRef = useRef<ProjectOperationLockDoc | null>(null);
@@ -486,6 +517,14 @@ export function useProjectPersistence(options: {
   const setStorageMode = useCallback((mode: 'legacy' | 'v2') => {
     storageModeRef.current = mode;
     setStorageModeState(mode);
+  }, []);
+  const setLegacyWritesBlocked = useCallback((blocked: boolean) => {
+    legacyWritesBlockedRef.current = blocked;
+    setLegacyWritesBlockedState(blocked);
+  }, []);
+  const setV2RecoveryMode = useCallback((recovering: boolean) => {
+    v2RecoveryModeRef.current = recovering;
+    setV2RecoveryModeState(recovering);
   }, []);
 
   // ── Consolidated "latest" ref — always in sync, never stale ──────────
@@ -546,6 +585,8 @@ export function useProjectPersistence(options: {
   const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
   const pendingLocalPersistRef = useRef<Promise<void>>(Promise.resolve());
   const saveCounterRef = useRef(0);
+  const activePersistTraceRef = useRef<string | null>(null);
+  const activePersistSourceRef = useRef<string>('unknown');
   /** True if a mutation happened since we started the current persist iteration (coalesced saves). */
   const needsPersistFlushRef = useRef(false);
   /** True while flushPersistQueue is awaiting IDB/Firestore writes. Prevents onSnapshot
@@ -556,6 +597,16 @@ export function useProjectPersistence(options: {
   // different clientId) from shrinking grouped/approved state below what was
   // loaded from IDB. Set after loadProject, cleared on first local save.
   const loadFenceRef = useRef(0);
+  const getLegacyPersistBlockReason = useCallback((): string | null => {
+    if (!activeProjectIdRef.current) return 'no-active-project';
+    if (storageModeRef.current !== 'legacy') return 'storage-mode-not-legacy';
+    if (!projectStorageModeResolvedRef.current) return 'storage-mode-unresolved';
+    if (projectLoadingRef.current) return 'project-loading';
+    if (legacyWritesBlockedRef.current) return 'legacy-writes-blocked';
+    if (v2RecoveryModeRef.current) return 'v2-recovery';
+    if (collabMetaRef.current?.readMode === 'v2') return 'collab-meta-v2';
+    return null;
+  }, []);
 
   /** Build a full ProjectDataPayload from `latest.current` + optional overrides. */
   const buildPayload = useCallback((overrides?: Partial<PersistedState>): ProjectDataPayload => {
@@ -584,11 +635,18 @@ export function useProjectPersistence(options: {
   const persistProjectPayloadToIDB = useCallback(async (
     projectId: string,
     payload: ProjectDataPayload,
-    options?: { mode?: 'checkpoint' | 'flush' },
+    options?: { mode?: 'checkpoint' | 'flush'; traceId?: string; traceSource?: string },
   ): Promise<boolean> => {
     const mode = options?.mode ?? 'checkpoint';
+    const localTrace = options?.traceId
+      ? {
+          traceId: options.traceId,
+          source: options.traceSource ?? 'useProjectPersistence.persistProjectPayloadToIDB',
+          data: { mode },
+        }
+      : undefined;
     if (mode === 'checkpoint') {
-      recordLocalPersistStart();
+      recordLocalPersistStart(localTrace);
     }
     try {
       await withPersistTimeout(
@@ -598,16 +656,16 @@ export function useProjectPersistence(options: {
       );
       // Both modes clear the failed flag on success — this is critical so that
       // a flush after a failed checkpoint can recover the durability status.
-      recordLocalPersistOk({ decrementPending: mode === 'checkpoint' });
+      recordLocalPersistOk({ decrementPending: mode === 'checkpoint', trace: localTrace });
       return true;
     } catch (err) {
       if (mode === 'checkpoint') {
-        recordLocalPersistError();
+        recordLocalPersistError({ trace: localTrace });
         reportLocalPersistFailure(addToastRef.current, 'project data local save', err);
       } else {
         // Flush mode: still update durability status so the UI reflects reality,
         // but skip the toast (flushes are background work, don't spam the user).
-        recordLocalPersistError({ decrementPending: false });
+        recordLocalPersistError({ decrementPending: false, trace: localTrace });
         logPersistError('IDB save (flush)', err);
       }
       return false;
@@ -623,6 +681,29 @@ export function useProjectPersistence(options: {
   const flushPersistQueue = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    const traceId = activePersistTraceRef.current;
+    const blockReason = getLegacyPersistBlockReason();
+    if (blockReason) {
+      if (traceId) {
+        traceRuntimeEvent({
+          traceId,
+          event: 'persist:flush-suppressed',
+          source: 'useProjectPersistence.flushPersistQueue',
+          projectId,
+          data: { trigger: activePersistSourceRef.current, reason: blockReason },
+        });
+      }
+      return;
+    }
+    if (traceId) {
+      traceRuntimeEvent({
+        traceId,
+        event: 'persist:flush-enter',
+        source: 'useProjectPersistence.flushPersistQueue',
+        projectId,
+        data: { trigger: activePersistSourceRef.current },
+      });
+    }
 
     isFlushingRef.current = true;
     recordProjectFlushEnter();
@@ -636,6 +717,20 @@ export function useProjectPersistence(options: {
         const payload = buildPayload();
         payload.lastSaveId = saveId;
         const clientId = clientIdRef.current;
+        if (traceId) {
+          traceRuntimeEvent({
+            traceId,
+            event: 'persist:loop-iteration',
+            source: 'useProjectPersistence.flushPersistQueue',
+            projectId,
+            data: {
+              saveId,
+              resultsCount: payload.results?.length ?? 0,
+              groupedCount: payload.groupedClusters?.length ?? 0,
+              approvedCount: payload.approvedGroups?.length ?? 0,
+            },
+          });
+        }
 
         // Guard: refuse to save a completely empty payload. A project with zero
         // results, zero grouped clusters, AND zero approved groups is never a
@@ -643,20 +738,51 @@ export function useProjectPersistence(options: {
         // artifact. Saving it would overwrite real data in IDB/Firestore.
         if (!(payload.results?.length) && !(payload.groupedClusters?.length) && !(payload.approvedGroups?.length)) {
           console.warn('[PERSIST] Skipping flush of empty payload (no results/groups/approved)');
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:skip-empty-payload',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId },
+            });
+          }
           break;
         }
 
         loadFenceRef.current = 0;
 
-        await persistProjectPayloadToIDB(projectId, payload, { mode: 'flush' });
+        await persistProjectPayloadToIDB(projectId, payload, {
+          mode: 'flush',
+          traceId: traceId ?? undefined,
+          traceSource: 'useProjectPersistence.flushPersistQueue',
+        });
         try {
           recordProjectCloudWriteStart();
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:cloud-write-start',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId },
+            });
+          }
           await withPersistTimeout(
             saveProjectDataToFirestore(projectId, payload, { saveId, clientId }),
             PROJECT_CLOUD_WRITE_TIMEOUT_MS,
             `project cloud write (${projectId})`,
           );
           recordProjectFirestoreSaveOk();
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:cloud-write-ok',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId },
+            });
+          }
           console.log(
             '[PERSIST] Firestore save OK - grouped:',
             (payload.groupedClusters || []).length,
@@ -665,6 +791,15 @@ export function useProjectPersistence(options: {
           );
         } catch (err) {
           recordProjectFirestoreSaveError();
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:cloud-write-error',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId, error: err instanceof Error ? err.message : String(err) },
+            });
+          }
           reportPersistFailure(addToastRef.current, 'project data save', err);
         }
         // If mutateAndSave ran during the awaits above, needsPersistFlushRef is true → loop
@@ -672,17 +807,57 @@ export function useProjectPersistence(options: {
     } finally {
       isFlushingRef.current = false;
       recordProjectFlushExit();
+      if (traceId) {
+        traceRuntimeEvent({
+          traceId,
+          event: 'persist:flush-exit',
+          source: 'useProjectPersistence.flushPersistQueue',
+          projectId,
+        });
+      }
     }
-  }, [buildPayload, persistProjectPayloadToIDB]);
+  }, [buildPayload, getLegacyPersistBlockReason, persistProjectPayloadToIDB]);
 
   /** Queue Firestore + IDB flush (no debounce). `latest.current` is read at flush time. */
-  const enqueueSave = useCallback(() => {
-    if (!activeProjectIdRef.current) return;
+  const enqueueSave = useCallback((source: string = 'unknown', traceId?: string) => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    const blockReason = getLegacyPersistBlockReason();
+    if (blockReason) {
+      const existingTraceId = traceId ?? activePersistTraceRef.current;
+      if (existingTraceId) {
+        traceRuntimeEvent({
+          traceId: existingTraceId,
+          event: 'persist:enqueue-suppressed',
+          source: 'useProjectPersistence.enqueueSave',
+          projectId,
+          data: { source, reason: blockReason },
+        });
+      }
+      return;
+    }
+    if (traceId) {
+      activePersistTraceRef.current = traceId;
+    } else if (!activePersistTraceRef.current) {
+      activePersistTraceRef.current = beginRuntimeTrace('useProjectPersistence.enqueueSave', projectId, {
+        source,
+      });
+    }
+    activePersistSourceRef.current = source;
+    if (activePersistTraceRef.current) {
+      traceRuntimeEvent({
+        traceId: activePersistTraceRef.current,
+        event: 'persist:enqueue',
+        source: 'useProjectPersistence.enqueueSave',
+        projectId: activeProjectIdRef.current,
+        data: { source },
+      });
+    }
     needsPersistFlushRef.current = true;
     pendingSaveRef.current = pendingSaveRef.current
       .then(flushPersistQueue)
       .catch((err) => logPersistError('persist queue flush', err));
-  }, [flushPersistQueue]);
+  }, [flushPersistQueue, getLegacyPersistBlockReason]);
 
   /**
    * Durability barrier for long-running jobs that need a user-visible "done and synced"
@@ -715,7 +890,7 @@ export function useProjectPersistence(options: {
       }
       return;
     }
-    enqueueSave();
+    enqueueSave('flush-now');
     await pendingLocalPersistRef.current;
     await pendingSaveRef.current;
   }, [enqueueSave]);
@@ -724,11 +899,18 @@ export function useProjectPersistence(options: {
    * Crash-safety checkpoint: persist latest state to IDB immediately.
    * `enqueueSave` runs the same payload to Firestore on the serialized queue.
    */
-  const checkpointToIDB = useCallback(async (overrides?: Partial<PersistedState>) => {
+  const checkpointToIDB = useCallback(async (
+    overrides?: Partial<PersistedState>,
+    options?: { traceId?: string; traceSource?: string },
+  ) => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     const payload = buildPayload(overrides);
-    await persistProjectPayloadToIDB(projectId, payload, { mode: 'checkpoint' });
+    await persistProjectPayloadToIDB(projectId, payload, {
+      mode: 'checkpoint',
+      traceId: options?.traceId,
+      traceSource: options?.traceSource,
+    });
   }, [buildPayload, persistProjectPayloadToIDB]);
 
   const applyViewState = useCallback((vs: ProjectViewState) => {
@@ -963,11 +1145,11 @@ export function useProjectPersistence(options: {
   const applyCanonicalState = useCallback((canonical: CanonicalProjectState) => {
     if (canonical.mode !== 'v2') return;
     collabMetaRef.current = canonical.entities.meta;
-    legacyWritesBlockedRef.current = Boolean(
+    setLegacyWritesBlocked(Boolean(
       canonical.entities.meta &&
       canonical.entities.meta.readMode === 'v2' &&
       (canonical.entities.meta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
-    );
+    ));
     baseSnapshotRef.current = canonical.base;
     groupDocsRef.current = canonical.entities.groups;
     blockedTokenDocsRef.current = canonical.entities.blockedTokens;
@@ -979,19 +1161,19 @@ export function useProjectPersistence(options: {
     rebuildRevisionMap(activeEpochRef.current);
     setActiveOperation(canonical.entities.activeOperation);
     activeOperationRef.current = canonical.entities.activeOperation;
-    v2RecoveryModeRef.current = !(
+    setV2RecoveryMode(!(
       canonical.resolved &&
       canonical.entities.meta?.readMode === 'v2' &&
       canonical.entities.meta?.commitState === 'ready' &&
       canonical.entities.meta?.migrationState === 'complete'
-    );
+    ));
     if (!canonical.resolved) {
       return;
     }
     const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
     applyViewState(toProjectViewState(canonical.resolved, project));
     saveCounterRef.current = canonical.resolved.lastSaveId ?? saveCounterRef.current;
-  }, [applyViewState, rebuildRevisionMap]);
+  }, [applyViewState, rebuildRevisionMap, setLegacyWritesBlocked, setV2RecoveryMode]);
 
   const reloadCanonicalStateFromCloud = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
@@ -1067,6 +1249,7 @@ export function useProjectPersistence(options: {
         const message = String((err as Error)?.message || '');
         const isConflict = message.startsWith('conflict:') || message === 'meta-conflict';
         const isOperationConflict = message === 'lock-conflict' || message === 'operation-locked' || message === 'lock-lost';
+        const errorInfo = getPersistErrorInfo(err);
         const stillSameProject = isV2WriteContextCurrent(context);
         if (!stillSameProject) {
           recordProjectFirestoreSaveOk();
@@ -1091,7 +1274,11 @@ export function useProjectPersistence(options: {
           await reloadCanonicalStateFromCloud();
           return;
         }
-        reportPersistFailure(addToastRef.current, label, err);
+        reportPersistFailure(
+          addToastRef.current,
+          errorInfo.step ? `${label} (${errorInfo.step})` : label,
+          err,
+        );
       }
     });
   }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation]);
@@ -1242,10 +1429,14 @@ export function useProjectPersistence(options: {
   // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === 'hidden' && storageModeRef.current === 'legacy') enqueueSave();
+      if (document.visibilityState === 'hidden' && storageModeRef.current === 'legacy') {
+        enqueueSave('visibility-hidden');
+      }
     };
     const onPageHide = () => {
-      if (storageModeRef.current === 'legacy') enqueueSave();
+      if (storageModeRef.current === 'legacy') {
+        enqueueSave('pagehide');
+      }
     };
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('pagehide', onPageHide);
@@ -1266,7 +1457,7 @@ export function useProjectPersistence(options: {
       if (!activeProjectIdRef.current) return;
       if (isFlushingRef.current) return; // don't interfere with active flush
       console.log('[PERSIST] Local durability failed — attempting recovery save...');
-      enqueueSave();
+      enqueueSave('local-durability-recovery');
     }, RECOVERY_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [enqueueSave]);
@@ -1275,7 +1466,19 @@ export function useProjectPersistence(options: {
   const mutateAndSave = useCallback((
     updater: (s: PersistedState) => Partial<PersistedState>,
   ) => {
+    const projectId = activeProjectIdRef.current;
+    const traceId = beginRuntimeTrace('useProjectPersistence.mutateAndSave', projectId, {
+      storageMode: storageModeRef.current,
+      isFlushing: isFlushingRef.current,
+    });
     const changes = updater(latest.current);
+    traceRuntimeEvent({
+      traceId,
+      event: 'mutate:computed-changes',
+      source: 'useProjectPersistence.mutateAndSave',
+      projectId,
+      data: { keys: Object.keys(changes) },
+    });
     // 1. Update latest ref synchronously
     latest.current = { ...latest.current, ...changes };
     // 1b. Monotonic save id — every mutation gets a new id before IDB checkpoint so
@@ -1298,11 +1501,25 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
     if ('fileName' in changes) setFileName(changes.fileName!);
+    const blockReason = getLegacyPersistBlockReason();
+    if (blockReason) {
+      traceRuntimeEvent({
+        traceId,
+        event: 'mutate:legacy-persist-suppressed',
+        source: 'useProjectPersistence.mutateAndSave',
+        projectId,
+        data: { reason: blockReason },
+      });
+      return;
+    }
     // 3. Immediate local durability (crash-safe)
-    pendingLocalPersistRef.current = checkpointToIDB();
+    pendingLocalPersistRef.current = checkpointToIDB(undefined, {
+      traceId,
+      traceSource: 'useProjectPersistence.mutateAndSave',
+    });
     // 4. Queue Firestore + IDB flush (serialized queue; loop coalesces mid-await mutations)
-    enqueueSave();
-  }, [checkpointToIDB, enqueueSave]);
+    enqueueSave('mutate-and-save', traceId);
+  }, [checkpointToIDB, enqueueSave, getLegacyPersistBlockReason]);
 
   const applyLocalChanges = useCallback((
     changes: Partial<PersistedState>,
@@ -1326,16 +1543,16 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
     if ('fileName' in changes) setFileName(changes.fileName!);
-    if (options?.checkpoint && storageModeRef.current !== 'v2') {
+    if (options?.checkpoint && storageModeRef.current !== 'v2' && !getLegacyPersistBlockReason()) {
       pendingV2LocalRef.current = checkpointToIDB(changes);
     }
-  }, [checkpointToIDB]);
+  }, [checkpointToIDB, getLegacyPersistBlockReason]);
 
   // ── applyViewState: batch-set all 14 fields from a ProjectViewState ──
   const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]) => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Group edits')) return;
+    if (!projectId || !base || !ensureV2MutationAllowed('Group edits')) return false;
     queueV2Write('project groups save', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       const changes = buildGroupDocChanges(
@@ -1358,6 +1575,7 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
+    return true;
   }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
   const persistBlockedTokensV2 = useCallback((nextTokens: Set<string>) => {
@@ -1512,14 +1730,31 @@ export function useProjectPersistence(options: {
 
   const setActiveProjectId = useCallback((id: string | null) => {
     activeProjectIdRef.current = id;
+    projectStorageModeResolvedRef.current = Boolean(id);
     setActiveProjectIdState(id);
   }, []);
 
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
+    projectStorageModeResolvedRef.current = false;
+    const loadTraceId = beginRuntimeTrace('useProjectPersistence.loadProject', projectId, {
+      activeProjectId: activeProjectIdRef.current,
+      projectCount: projectList.length,
+    });
     const project = projectList.find(p => p.id === projectId);
     const canonicalCache = await loadCanonicalCacheFromIDB(projectId);
     const idbData = canonicalCache?.payload ?? await loadProjectDataFromIDBOnly(projectId);
+    traceRuntimeEvent({
+      traceId: loadTraceId,
+      event: 'load:idb-stage-finished',
+      source: 'useProjectPersistence.loadProject',
+      projectId,
+      data: {
+        hasCanonicalCache: !!canonicalCache,
+        hasIdbData: !!idbData,
+        activeProjectId: activeProjectIdRef.current,
+      },
+    });
     if (activeProjectIdRef.current !== projectId) {
       projectLoadingRef.current = false;
       return;
@@ -1532,7 +1767,27 @@ export function useProjectPersistence(options: {
       projectId,
       clientIdRef.current,
       async () => idbData ?? loadProjectDataForView(projectId),
-    );
+    ).catch((error) => {
+      traceRuntimeEvent({
+        traceId: loadTraceId,
+        event: 'load:canonical-error',
+        source: 'useProjectPersistence.loadProject',
+        projectId,
+        data: { error: error instanceof Error ? error.message : String(error) },
+      });
+      throw error;
+    });
+    traceRuntimeEvent({
+      traceId: loadTraceId,
+      event: 'load:canonical-resolved',
+      source: 'useProjectPersistence.loadProject',
+      projectId,
+      data: {
+        mode: canonical.mode,
+        hasResolved: !!canonical.resolved,
+        activeProjectId: activeProjectIdRef.current,
+      },
+    });
 
     if (activeProjectIdRef.current !== projectId) {
       projectLoadingRef.current = false;
@@ -1542,28 +1797,37 @@ export function useProjectPersistence(options: {
     if (canonical.mode === 'v2') {
       setStorageMode('v2');
       storageModeRef.current = 'v2';
+      projectStorageModeResolvedRef.current = true;
       applyCanonicalState(canonical);
       if (canonical.resolved) {
         const viewState = toProjectViewState(canonical.resolved, project);
         loadFenceRef.current = countGroupedPages(viewState);
-        v2RecoveryModeRef.current = false;
+        setV2RecoveryMode(false);
         if (canonical.entities.meta) {
           updateCanonicalCache(canonical.resolved, canonical.entities.meta);
         }
       } else {
-        v2RecoveryModeRef.current = true;
+        setV2RecoveryMode(true);
         if (!idbData) {
           applyViewState(createEmptyProjectViewState());
           loadFenceRef.current = 0;
         }
-        addToastRef.current('Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.', 'warning');
+        const recoveryDiagnostics = canonical.diagnostics?.recovery;
+        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
+        addToastRef.current(
+          recoveryBlockedByPermissions
+            ? 'Shared project recovery is blocked by Firestore permissions. Edits are temporarily read-only until the shared rules or deployment are repaired.'
+            : 'Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.',
+          'warning',
+        );
       }
     } else {
       collabMetaRef.current = null;
-      legacyWritesBlockedRef.current = false;
+      setLegacyWritesBlocked(false);
       setStorageMode('legacy');
       storageModeRef.current = 'legacy';
-      v2RecoveryModeRef.current = false;
+      projectStorageModeResolvedRef.current = true;
+      setV2RecoveryMode(false);
       const data = canonical.resolved ?? idbData;
       const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
       applyViewState(viewState);
@@ -1575,6 +1839,13 @@ export function useProjectPersistence(options: {
     }
 
     projectLoadingRef.current = false;
+    traceRuntimeEvent({
+      traceId: loadTraceId,
+      event: 'load:complete',
+      source: 'useProjectPersistence.loadProject',
+      projectId,
+      data: { activeProjectId: activeProjectIdRef.current },
+    });
     return;
     /*
 
@@ -1634,7 +1905,7 @@ export function useProjectPersistence(options: {
 
     projectLoadingRef.current = false;
     */
-  }, [applyCanonicalState, applyViewState, updateCanonicalCache]);
+  }, [applyCanonicalState, applyViewState, setLegacyWritesBlocked, setStorageMode, setV2RecoveryMode, updateCanonicalCache]);
 
   const clearProject = useCallback(() => {
     // Cancel any pending flushes so stale mutations from the previous project
@@ -1660,8 +1931,9 @@ export function useProjectPersistence(options: {
     tokenMergeRuleDocsRef.current = [];
     labelSectionDocsRef.current = [];
     activityLogDocsRef.current = [];
-    legacyWritesBlockedRef.current = false;
-    v2RecoveryModeRef.current = false;
+    setLegacyWritesBlocked(false);
+    setV2RecoveryMode(false);
+    projectStorageModeResolvedRef.current = false;
     lockHeartbeatLostRef.current = false;
     lastV2WriteErrorRef.current = null;
     lastV2LocalErrorRef.current = null;
@@ -1676,7 +1948,7 @@ export function useProjectPersistence(options: {
     setActiveOperation(null);
     activeOperationRef.current = null;
     applyViewState(createEmptyProjectViewState());
-  }, [applyViewState]);
+  }, [applyViewState, setLegacyWritesBlocked, setStorageMode, setV2RecoveryMode]);
 
   const syncFileNameLocal = useCallback((name: string | null) => {
     latest.current = { ...latest.current, fileName: name };
@@ -1700,6 +1972,22 @@ export function useProjectPersistence(options: {
       collection(db, 'projects', pid, 'chunks'),
       (snap) => {
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
+        const traceId = activePersistTraceRef.current;
+        if (traceId) {
+          traceRuntimeEvent({
+            traceId,
+            event: 'snapshot:received',
+            source: 'useProjectPersistence.projectChunksSnapshot',
+            projectId: pid,
+            data: {
+              fromCache: Boolean(snap.metadata?.fromCache),
+              hasPendingWrites: Boolean(snap.metadata?.hasPendingWrites),
+              docCount: snap.docs.length,
+              isProjectLoading: projectLoadingRef.current,
+              isFlushing: isFlushingRef.current,
+            },
+          });
+        }
 
         const metaDoc = snap.docs.find((d) => (d.data() as any)?.type === 'meta');
         const meta = metaDoc ? (metaDoc.data() as any) : null;
@@ -1722,13 +2010,29 @@ export function useProjectPersistence(options: {
             typeof meta?.approvedGroupCount === 'number' ? meta.approvedGroupCount : null,
           incomingDataGroupedCount: data?.groupedClusters?.length ?? 0,
           incomingDataApprovedCount: data?.approvedGroups?.length ?? 0,
+          incomingResultsCount: data?.results?.length ?? 0,
+          incomingClusterCount: data?.clusterSummary?.length ?? 0,
           loadFence: loadFenceRef.current,
           incomingGroupedPageMass: data ? groupedPageMass(data) : 0,
           incomingSaveId: data?.lastSaveId ?? 0,
           localSaveId: saveCounterRef.current,
+          incomingFromCache: Boolean(snap.metadata?.fromCache),
         });
 
         if (guardResult.action === 'skip') {
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'snapshot:guard-skip',
+              source: 'useProjectPersistence.projectChunksSnapshot',
+              projectId: pid,
+              data: {
+                guard: guardResult.guard,
+                fromCache: Boolean(snap.metadata?.fromCache),
+                hasPendingWrites: Boolean(snap.metadata?.hasPendingWrites),
+              },
+            });
+          }
           if (guardResult.guard.startsWith('6:') || guardResult.guard.startsWith('3:') || guardResult.guard.startsWith('5:')) {
             console.warn('[PERSIST] Snapshot rejected by guard:', guardResult.guard);
           }
@@ -1745,6 +2049,20 @@ export function useProjectPersistence(options: {
         applyViewState(
           data ? toProjectViewState(data, project) : createEmptyProjectViewState()
         );
+        if (traceId) {
+          traceRuntimeEvent({
+            traceId,
+            event: 'snapshot:applied',
+            source: 'useProjectPersistence.projectChunksSnapshot',
+            projectId: pid,
+            data: {
+              incomingSaveId: data?.lastSaveId ?? 0,
+              localSaveId: saveCounterRef.current,
+              incomingGroupedCount: data?.groupedClusters?.length ?? 0,
+              incomingApprovedCount: data?.approvedGroups?.length ?? 0,
+            },
+          });
+        }
         // Advance saveCounterRef so subsequent local mutations produce IDs
         // higher than the remote snapshot. Without this, a local edit after a
         // remote apply could have a LOWER saveId than Firestore, causing
@@ -1978,17 +2296,17 @@ export function useProjectPersistence(options: {
         const nextMeta = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
         const previousMeta = collabMetaRef.current;
         collabMetaRef.current = nextMeta;
-        legacyWritesBlockedRef.current = Boolean(
+        setLegacyWritesBlocked(Boolean(
           nextMeta &&
           nextMeta.readMode === 'v2' &&
           (nextMeta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
-        );
+        ));
         if (!nextMeta || nextMeta.readMode !== 'v2') {
-          v2RecoveryModeRef.current = false;
+          setV2RecoveryMode(false);
           return;
         }
         if (legacyWritesBlockedRef.current) {
-          v2RecoveryModeRef.current = false;
+          setV2RecoveryMode(false);
           return;
         }
         if (
@@ -2006,28 +2324,47 @@ export function useProjectPersistence(options: {
         epochLoadAbortRef.current?.abort();
         const abortController = new AbortController();
         epochLoadAbortRef.current = abortController;
-        v2RecoveryModeRef.current = true;
-        void loadCanonicalEpoch(pid, nextMeta).then((canonical) => {
+        setV2RecoveryMode(true);
+        void (async () => {
+          const canonical = (
+            await loadCanonicalEpoch(pid, nextMeta)
+          ) ?? await loadCanonicalProjectState(
+            pid,
+            clientIdRef.current,
+            () => loadProjectDataForView(pid),
+          );
           if (
             cancelled ||
             abortController.signal.aborted ||
             generation !== epochLoadGenerationRef.current ||
             activeProjectIdRef.current !== pid ||
-            !canonical ||
-            !canonical.resolved
+            !canonical
           ) {
             return;
           }
+          clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
           applyCanonicalState(canonical);
           if (canonical.entities.meta && canonical.resolved) {
             updateCanonicalCache(canonical.resolved, canonical.entities.meta);
           }
-          attachEpochListeners(nextMeta.datasetEpoch, nextMeta);
-        }).catch((err) => {
+          const resolvedMeta = canonical.entities.meta;
+          if (
+            resolvedMeta &&
+            canonical.resolved &&
+            resolvedMeta.readMode === 'v2' &&
+            resolvedMeta.commitState === 'ready' &&
+            resolvedMeta.migrationState === 'complete'
+          ) {
+            attachEpochListeners(resolvedMeta.datasetEpoch, resolvedMeta);
+          }
+        })().catch((err) => {
           if (abortController.signal.aborted) {
             return;
           }
           reportPersistFailure(addToastRef.current, 'project collab meta listener', err);
+          void reloadCanonicalStateFromCloud().catch((reloadErr) => {
+            reportPersistFailure(addToastRef.current, 'project collab meta listener recovery reload', reloadErr);
+          });
         });
       },
       (err) => {
@@ -2068,24 +2405,23 @@ export function useProjectPersistence(options: {
       operationUnsub();
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
-  }, [activeProjectId, applyCanonicalState, recomposeFromCanonicalRefs, storageMode, updateCanonicalCache, v2DocKey]);
+  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setLegacyWritesBlocked, setV2RecoveryMode, storageMode, updateCanonicalCache, v2DocKey]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
   const addGroupsAndRemovePages = useCallback((newGroups: GroupedCluster[], removedTokens: Set<string>) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return;
       const s = latest.current;
       const nextGrouped = [...s.groupedClusters, ...newGroups];
       const nextClusters = s.clusterSummary?.filter(c => !removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
+      if (!persistGroupsV2(nextGrouped, s.approvedGroups)) return false;
       applyLocalChanges({
         groupedClusters: nextGrouped,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, s.approvedGroups);
-      return;
+      return true;
     }
     mutateAndSave(s => {
       const nextGrouped = [...s.groupedClusters, ...newGroups];
@@ -2093,22 +2429,22 @@ export function useProjectPersistence(options: {
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
       return { groupedClusters: nextGrouped, clusterSummary: nextClusters, results: nextResults };
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return true;
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const mergeGroupsByName = useCallback((opts: MergeGroupsByNameOpts) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return;
       const s = latest.current;
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
       const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
+      if (!persistGroupsV2(merged, s.approvedGroups)) return false;
       applyLocalChanges({
         groupedClusters: merged,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(merged, s.approvedGroups);
-      return;
+      return true;
     }
     mutateAndSave(s => {
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
@@ -2116,21 +2452,21 @@ export function useProjectPersistence(options: {
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
       return { groupedClusters: merged, clusterSummary: nextClusters, results: nextResults };
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return true;
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const updateGroups = useCallback((updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return;
       const s = latest.current;
       const nextGrouped = typeof updaterOrValue === 'function'
         ? updaterOrValue(s.groupedClusters)
         : updaterOrValue;
       const nextApproved = approvedOverride !== undefined ? approvedOverride : s.approvedGroups;
+      if (!persistGroupsV2(nextGrouped, nextApproved)) return;
       applyLocalChanges({
         groupedClusters: nextGrouped,
         approvedGroups: nextApproved,
       }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, nextApproved);
       return;
     }
     mutateAndSave(s => {
@@ -2141,39 +2477,37 @@ export function useProjectPersistence(options: {
       if (approvedOverride !== undefined) changes.approvedGroups = approvedOverride;
       return changes;
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const approveGroup = useCallback((groupName: string): GroupedCluster | null => {
+  const approveGroup = useCallback((groupName: string): { applied: boolean; group: GroupedCluster | null } => {
     const s = latest.current;
     const group = s.groupedClusters.find(g => g.groupName === groupName);
-    if (!group) return null;
+    if (!group) return { applied: false, group: null };
     const nextGrouped = s.groupedClusters.filter(g => g.groupName !== groupName);
     const nextApproved = [...s.approvedGroups, group];
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return group;
+      if (!persistGroupsV2(nextGrouped, nextApproved)) return { applied: false, group };
       applyLocalChanges({ groupedClusters: nextGrouped, approvedGroups: nextApproved }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, nextApproved);
-      return group;
+      return { applied: true, group };
     }
     mutateAndSave(() => ({ groupedClusters: nextGrouped, approvedGroups: nextApproved }));
-    return group;
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, group };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const unapproveGroup = useCallback((groupName: string): GroupedCluster | null => {
+  const unapproveGroup = useCallback((groupName: string): { applied: boolean; group: GroupedCluster | null } => {
     const s = latest.current;
     const group = s.approvedGroups.find(g => g.groupName === groupName);
-    if (!group) return null;
+    if (!group) return { applied: false, group: null };
     const nextApproved = s.approvedGroups.filter(g => g.groupName !== groupName);
     const nextGrouped = [...s.groupedClusters, group];
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return group;
+      if (!persistGroupsV2(nextGrouped, nextApproved)) return { applied: false, group };
       applyLocalChanges({ approvedGroups: nextApproved, groupedClusters: nextGrouped }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, nextApproved);
-      return group;
+      return { applied: true, group };
     }
     mutateAndSave(() => ({ approvedGroups: nextApproved, groupedClusters: nextGrouped }));
-    return group;
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, group };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const removeFromApproved = useCallback((
     groupIds: Set<string>,
@@ -2237,8 +2571,8 @@ export function useProjectPersistence(options: {
     }
 
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) {
-        return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+      if (!persistGroupsV2(nextGrouped, newApproved)) {
+        return { applied: false, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
       }
       applyLocalChanges({
         approvedGroups: newApproved,
@@ -2246,8 +2580,7 @@ export function useProjectPersistence(options: {
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, newApproved);
-      return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+      return { applied: true, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
     }
 
     mutateAndSave(() => ({
@@ -2257,8 +2590,8 @@ export function useProjectPersistence(options: {
       results: nextResults,
     }));
 
-    return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const ungroupPages = useCallback((
     groupIds: Set<string>,
@@ -2317,16 +2650,15 @@ export function useProjectPersistence(options: {
     }
 
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) {
-        return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+      if (!persistGroupsV2(newGrouped, s.approvedGroups)) {
+        return { applied: false, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
       }
       applyLocalChanges({
         groupedClusters: newGrouped,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(newGrouped, s.approvedGroups);
-      return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+      return { applied: true, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
     }
 
     mutateAndSave(() => ({
@@ -2335,8 +2667,8 @@ export function useProjectPersistence(options: {
       results: nextResults,
     }));
 
-    return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const blockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
@@ -2483,14 +2815,20 @@ export function useProjectPersistence(options: {
     latest.current = { ...latest.current, autoGroupSuggestions: suggestions };
     setAutoGroupSuggestions(suggestions);
     saveCounterRef.current += 1;
+    const traceId = beginRuntimeTrace('useProjectPersistence.updateSuggestions', activeProjectIdRef.current, {
+      suggestionCount: suggestions.length,
+    });
     // Persist immediately to local cache for crash resilience.
-    pendingLocalPersistRef.current = checkpointToIDB({ autoGroupSuggestions: suggestions });
+    pendingLocalPersistRef.current = checkpointToIDB(
+      { autoGroupSuggestions: suggestions },
+      { traceId, traceSource: 'useProjectPersistence.updateSuggestions' },
+    );
 
     // Debounce the actual save
     if (suggestionTimerRef.current) clearTimeout(suggestionTimerRef.current);
     suggestionTimerRef.current = setTimeout(() => {
       suggestionTimerRef.current = null;
-      enqueueSave();
+      enqueueSave('suggestions-debounce', traceId);
     }, 2000);
   }, [applyViewState, buildPayload, checkpointToIDB, enqueueSave, ensureV2MutationAllowed, persistCanonicalPayloadV2]);
 
@@ -2535,7 +2873,9 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in data) changes.blockedTokens = new Set<string>(data.blockedTokens!);
     if ('blockedKeywords' in data) changes.blockedKeywords = data.blockedKeywords!;
     if ('labelSections' in data) changes.labelSections = data.labelSections!;
-    const metadataWriteAllowed = storageModeRef.current !== 'v2' || ensureV2MutationAllowed('Project metadata edits');
+    const metadataWriteAllowed = storageModeRef.current === 'v2'
+      ? ensureV2MutationAllowed('Project metadata edits')
+      : !getLegacyPersistBlockReason();
     if ('fileName' in data) {
       changes.fileName = data.fileName!;
       // Also update project metadata
@@ -2562,7 +2902,7 @@ export function useProjectPersistence(options: {
       return;
     }
     mutateAndSave(() => changes);
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
+  }, [applyViewState, buildPayload, ensureV2MutationAllowed, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
   const isProjectBusy = Boolean(
@@ -2570,6 +2910,11 @@ export function useProjectPersistence(options: {
     activeOperation.ownerId !== clientIdRef.current &&
     activeOperation.ownerClientId !== clientIdRef.current &&
     Date.parse(activeOperation.expiresAt || '0') > Date.now(),
+  );
+  const isSharedProjectReadOnly = storageMode === 'v2' && (
+    legacyWritesBlocked ||
+    v2RecoveryMode ||
+    isProjectBusy
   );
 
   const canUseExternalSetter = useCallback((label: string): boolean => {
@@ -2662,6 +3007,7 @@ export function useProjectPersistence(options: {
     storageMode,
     activeOperation,
     isProjectBusy,
+    isSharedProjectReadOnly,
     runWithExclusiveOperation,
 
     // Atomic mutations

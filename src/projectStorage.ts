@@ -204,6 +204,18 @@ let cachedDb: IDBDatabase | null = null;
 let dbOpenPromise: Promise<IDBDatabase> | null = null;
 const IDB_OPEN_TIMEOUT_MS = 8_000;
 const IDB_TX_TIMEOUT_MS = 12_000;
+let idbWriteQueue: Promise<void> = Promise.resolve();
+
+/**
+ * IndexedDB serializes readwrite transactions per object store anyway.
+ * Queue them explicitly so a later write does not spend most of its timeout
+ * budget merely waiting behind earlier writes in the browser's internal queue.
+ */
+function queueIDBWrite<T>(task: () => Promise<T>): Promise<T> {
+  const run = idbWriteQueue.then(task, task);
+  idbWriteQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
 
 function invalidateCachedDb(): void {
   try {
@@ -265,7 +277,11 @@ const getIDB = (): Promise<IDBDatabase> => {
 };
 
 /** For tests only — reset the cached IDB connection. */
-export const _resetIDBCache = () => { cachedDb = null; dbOpenPromise = null; };
+export const _resetIDBCache = () => {
+  cachedDb = null;
+  dbOpenPromise = null;
+  idbWriteQueue = Promise.resolve();
+};
 
 const IDB_MAX_RETRIES = 3;
 const IDB_BASE_DELAY_MS = 200;
@@ -319,35 +335,37 @@ export const saveToIDB = async (projectId: string, data: unknown) => {
     await saveQaLocalCache(projectId, data);
     return;
   }
-  // IDB uses the browser's structured-clone algorithm internally — no need
-  // for JSON round-trip.  toIDBRecord just normalises the shape.
-  const record = toIDBRecord(projectId, data);
+  return queueIDBWrite(async () => {
+    // IDB uses the browser's structured-clone algorithm internally — no need
+    // for JSON round-trip. toIDBRecord just normalises the shape.
+    const record = toIDBRecord(projectId, data);
 
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= IDB_MAX_RETRIES; attempt++) {
-    try {
-      const dbInstance = await getIDB();
-      const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put(record);
-      await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, `IndexedDB write (${projectId})`);
-      return; // success
-    } catch (error) {
-      lastError = error;
-      // If connection went bad, clear cache so next attempt gets a fresh one
-      if ((error as { name?: string })?.name === 'InvalidStateError') {
-        invalidateCachedDb();
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= IDB_MAX_RETRIES; attempt++) {
+      try {
+        const dbInstance = await getIDB();
+        const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(record);
+        await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, `IndexedDB write (${projectId})`);
+        return;
+      } catch (error) {
+        lastError = error;
+        // If connection went bad, clear cache so next attempt gets a fresh one
+        if ((error as { name?: string })?.name === 'InvalidStateError') {
+          invalidateCachedDb();
+        }
+        if (attempt < IDB_MAX_RETRIES && isTransientIDBError(error)) {
+          const delay = IDB_BASE_DELAY_MS * Math.pow(2, attempt);
+          console.warn(`[IDB] Save attempt ${attempt + 1} failed (${(error as Error)?.name}), retrying in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        break;
       }
-      if (attempt < IDB_MAX_RETRIES && isTransientIDBError(error)) {
-        const delay = IDB_BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(`[IDB] Save attempt ${attempt + 1} failed (${(error as Error)?.name}), retrying in ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      break; // non-transient error or out of retries
     }
-  }
-  console.error('IndexedDB save error (after retries):', lastError);
-  throw lastError;
+    console.error('IndexedDB save error (after retries):', lastError);
+    throw lastError;
+  });
 };
 
 export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
@@ -382,10 +400,12 @@ export const deleteFromIDB = async (projectId: string) => {
       await deleteQaLocalCache(projectId);
       return;
     }
-    const dbInstance = await getIDB();
-    const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).delete(projectId);
-    await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, `IndexedDB delete (${projectId})`);
+    await queueIDBWrite(async () => {
+      const dbInstance = await getIDB();
+      const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(projectId);
+      await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, `IndexedDB delete (${projectId})`);
+    });
   } catch (error) {
     console.error('IndexedDB delete error:', error);
   }
@@ -533,15 +553,17 @@ export const saveAppPrefsToFirestore = async (activeId: string | null, clusters:
 
 export const saveAppPrefsToIDB = async (activeId: string | null, clusters: any[]) => {
   try {
-    const dbInstance = await getIDB();
-    const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).put({
-      projectId: '__app_prefs__',
-      activeProjectId: activeId,
-      savedClusters: clusters,
-      updatedAt: new Date().toISOString(),
+    await queueIDBWrite(async () => {
+      const dbInstance = await getIDB();
+      const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put({
+        projectId: '__app_prefs__',
+        activeProjectId: activeId,
+        savedClusters: clusters,
+        updatedAt: new Date().toISOString(),
+      });
+      await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, 'IndexedDB write (__app_prefs__)');
     });
-    await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, 'IndexedDB write (__app_prefs__)');
   } catch (error) {
     console.warn('IDB app prefs save error:', error);
   }
