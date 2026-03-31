@@ -33,6 +33,9 @@
 - Legacy projects lazily migrate to the V2 collaboration model on open, V2 readers prefer entity overlays over legacy blob fields, and permanent delete clears both legacy chunk docs and V2 collaboration docs.
 - Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
 - Grouping and related group actions now only clear selection/input and show success toasts after the persistence boundary actually accepts the mutation; if shared state is read-only/recovering, the action preserves the current selection and surfaces only the blocking warning.
+- Shared V2 editability now distinguishes **background canonical reload** from **true write-unsafe state**: transient `collab/meta` or epoch reloads no longer blanket-freeze routine grouping when the last known canonical state is still safe, while schema/rules/canonical-integrity failures still fail closed.
+- Routine Group edits and bulk Group operations now use separate gating semantics: manual grouping/approve/ungroup/block actions follow routine write safety, while filtered Auto Group, Auto Group panel runs, keyword rating, and token-merge cascades stay on the bulk-operation lock path.
+- Same-browser bulk-operation spam is now rejected before a second project lock attempt starts, so repeated clicks cannot start overlapping shared bulk jobs from one client while the first lock is still active.
 - Group row selection now uses the maintained extracted row components for Pages, Grouped, and Approved tables, so checkbox selection consistently drives the real grouping handlers instead of drifting behind stale inline callback signatures in `App.tsx`.
 - Project open now keeps bootstrap read-only when collab meta is missing a usable V2 base commit, so local project loads fall back to the legacy payload immediately instead of attempting recovery writes to `project_operations/current` / `collab/meta` and tripping Firestore permission errors during refresh/open.
 
@@ -1020,3 +1023,11 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 - `H2 Body` source rebuilding now still uses remote `Pages` rows as primary data, but it can selectively reuse local `Page Guide` slot output when remote rows temporarily arrive without generated guide payloads during sync races.
 - Local fallback is only accepted when the local and remote H2 lists normalize to the exact same ordered signature, preventing stale/mismatched local guides from being copied into current H2 rows.
 - Added regression coverage for all three paths: remote wins when complete, local fallback fills missing guide slots when signatures match, and fallback is rejected when H2 signatures diverge.
+
+### 2026-03-31: Shared Group Sync Hardening
+
+- Shared Group persistence now distinguishes background canonical reload from true write-unsafe state, so routine grouping stays available during benign `collab/meta` churn while true unsafe states still fail closed.
+- Group UI gating now separates routine edits from bulk edits: manual grouping and row actions use routine blocking, while imports, keyword rating, filtered auto-group, Auto Group panel bulk actions, and token-merge bulk flows honor stricter bulk blocking.
+- Filtered Auto Group now keeps only the latest pending queued run instead of stacking stale jobs behind an in-flight run, which prevents spam-click bursts from replaying outdated filter intents.
+- Bulk Auto Group actions now reject overlapping same-client runs cleanly instead of silently racing within one browser tab.
+- Failed non-conflict V2 entity writes now roll back their optimistic overlays and reload canonical state, preventing local-only ghost state after a rejected shared write.

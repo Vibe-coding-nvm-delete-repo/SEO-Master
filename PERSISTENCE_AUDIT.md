@@ -1,8 +1,15 @@
 # Persistence Audit
 
-Last updated: `2026-03-30`
+Last updated: `2026-03-31`
 
 This file summarizes the current persistence status of the repo.
+
+Use it for:
+- current persistence-state summary and remaining limits
+- what changed in the V2 hardening pass
+- what is still unresolved specifically in persistence/collaboration
+
+Do not use it as the broader repo-wide refactor ranking. For that, use [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md).
 
 It is intentionally blunt:
 - what was wrong
@@ -40,7 +47,7 @@ The current shared-project model uses:
 - acked-only canonical V2 cache writes
 - compare-and-set revisioned writes for shared mutable entities
 
-This is the current intended source of truth for shared-project persistence, with the remaining limits listed below.
+This is the current persistence status snapshot for shared-project persistence, with the remaining limits listed below.
 
 ## Known Open Blockers
 
@@ -48,6 +55,7 @@ This is the current intended source of truth for shared-project persistence, wit
 - project operation lock timing still uses client-authored timestamps
 - old commits and old epoch docs may remain until cleanup/retention is added
 - Firestore rules are structurally protective, not fully collaborator-authenticated
+- Firestore rules are not yet covered by a dedicated emulator-backed rules test suite
 
 ---
 
@@ -200,6 +208,9 @@ Coverage added for this work includes:
 - rejection before optimistic local apply under a foreign lock
 - acked-only V2 cache writes
 - required-client-schema cutover blocking
+
+### Validation gap still open
+- Firestore rules enforcement is still validated structurally and manually, not by a dedicated emulator/rules-unit suite
 
 ---
 

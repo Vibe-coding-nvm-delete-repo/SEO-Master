@@ -9,6 +9,7 @@ interface GroupAutoMergePanelProps {
   recommendations: GroupMergeRecommendation[];
   recommendationsAreStale: boolean;
   job: GroupAutoMergeJobState;
+  isBulkSharedEditBlocked?: boolean;
   onRun: () => Promise<void> | void;
   onCancel: () => void;
   onDismiss: (recommendationIds: Iterable<string>) => void;
@@ -101,6 +102,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
   recommendations,
   recommendationsAreStale,
   job,
+  isBulkSharedEditBlocked = false,
   onRun,
   onCancel,
   onDismiss,
@@ -194,6 +196,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
   const running = job.phase === 'embedding' || job.phase === 'comparing' || job.phase === 'ranking';
   const showProgress = running || job.phase === 'complete' || job.phase === 'error';
   const allSelected = pendingRecommendations.length > 0 && pendingRecommendations.every((r) => selectedIds.has(r.id));
+  const isActionBlocked = isBulkSharedEditBlocked || recommendationsAreStale;
 
   return (
     <div className="flex flex-col h-full">
@@ -207,6 +210,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
             <button
               type="button"
               onClick={() => void onRun()}
+              disabled={isBulkSharedEditBlocked}
               className="px-3.5 py-1.5 text-xs font-medium text-white bg-sky-600 rounded-lg hover:bg-sky-700 transition-colors flex items-center gap-1.5 shadow-sm"
             >
               <Sparkles className="w-3.5 h-3.5" />
@@ -315,7 +319,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                 <button
                   type="button"
                   onClick={() => void handleApply([...selectedIds])}
-                  disabled={selectedIds.size === 0 || recommendationsAreStale}
+                  disabled={selectedIds.size === 0 || isActionBlocked}
                   className="px-2.5 py-1 text-[11px] font-medium text-white bg-emerald-600 rounded-md hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                 >
                   <CheckCircle2 className="w-3 h-3" />
@@ -324,7 +328,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                 <button
                   type="button"
                   onClick={() => handleDismiss([...selectedIds])}
-                  disabled={selectedIds.size === 0}
+                  disabled={selectedIds.size === 0 || isBulkSharedEditBlocked}
                   className="px-2.5 py-1 text-[11px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded-md hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                 >
                   <X className="w-3 h-3" />
@@ -350,7 +354,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                           setSelectedIds(new Set());
                         }
                       }}
-                      disabled={recommendationsAreStale}
+                      disabled={isActionBlocked}
                       className="rounded border-zinc-300 text-sky-600 focus:ring-sky-500"
                     />
                   </th>
@@ -399,7 +403,7 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                                   return next;
                                 });
                               }}
-                              disabled={recommendationsAreStale}
+                              disabled={isActionBlocked}
                               className="rounded border-zinc-300 text-sky-600 focus:ring-sky-500"
                             />
                           </div>
@@ -469,7 +473,8 @@ const GroupAutoMergePanel: React.FC<GroupAutoMergePanelProps> = React.memo(({
                             <button
                               type="button"
                               onClick={() => handleDismiss([rec.id])}
-                              className="px-2.5 py-1 text-[11px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded-md hover:bg-zinc-50 transition-colors"
+                              disabled={isBulkSharedEditBlocked}
+                              className="px-2.5 py-1 text-[11px] font-medium text-zinc-600 bg-white border border-zinc-200 rounded-md hover:bg-zinc-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Dismiss
                             </button>

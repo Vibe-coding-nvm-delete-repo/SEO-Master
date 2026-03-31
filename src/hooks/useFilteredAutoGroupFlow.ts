@@ -6,6 +6,7 @@ import { OPENROUTER_REQUEST_TIMEOUT_MS, runWithOpenRouterTimeout } from '../open
 import { getFilteredAutoGroupSettingsStatus } from '../filteredAutoGroupSettingsStatus';
 import { buildGroupedClusterFromPages, mergeGroupedClustersByName } from '../groupedClusterUtils';
 import { parseFilteredAutoGroupResponse } from '../autoGroupResponseParser';
+import { enqueueLatestFilteredAutoGroupJob } from '../filteredAutoGroupQueue';
 import type { GroupReviewSettingsData, GroupReviewSettingsRef } from '../GroupReviewSettings';
 import type { ClusterSummary, GroupedCluster } from '../types';
 
@@ -25,6 +26,7 @@ export interface FilteredAutoGroupRunStats {
 
 interface FilteredAutoGroupJob {
   id: string;
+  signature: string;
   pages: ClusterSummary[];
   filterSummary: string;
   settings: GroupReviewSettingsData;
@@ -36,7 +38,7 @@ interface UseFilteredAutoGroupFlowParams {
   groupReviewSettingsHydrated: boolean;
   groupReviewSettingsSnapshot: GroupReviewSettingsData | null;
   groupReviewSettingsRef: MutableRefObject<GroupReviewSettingsRef | null>;
-  isSharedProjectReadOnly: boolean;
+  isBulkSharedEditBlocked: boolean;
   selectedTokens: Set<string>;
   excludedLabels: Set<string>;
   debouncedSearchQuery: string;
@@ -65,6 +67,7 @@ interface UseFilteredAutoGroupFlowParams {
   startTransition: TransitionStartFunction;
   logAndToast: (action: any, details: string, count: number, toastMsg: string, toastType: any) => void;
   recordGroupingEvent: (pagesInBatch: number) => void;
+  runWithExclusiveOperation?: <T>(type: 'auto-group', task: () => Promise<T>) => Promise<T | null>;
 }
 
 export function useFilteredAutoGroupFlow({
@@ -72,7 +75,7 @@ export function useFilteredAutoGroupFlow({
   groupReviewSettingsHydrated,
   groupReviewSettingsSnapshot,
   groupReviewSettingsRef,
-  isSharedProjectReadOnly,
+  isBulkSharedEditBlocked,
   selectedTokens,
   excludedLabels,
   debouncedSearchQuery,
@@ -96,6 +99,7 @@ export function useFilteredAutoGroupFlow({
   startTransition,
   logAndToast,
   recordGroupingEvent,
+  runWithExclusiveOperation,
 }: UseFilteredAutoGroupFlowParams) {
   const filteredAutoGroupAbortRef = useRef<AbortController | null>(null);
   const activeFilteredAutoGroupJobRef = useRef<FilteredAutoGroupJob | null>(null);
@@ -151,7 +155,7 @@ export function useFilteredAutoGroupFlow({
   ]);
 
   const isFilteredAutoGroupFilterActive = filteredAutoGroupFilterSummary !== 'No additional filters active';
-  const canRunFilteredAutoGroup = !isSharedProjectReadOnly && isFilteredAutoGroupFilterActive && filteredClusters.length >= 1;
+  const canRunFilteredAutoGroup = !isBulkSharedEditBlocked && isFilteredAutoGroupFilterActive && filteredClusters.length >= 1;
   const filteredAutoGroupSettingsStatus = useMemo(
     () => getFilteredAutoGroupSettingsStatus(groupReviewSettingsHydrated, groupReviewSettingsSnapshot),
     [groupReviewSettingsHydrated, groupReviewSettingsSnapshot],
@@ -316,7 +320,7 @@ FAILURE CONDITIONS TO AVOID:
         : 0;
 
       const groupsApplied =
-        generatedGroups.length > 0
+        !isBulkSharedEditBlocked && generatedGroups.length > 0
           ? mergeGroupsByName({
               incoming: generatedGroups,
               removedTokens: groupedTokens,
@@ -404,10 +408,18 @@ FAILURE CONDITIONS TO AVOID:
       filteredAutoGroupAbortRef.current = null;
       activeFilteredAutoGroupJobRef.current = null;
     }
-  }, [buildFilteredAutoGroupPrompt, groupReviewSettingsRef, logAndToast, mergeGroupsByName, recordGroupingEvent, setCurrentPage, setSelectedClusters, startTransition]);
+  }, [buildFilteredAutoGroupPrompt, groupReviewSettingsRef, isBulkSharedEditBlocked, logAndToast, mergeGroupsByName, recordGroupingEvent, setCurrentPage, setSelectedClusters, startTransition]);
+
+  const runLockedFilteredAutoGroupJob = useCallback(async (job: FilteredAutoGroupJob) => {
+    if (runWithExclusiveOperation) {
+      await runWithExclusiveOperation('auto-group', () => runFilteredAutoGroupJob(job));
+      return;
+    }
+    await runFilteredAutoGroupJob(job);
+  }, [runFilteredAutoGroupJob, runWithExclusiveOperation]);
 
   const handleRunFilteredAutoGroup = useCallback(() => {
-    if (isSharedProjectReadOnly) {
+    if (isBulkSharedEditBlocked) {
       logAndToast(
         'auto-group',
         'Filtered Auto Group blocked while shared edits are read-only',
@@ -463,6 +475,13 @@ FAILURE CONDITIONS TO AVOID:
     const pagesToReview = [...filteredClusters];
     const job: FilteredAutoGroupJob = {
       id: `filtered-auto-group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      signature: JSON.stringify({
+        tokens: pagesToReview.map((page) => page.tokens).sort(),
+        filterSummary: filteredAutoGroupFilterSummary,
+        model: settingsData.selectedModel,
+        temperature: settingsData.temperature,
+        prompt: settingsData.autoGroupPrompt,
+      }),
       pages: pagesToReview,
       filterSummary: filteredAutoGroupFilterSummary,
       settings: { ...settingsData },
@@ -476,18 +495,18 @@ FAILURE CONDITIONS TO AVOID:
     });
 
     if (isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0) {
-      setFilteredAutoGroupQueue((prev) => [...prev, job]);
+      setFilteredAutoGroupQueue((prev) => enqueueLatestFilteredAutoGroupJob(prev, job));
       logAndToast(
         'auto-group',
         `Queued Auto Group job for ${pagesToReview.length} pages`,
         pagesToReview.length,
-        `Auto Group queue now has ${filteredAutoGroupQueue.length + 1} waiting job(s)`,
+        'Auto Group will run the latest pending filtered job after the current run finishes.',
         'info',
       );
       return;
     }
 
-    void runFilteredAutoGroupJob(job);
+    void runLockedFilteredAutoGroupJob(job);
   }, [
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue.length,
@@ -496,9 +515,9 @@ FAILURE CONDITIONS TO AVOID:
     groupReviewSettingsRef,
     isFilteredAutoGroupFilterActive,
     isRunningFilteredAutoGroup,
-    isSharedProjectReadOnly,
+    isBulkSharedEditBlocked,
     logAndToast,
-    runFilteredAutoGroupJob,
+    runLockedFilteredAutoGroupJob,
   ]);
 
   const handleStopFilteredAutoGroup = useCallback(() => {
@@ -508,11 +527,29 @@ FAILURE CONDITIONS TO AVOID:
   useEffect(() => {
     if (isRunningFilteredAutoGroup) return;
     if (activeFilteredAutoGroupJobRef.current) return;
+    if (isBulkSharedEditBlocked) {
+      if (filteredAutoGroupQueue.length > 0) {
+        setPendingFilteredAutoGroupTokens((prev) => {
+          const next = new Set(prev);
+          for (const queuedJob of filteredAutoGroupQueue) {
+            for (const page of queuedJob.pages) next.delete(page.tokens);
+          }
+          return next;
+        });
+        setFilteredAutoGroupQueue([]);
+      }
+      return;
+    }
     if (filteredAutoGroupQueue.length === 0) return;
     const [nextJob, ...rest] = filteredAutoGroupQueue;
     setFilteredAutoGroupQueue(rest);
-    void runFilteredAutoGroupJob(nextJob);
-  }, [filteredAutoGroupQueue, isRunningFilteredAutoGroup, runFilteredAutoGroupJob]);
+    void runLockedFilteredAutoGroupJob(nextJob);
+  }, [filteredAutoGroupQueue, isBulkSharedEditBlocked, isRunningFilteredAutoGroup, runLockedFilteredAutoGroupJob, setPendingFilteredAutoGroupTokens]);
+
+  useEffect(() => {
+    if (!isBulkSharedEditBlocked) return;
+    filteredAutoGroupAbortRef.current?.abort();
+  }, [isBulkSharedEditBlocked]);
 
   useEffect(() => () => {
     filteredAutoGroupAbortRef.current?.abort();

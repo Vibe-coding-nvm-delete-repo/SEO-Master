@@ -2,6 +2,16 @@
 
 `KWG` is the only approved source repo for the Firebase site `new-final-8edfc`.
 
+## Documentation Map
+
+- [`docs/group-project-flow.md`](./docs/group-project-flow.md) — visual Group workspace flow, shared sync path, and collaboration guarantees
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — system shape and storage model
+- [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) — shared-project persistence contract
+- [`PERSISTENCE_AUDIT.md`](./PERSISTENCE_AUDIT.md) — current persistence-state summary and remaining limits
+- [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md) — latest repo-wide refactor analysis and importance scoring
+- [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) — execution tracker for refactor work
+- [`FIXES.md`](./FIXES.md) — tactical bug and follow-up tracker
+
 ## Local Development
 
 1. Install dependencies with `npm run setup`

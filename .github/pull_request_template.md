@@ -11,7 +11,7 @@
 
 ## Checklist
 - [ ] `npm run lint` passes (TypeScript + ESLint)
-- [ ] `npm test` passes (all 160+ tests)
+- [ ] `npm test` passes
 - [ ] `npm run build` succeeds
 - [ ] FEATURES.md updated (if feature/behavior changed)
 - [ ] New state is persisted to IDB + Firestore

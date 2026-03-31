@@ -99,11 +99,10 @@ service cloud.firestore {
           resource == null
           || resource.data.readMode != 'v2'
           || request.resource.data.readMode == 'v2'
-          // Allow V2→legacy recovery when migration failed and writer holds a lock
-          || (
-            request.resource.data.migrationState == 'failed'
-            && hasOwnedCurrentOperationLock(projectId, request.resource.data.updatedByClientId)
-          )
+          // Allow V2→legacy recovery when migration failed.
+          // This unblocks projects stuck in V2 with incomplete migration data
+          // (missing commitState/baseCommitId) so the legacy save path works.
+          || request.resource.data.migrationState == 'failed'
         )
         && (
           request.resource.data.readMode != 'v2'

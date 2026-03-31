@@ -11,8 +11,8 @@ export interface UseTokenActionsInput {
   setTokenMgmtPage: (page: number) => void;
   /** After unblock, land on Pages (Ungrouped) so tokens are visible in the right scope. */
   switchTab: (tab: GroupDataTab) => void;
-  blockTokens: (tokens: string[]) => void;
-  unblockTokens: (tokens: string[]) => void;
+  blockTokens: (tokens: string[]) => boolean;
+  unblockTokens: (tokens: string[]) => boolean;
 }
 
 export function useTokenActions(input: UseTokenActionsInput) {
@@ -27,13 +27,15 @@ export function useTokenActions(input: UseTokenActionsInput) {
   } = input;
 
   const handleBlockSingleToken = useCallback((token: string) => {
-    blockTokens([token]);
+    const applied = blockTokens([token]);
+    if (!applied) return;
     logAndToast('block', `Blocked: ${token}`, 1, `Blocked token: ${token}`, 'error');
   }, [blockTokens, logAndToast]);
 
   const handleBlockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
-    blockTokens(tokens);
+    const applied = blockTokens(tokens);
+    if (!applied) return;
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('blocked');
     setTokenMgmtPage(1);
@@ -48,7 +50,8 @@ export function useTokenActions(input: UseTokenActionsInput) {
 
   const handleUnblockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
-    unblockTokens(tokens);
+    const applied = unblockTokens(tokens);
+    if (!applied) return;
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('current');
     setTokenMgmtPage(1);

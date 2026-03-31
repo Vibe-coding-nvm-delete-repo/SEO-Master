@@ -130,7 +130,7 @@ export default function App() {
     blockedTokens, labelSections, fileName,
     activeProjectId, setActiveProjectId,
     loadProject, clearProject, syncFileNameLocal, flushNow,
-    storageMode, activeOperation, isProjectBusy, isSharedProjectReadOnly, runWithExclusiveOperation,
+    storageMode, activeOperation, isProjectBusy, isCanonicalReloading, isWriteUnsafe, writeBlockReason, isSharedProjectReadOnly, isRoutineSharedEditBlocked, isBulkSharedEditBlocked, runWithExclusiveOperation,
     removeFromApproved, ungroupPages,
     addActivityEntry,
     updateGroupMergeRecommendations,
@@ -962,6 +962,7 @@ export default function App() {
       logAndToast(action, details, count, toastMsg, toastType);
     },
     flushNow,
+    runWithExclusiveOperation,
   });
 
   const { exportCSV, exportTokensCSV } = useCsvExport({
@@ -980,7 +981,7 @@ export default function App() {
 
   const { scheduleReReview } = useGroupReviewAutoProcessor({
     groupedClusters,
-    isSharedProjectReadOnly,
+    isRoutineSharedEditBlocked,
     groupReviewSettingsRef,
     persistenceUpdateGroups: persistence.updateGroups,
     logAndToast,
@@ -1043,10 +1044,10 @@ export default function App() {
     removeFromApproved,
     ungroupPages,
   });
-  const canRunManualGroup = !isSharedProjectReadOnly && selectedClusters.size > 0 && groupNameInput.trim().length > 0;
-  const canApproveGrouped = !isSharedProjectReadOnly && selectedGroups.size > 0;
-  const canUngroupGrouped = !isSharedProjectReadOnly && (selectedGroups.size > 0 || selectedSubClusters.size > 0);
-  const canUnapproveApproved = !isSharedProjectReadOnly && (selectedGroups.size > 0 || selectedSubClusters.size > 0);
+  const canRunManualGroup = !isRoutineSharedEditBlocked && selectedClusters.size > 0 && groupNameInput.trim().length > 0;
+  const canApproveGrouped = !isRoutineSharedEditBlocked && selectedGroups.size > 0;
+  const canUngroupGrouped = !isRoutineSharedEditBlocked && (selectedGroups.size > 0 || selectedSubClusters.size > 0);
+  const canUnapproveApproved = !isRoutineSharedEditBlocked && (selectedGroups.size > 0 || selectedSubClusters.size > 0);
 
   // Stable callback: middle-click on a ClusterRow to quick-group
   const handleClusterMiddleClick = useCallback((e: React.MouseEvent) => {
@@ -1095,7 +1096,7 @@ export default function App() {
     groupReviewSettingsHydrated,
     groupReviewSettingsSnapshot,
     groupReviewSettingsRef,
-    isSharedProjectReadOnly,
+    isBulkSharedEditBlocked,
     selectedTokens,
     excludedLabels,
     debouncedSearchQuery,
@@ -1119,6 +1120,7 @@ export default function App() {
     startTransition,
     logAndToast,
     recordGroupingEvent,
+    runWithExclusiveOperation,
   });
 
   useGlobalGroupingShortcuts({
@@ -1297,9 +1299,14 @@ export default function App() {
     isLabelSidebarOpen,
     isMergeModalOpen,
     isProcessing,
+    isCanonicalReloading,
+    isWriteUnsafe,
     isProjectBusy,
     isRunningFilteredAutoGroup,
+    isRoutineSharedEditBlocked,
+    isBulkSharedEditBlocked,
     isSharedProjectReadOnly,
+    writeBlockReason,
     itemsPerPage,
     kwRatingJob,
     labelColorMap,

@@ -1,11 +1,15 @@
 # Architecture
 
-**Documentation map:** [`AGENTS.md`](./AGENTS.md) · [`CLAUDE.md`](./CLAUDE.md) · [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) · this file
+**Documentation map:** [`AGENTS.md`](./AGENTS.md) · [`CLAUDE.md`](./CLAUDE.md) · [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) · [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md) · this file
 
 This file gives the high-level system shape.
 
+For the operator-facing flow across project lifecycle, keyword management, token management, and shared collaborator sync, use [`docs/group-project-flow.md`](./docs/group-project-flow.md).
+
 For the exact shared-project persistence contract, use [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md).
 That doc also lists the current known limits and recovery rules for shared-project changes.
+
+For the latest repo-wide refactor priorities and relative importance scores, use [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md).
 
 ---
 
