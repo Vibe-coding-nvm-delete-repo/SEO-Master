@@ -37,11 +37,26 @@ service cloud.firestore {
     }
 
     function epochScopedWrite(projectId, data) {
-      return !hasV2Meta(projectId) || data.datasetEpoch == activeEpoch(projectId);
+      return !hasV2Meta(projectId)
+        || data.datasetEpoch == activeEpoch(projectId)
+        || (
+          data.datasetEpoch == activeEpoch(projectId) + 1
+          && isString(data.updatedByClientId)
+          && hasOwnedCurrentOperationLock(projectId, data.updatedByClientId)
+        );
     }
 
     function epochScopedDelete(projectId, data) {
-      return !hasV2Meta(projectId) || data.datasetEpoch == activeEpoch(projectId);
+      return !hasV2Meta(projectId)
+        || data.datasetEpoch == activeEpoch(projectId)
+        || (
+          data.datasetEpoch == activeEpoch(projectId) + 1
+          && exists(/databases/$(database)/documents/projects/$(projectId)/project_operations/current)
+          && (
+            get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.status == null
+            || get(/databases/$(database)/documents/projects/$(projectId)/project_operations/current).data.status == 'running'
+          )
+        );
     }
 
     function validCollabMetaCreate(data) {

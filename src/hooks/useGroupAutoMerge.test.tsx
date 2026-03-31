@@ -5,6 +5,7 @@ import {
   buildGroupAutoMergeFingerprint,
   isGroupMergeRecommendationSetStale,
 } from '../groupAutoMergeEngine';
+import { SHARED_MUTATION_ACCEPTED } from '../sharedMutation';
 import { useGroupAutoMerge } from './useGroupAutoMerge';
 import type { ClusterSummary, GroupMergeRecommendation, GroupedCluster } from '../types';
 
@@ -126,8 +127,12 @@ describe('useGroupAutoMerge', () => {
         updateSettings: vi.fn(),
       } satisfies GroupReviewSettingsRef,
     };
-    const updateGroupMergeRecommendations = vi.fn();
-    const bulkSet = vi.fn();
+    const updateGroupMergeRecommendations = vi.fn(async (_recommendations: GroupMergeRecommendation[]) => SHARED_MUTATION_ACCEPTED);
+    const bulkSet = vi.fn(async (_data: {
+      groupedClusters?: GroupedCluster[];
+      approvedGroups?: GroupedCluster[];
+      groupMergeRecommendations?: GroupMergeRecommendation[];
+    }) => SHARED_MUTATION_ACCEPTED);
     const addToast = vi.fn();
     const logAndToast = vi.fn();
     const flushNow = vi.fn(async () => {});

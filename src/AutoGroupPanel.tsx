@@ -62,10 +62,11 @@ import {
 } from './modelDefaults';
 import { useLatestPersistQueue } from './useLatestPersistQueue';
 import { reportPersistFailure } from './persistenceErrors';
+import { isAcceptedSharedMutation, type SharedMutationResult } from './sharedMutation';
 
 interface AutoGroupPanelProps {
   effectiveClusters: ClusterSummary[] | null;
-  onApproveGroups: (groups: GroupedCluster[]) => boolean;
+  onApproveGroups: (groups: GroupedCluster[]) => Promise<SharedMutationResult>;
   groupReviewSettingsRef: React.RefObject<GroupReviewSettingsRef | null>;
   logAndToast: (action: ActivityAction, details: string, count: number, toastMsg: string, toastType?: 'success' | 'info' | 'warning' | 'error') => void;
   persistedSuggestions?: AutoGroupSuggestion[];
@@ -2519,7 +2520,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   }, [cosineClusters, cosineQaMismatchPages, cosineQaResults, logAndToast]);
 
   // Approve selected suggestions
-  const handleApprove = useCallback((ids: Set<string>) => {
+  const handleApprove = useCallback(async (ids: Set<string>) => {
     const toApprove = suggestions.filter(s => ids.has(s.id));
     if (toApprove.length === 0) return;
 
@@ -2534,8 +2535,8 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       reviewMismatchedPages: s.qaMismatchedPages || qaMismatchPages.get(s.id),
     }));
 
-    const applied = onApproveGroups(newGroups);
-    if (!applied) return;
+    const result = await onApproveGroups(newGroups);
+    if (!isAcceptedSharedMutation(result)) return;
 
     // Remove approved from suggestions
     setSuggestions(prev => prev.filter(s => !ids.has(s.id)));

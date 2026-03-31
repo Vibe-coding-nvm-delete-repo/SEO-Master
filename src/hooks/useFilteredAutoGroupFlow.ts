@@ -9,6 +9,7 @@ import { parseFilteredAutoGroupResponse } from '../autoGroupResponseParser';
 import { enqueueLatestFilteredAutoGroupJob } from '../filteredAutoGroupQueue';
 import type { GroupReviewSettingsData, GroupReviewSettingsRef } from '../GroupReviewSettings';
 import type { ClusterSummary, GroupedCluster } from '../types';
+import { isAcceptedSharedMutation, type SharedMutationResult } from '../sharedMutation';
 
 export interface FilteredAutoGroupRunStats {
   status: 'idle' | 'running' | 'complete' | 'error';
@@ -59,7 +60,7 @@ interface UseFilteredAutoGroupFlowParams {
     removedTokens: Set<string>;
     hasReviewApi: boolean;
     mergeFn: typeof mergeGroupedClustersByName;
-  }) => boolean;
+  }) => Promise<SharedMutationResult>;
   pendingFilteredAutoGroupTokens: Set<string>;
   setPendingFilteredAutoGroupTokens: Dispatch<SetStateAction<Set<string>>>;
   setSelectedClusters: Dispatch<SetStateAction<Set<string>>>;
@@ -319,15 +320,16 @@ FAILURE CONDITIONS TO AVOID:
           completionTokens * parseFloat(job.modelPricing.completion || '0')
         : 0;
 
-      const groupsApplied =
+      const applyResult =
         !isBulkSharedEditBlocked && generatedGroups.length > 0
-          ? mergeGroupsByName({
+          ? await mergeGroupsByName({
               incoming: generatedGroups,
               removedTokens: groupedTokens,
               hasReviewApi,
               mergeFn: mergeGroupedClustersByName,
             })
-          : false;
+          : null;
+      const groupsApplied = Boolean(applyResult && isAcceptedSharedMutation(applyResult));
 
       if (groupsApplied) {
         startTransition(() => {

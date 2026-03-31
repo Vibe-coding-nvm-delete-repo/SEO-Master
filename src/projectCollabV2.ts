@@ -1033,6 +1033,7 @@ export async function saveBaseCommitToFirestore(
     commitState: 'ready',
     saveId: options?.saveId ?? base.datasetEpoch,
   });
+  readyManifest.revision = writingManifest.revision + 1;
   await setDoc(baseCommitDoc(projectId, commitId), sanitizeJsonForFirestore(readyManifest));
   return readyManifest;
 }

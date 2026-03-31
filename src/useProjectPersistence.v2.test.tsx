@@ -407,12 +407,12 @@ describe('useProjectPersistence V2 hardening', () => {
       avgKwRating: 1,
     };
 
-    let applied = true;
-    act(() => {
-      applied = result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
+    let mutationResult: Awaited<ReturnType<typeof result.current.addGroupsAndRemovePages>> | null = null;
+    await act(async () => {
+      mutationResult = await result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
     });
 
-    expect(applied).toBe(false);
+    expect(mutationResult?.status).toBe('blocked');
     expect(result.current.groupedClusters).toEqual([]);
     expect(result.current.clusterSummary?.map((item) => item.tokens)).toEqual(['alpha']);
     expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
@@ -560,9 +560,9 @@ describe('useProjectPersistence V2 hardening', () => {
       avgKwRating: 1,
     };
 
-    let applied = true;
-    act(() => {
-      applied = result.current.mergeGroupsByName({
+    let mutationResult: Awaited<ReturnType<typeof result.current.mergeGroupsByName>> | null = null;
+    await act(async () => {
+      mutationResult = await result.current.mergeGroupsByName({
         incoming: [incomingGroup],
         removedTokens: new Set(['alpha']),
         hasReviewApi: false,
@@ -570,7 +570,7 @@ describe('useProjectPersistence V2 hardening', () => {
       });
     });
 
-    expect(applied).toBe(false);
+    expect(mutationResult?.status).toBe('blocked');
     expect(result.current.groupedClusters).toEqual([]);
     expect(result.current.clusterSummary?.map((item) => item.tokens)).toEqual(['alpha']);
     expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
@@ -795,12 +795,12 @@ describe('useProjectPersistence V2 hardening', () => {
       avgKwRating: 1,
     };
 
-    let applied = false;
-    act(() => {
-      applied = result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
+    let mutationResult: Awaited<ReturnType<typeof result.current.addGroupsAndRemovePages>> | null = null;
+    await act(async () => {
+      mutationResult = await result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
     });
 
-    expect(applied).toBe(true);
+    expect(mutationResult?.status).toBe('accepted');
     expect(result.current.groupedClusters).toHaveLength(1);
     await waitFor(() => expect(collabMocks.commitRevisionedDocChanges).toHaveBeenCalled());
 
@@ -1197,10 +1197,10 @@ describe('useProjectPersistence V2 hardening', () => {
     await waitFor(() =>
       expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
     );
-    act(() => {
-      result.current.blockTokens(['Alpha']);
+    await act(async () => {
+      await result.current.blockTokens(['Alpha']);
     });
-    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
+    expect(Array.from(result.current.blockedTokens)).toEqual(['remote']);
 
     await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['remote']));
     expect(addToast).toHaveBeenCalledWith(
@@ -1209,7 +1209,7 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
-  it('rolls back the touched optimistic overlay before conflict reload completes', async () => {
+  it('does not expose fake local blocked-token success before conflict reload completes', async () => {
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
     const canonicalReload = deferred<ReturnType<typeof makeCanonical>>();
     collabMocks.loadCanonicalEpoch.mockImplementation(() => canonicalReload.promise);
@@ -1233,11 +1233,11 @@ describe('useProjectPersistence V2 hardening', () => {
 
     await waitFor(() => expect(result.current.storageMode).toBe('v2'));
 
-    act(() => {
-      result.current.blockTokens(['Alpha']);
+    await act(async () => {
+      await result.current.blockTokens(['Alpha']);
     });
 
-    expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
+    expect(Array.from(result.current.blockedTokens)).toEqual([]);
     await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual([]));
 
     await act(async () => {

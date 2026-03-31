@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import type { ClusterSummary, GroupedCluster } from '../types';
 import { parseSubClusterKey } from '../subClusterKeys';
+import { isAcceptedSharedMutation } from '../sharedMutation';
 
 export interface UseGroupingActionsInput {
   selectedClusters: Set<string>;
@@ -18,19 +19,19 @@ export interface UseGroupingActionsInput {
   recordGroupingEvent: (pagesInBatch: number) => void;
   scheduleReReview: (groupIds: string[]) => void;
   hasReviewApi: () => boolean;
-  addGroupsAndRemovePages: (groups: GroupedCluster[], removedTokens: Set<string>) => boolean;
-  approveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
-  unapproveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
+  addGroupsAndRemovePages: (groups: GroupedCluster[], removedTokens: Set<string>) => Promise<any>;
+  approveGroup: (groupName: string) => Promise<{ result: any; group: GroupedCluster | null }>;
+  unapproveGroup: (groupName: string) => Promise<{ result: any; group: GroupedCluster | null }>;
   removeFromApproved: (
     selectedGroupIds: Set<string>,
     selectedSubClusterKeys: Set<string>,
     recalc: (group: GroupedCluster, remainingClusters: ClusterSummary[]) => GroupedCluster,
-  ) => { applied: boolean; clustersReturned: ClusterSummary[] };
+  ) => Promise<{ result: any; clustersReturned: ClusterSummary[] }>;
   ungroupPages: (
     selectedGroupIds: Set<string>,
     selectedSubClusterKeys: Set<string>,
     recalc: (group: GroupedCluster, remainingClusters: ClusterSummary[]) => GroupedCluster,
-  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
+  ) => Promise<{ result: any; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] }>;
 }
 
 export function useGroupingActions(input: UseGroupingActionsInput) {
@@ -84,31 +85,31 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     };
   }, []);
 
-  const handleApproveGroup = useCallback((groupName: string) => {
-    const result = approveGroup(groupName);
-    if (result.applied && result.group) {
-      logAndToast('approve', `Approved '${groupName}'`, result.group.clusters.length, `Approved '${groupName}' (${result.group.clusters.length} pages)`, 'success');
+  const handleApproveGroup = useCallback(async (groupName: string) => {
+    const { result, group } = await approveGroup(groupName);
+    if (isAcceptedSharedMutation(result) && group) {
+      logAndToast('approve', `Approved '${groupName}'`, group.clusters.length, `Approved '${groupName}' (${group.clusters.length} pages)`, 'success');
       return true;
     }
     return false;
   }, [approveGroup, logAndToast]);
 
-  const handleUnapproveGroup = useCallback((groupName: string) => {
-    const result = unapproveGroup(groupName);
-    if (result.applied && result.group) {
-      logAndToast('unapprove', `Unapproved '${groupName}'`, result.group.clusters.length, `Unapproved '${groupName}'`, 'warning');
+  const handleUnapproveGroup = useCallback(async (groupName: string) => {
+    const { result, group } = await unapproveGroup(groupName);
+    if (isAcceptedSharedMutation(result) && group) {
+      logAndToast('unapprove', `Unapproved '${groupName}'`, group.clusters.length, `Unapproved '${groupName}'`, 'warning');
       return true;
     }
     return false;
   }, [logAndToast, unapproveGroup]);
 
-  const handleRemoveFromApproved = useCallback(() => {
+  const handleRemoveFromApproved = useCallback(async () => {
     if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
     if (!clusterSummary) return;
 
     const wholeGroupCount = selectedGroups.size;
-    const { applied, clustersReturned } = removeFromApproved(selectedGroups, selectedSubClusters, recalcGroupStats);
-    if (!applied) return false;
+    const { result, clustersReturned } = await removeFromApproved(selectedGroups, selectedSubClusters, recalcGroupStats);
+    if (!isAcceptedSharedMutation(result)) return false;
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
 
@@ -117,7 +118,7 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     return true;
   }, [clusterSummary, logAndToast, recalcGroupStats, removeFromApproved, selectedGroups, selectedSubClusters, setSelectedGroups, setSelectedSubClusters]);
 
-  const handleGroupClusters = useCallback(() => {
+  const handleGroupClusters = useCallback(async () => {
     if (selectedClusters.size === 0 || !groupNameInput.trim() || !clusterSummary) return;
 
     const clustersToGroup = clusterSummary.filter(c => selectedClusters.has(c.tokens));
@@ -152,8 +153,8 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     };
 
     const removedTokens = new Set(clustersToGroup.map(c => c.tokens));
-    const applied = addGroupsAndRemovePages([newGroup], removedTokens);
-    if (!applied) return false;
+    const result = await addGroupsAndRemovePages([newGroup], removedTokens);
+    if (!isAcceptedSharedMutation(result)) return false;
     setSelectedClusters(new Set());
     setGroupNameInput('');
     setCurrentPage(1);
@@ -163,7 +164,7 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     return true;
   }, [addGroupsAndRemovePages, clusterSummary, groupNameInput, hasReviewApi, logAndToast, recordGroupingEvent, selectedClusters, setCurrentPage, setGroupNameInput, setSelectedClusters]);
 
-  const handleAutoGroupApprove = useCallback((newGroups: GroupedCluster[]) => {
+  const handleAutoGroupApprove = useCallback(async (newGroups: GroupedCluster[]) => {
     const removedTokens = new Set<string>();
     for (const g of newGroups) {
       for (const c of g.clusters) removedTokens.add(c.tokens);
@@ -171,12 +172,12 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     return addGroupsAndRemovePages(newGroups, removedTokens);
   }, [addGroupsAndRemovePages]);
 
-  const handleUngroupClusters = useCallback(() => {
+  const handleUngroupClusters = useCallback(async () => {
     if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
     if (!clusterSummary) return;
 
-    const { applied, clustersReturned, groupsWithPartialRemoval } = ungroupPages(selectedGroups, selectedSubClusters, recalcGroupStats);
-    if (!applied) return false;
+    const { result, clustersReturned, groupsWithPartialRemoval } = await ungroupPages(selectedGroups, selectedSubClusters, recalcGroupStats);
+    if (!isAcceptedSharedMutation(result)) return false;
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
 
@@ -193,11 +194,11 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     setSelectedSubClusters(new Set());
   }, [setSelectedGroups, setSelectedSubClusters]);
 
-  const approveSelectedGrouped = useCallback(() => {
+  const approveSelectedGrouped = useCallback(async () => {
     const groupsToApprove = groupedClusters.filter(g => selectedGroups.has(g.id));
     const approvedIds = new Set<string>();
     for (const group of groupsToApprove) {
-      if (handleApproveGroup(group.groupName)) {
+      if (await handleApproveGroup(group.groupName)) {
         approvedIds.add(group.id);
       }
     }

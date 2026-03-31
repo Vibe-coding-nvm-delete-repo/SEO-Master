@@ -2,6 +2,7 @@
 import React, { useState, useCallback } from 'react';
 import type { ProcessedRow, ClusterSummary, TokenSummary, GroupedCluster, TokenMergeRule, ActivityAction } from '../types';
 import { executeMergeCascade, rebuildClusters as rebuildClustersFromRows, rebuildTokenSummary as rebuildTokenSummaryFromRows } from '../tokenMerge';
+import { isAcceptedSharedMutation, type SharedMutationResult } from '../sharedMutation';
 
 interface UseTokenMergeParams {
   results: ProcessedRow[] | null;
@@ -17,8 +18,8 @@ interface UseTokenMergeParams {
   clusterSummaryRef: React.MutableRefObject<ClusterSummary[] | null>;
   tokenSummaryRef: React.MutableRefObject<TokenSummary[] | null>;
   logAndToast: (action: ActivityAction, details: string, count: number, toastMsg: string, toastType?: 'success' | 'info' | 'warning' | 'error') => void;
-  applyMergeCascade: (cascade: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; }, newRule: TokenMergeRule) => boolean;
-  undoMerge: (data: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; tokenMergeRules: TokenMergeRule[]; }) => boolean;
+  applyMergeCascade: (cascade: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; }, newRule: TokenMergeRule) => Promise<SharedMutationResult>;
+  undoMerge: (data: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; tokenMergeRules: TokenMergeRule[]; }) => Promise<SharedMutationResult>;
   setSelectedTokens: React.Dispatch<React.SetStateAction<Set<string>>>;
   setSelectedMgmtTokens: React.Dispatch<React.SetStateAction<Set<string>>>;
 }
@@ -51,7 +52,7 @@ export function useTokenMerge({
     setIsMergeModalOpen(true);
   }, [selectedMgmtTokens]);
 
-  const handleMergeTokens = useCallback((parentToken: string): boolean => {
+  const handleMergeTokens = useCallback(async (parentToken: string): Promise<boolean> => {
     if (!results || !clusterSummary) return false;
     const childTokens = mergeModalTokens.filter(t => t !== parentToken);
     if (childTokens.length === 0) return false;
@@ -80,8 +81,8 @@ export function useTokenMerge({
 
     // persistence.applyMergeCascade atomically updates latest ref + state + saves.
     // No separate startTransition/setState calls needed (they would conflict).
-    const applied = applyMergeCascade(cascade, newRule);
-    if (!applied) return false;
+    const result = await applyMergeCascade(cascade, newRule);
+    if (!isAcceptedSharedMutation(result)) return false;
     if (filterChanged) setSelectedTokens(newSelectedTokens);
     setSelectedMgmtTokens(new Set());
 
@@ -99,7 +100,7 @@ export function useTokenMerge({
     return true;
   }, [results, clusterSummary, groupedClusters, approvedGroups, mergeModalTokens, selectedTokens, logAndToast]);
 
-  const handleUndoMergeChild = useCallback((ruleId: string, childToken: string): boolean => {
+  const handleUndoMergeChild = useCallback(async (ruleId: string, childToken: string): Promise<boolean> => {
     if (!results) return false;
 
     // Update the rule
@@ -155,15 +156,15 @@ export function useTokenMerge({
     const updatedApproved = updateGroupList(approvedGroups);
     const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
 
-    const applied = undoMerge({ results: restoredResults, clusterSummary: newClusters, tokenSummary: newTokenSummary, groupedClusters: updatedGroups, approvedGroups: updatedApproved, tokenMergeRules: updatedRules });
-    if (!applied) return false;
+    const result = await undoMerge({ results: restoredResults, clusterSummary: newClusters, tokenSummary: newTokenSummary, groupedClusters: updatedGroups, approvedGroups: updatedApproved, tokenMergeRules: updatedRules });
+    if (!isAcceptedSharedMutation(result)) return false;
     const rule = tokenMergeRules.find(r => r.id === ruleId);
     logAndToast('unmerge', `Unmerged '${childToken}' from '${rule?.parentToken || 'parent'}'`, 1,
       `Unmerged '${childToken}'`, 'success');
     return true;
   }, [results, tokenMergeRules, groupedClusters, approvedGroups, logAndToast]);
 
-  const handleUndoMergeParent = useCallback((ruleId: string): boolean => {
+  const handleUndoMergeParent = useCallback(async (ruleId: string): Promise<boolean> => {
     if (!results) return false;
 
     const ruleToRemove = tokenMergeRules.find(r => r.id === ruleId);
@@ -219,7 +220,7 @@ export function useTokenMerge({
     const updatedApproved = updateGroupList(approvedGroups);
     const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
 
-    const applied = undoMerge({
+    const result = await undoMerge({
       results: restoredResults,
       clusterSummary: newClusters,
       tokenSummary: newTokenSummary,
@@ -227,7 +228,7 @@ export function useTokenMerge({
       approvedGroups: updatedApproved,
       tokenMergeRules: updatedRules,
     });
-    if (!applied) return false;
+    if (!isAcceptedSharedMutation(result)) return false;
     logAndToast(
       'unmerge',
       `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
