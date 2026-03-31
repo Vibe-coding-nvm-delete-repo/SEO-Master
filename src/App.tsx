@@ -867,6 +867,7 @@ export default function App() {
     blockedTokens, labelSections, fileName,
     activeProjectId, setActiveProjectId,
     loadProject, clearProject, syncFileNameLocal, flushNow,
+    storageMode, activeOperation, isProjectBusy, runWithExclusiveOperation,
     removeFromApproved, ungroupPages,
     addActivityEntry,
     updateGroupMergeRecommendations,
@@ -1210,16 +1211,18 @@ export default function App() {
   }, [activeProjectId, savedClusters]);
 
   const processCSV = (file: File) => {
-    setIsProcessing(true);
-    setProgress(0);
-    setError(null);
-    if (activeProjectId) {
-      syncFileNameLocal(file.name);
-    } else {
-      setFileName(file.name);
-    }
+    const runImport = async () => {
+      setIsProcessing(true);
+      setProgress(0);
+      setError(null);
+      if (activeProjectId) {
+        syncFileNameLocal(file.name);
+      } else {
+        setFileName(file.name);
+      }
 
-    Papa.parse(file, {
+      await new Promise<void>((resolve) => {
+        Papa.parse(file, {
       skipEmptyLines: true,
       complete: (results) => {
         try {
@@ -1667,6 +1670,7 @@ export default function App() {
 
                 setActiveTab('pages');
                 setIsProcessing(false);
+                resolve();
               }
             } catch (err: any) {
               setError(err.message || "An error occurred while processing the CSV.");
@@ -1678,6 +1682,7 @@ export default function App() {
               setStats(null);
               setDatasetStats(null);
               setIsProcessing(false);
+              resolve();
             }
           };
 
@@ -1692,6 +1697,7 @@ export default function App() {
           setStats(null);
           setDatasetStats(null);
           setIsProcessing(false);
+          resolve();
         }
       },
       error: (err) => {
@@ -1703,8 +1709,19 @@ export default function App() {
         setAutoMergeRecommendations([]);
         setGroupMergeRecommendations([]);
         setStats(null);
+        setDatasetStats(null);
+        resolve();
       }
     });
+      });
+    };
+
+    if (storageMode === 'v2') {
+      void runWithExclusiveOperation('csv-import', runImport);
+      return;
+    }
+
+    void runImport();
   };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -3471,9 +3488,9 @@ FAILURE CONDITIONS TO AVOID:
                   </button>
                 )}
                 {activeProjectId && !results && !isProcessing && !isProjectLoading && (
-                  <label className="flex items-center gap-1.5 px-2 py-1 bg-zinc-900 text-white rounded-md text-xs font-medium cursor-pointer hover:bg-zinc-800 transition-colors">
+                  <label className={`flex items-center gap-1.5 px-2 py-1 text-white rounded-md text-xs font-medium transition-colors ${isProjectBusy ? 'bg-zinc-400 cursor-not-allowed' : 'bg-zinc-900 cursor-pointer hover:bg-zinc-800'}`}>
                     <UploadCloud className="w-3 h-3" /> Upload CSV
-                    <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={!activeProjectId} />
+                    <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={!activeProjectId || isProjectBusy} />
                   </label>
                 )}
                 {/* File info + actions — inline when data is loaded */}
@@ -3511,6 +3528,15 @@ FAILURE CONDITIONS TO AVOID:
               </div>
             </div>
 
+            {isProjectBusy && activeProjectId && (
+              <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>
+                  Project busy: {activeOperation?.type ?? 'shared operation'} is running in another client. Bulk edit actions are temporarily read-only.
+                </span>
+              </div>
+            )}
+
             {groupSubTab === 'data' && (
             <>
             {!results && !isProcessing && !isProjectLoading && (
@@ -3518,23 +3544,29 @@ FAILURE CONDITIONS TO AVOID:
             className={`
               relative border-2 border-dashed rounded-2xl p-12 transition-all duration-200 ease-in-out
               flex flex-col items-center justify-center text-center bg-white
-              ${!activeProjectId ? 'opacity-50 cursor-not-allowed grayscale' : isDragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50/50'}
+              ${!activeProjectId || isProjectBusy ? 'opacity-50 cursor-not-allowed grayscale' : isDragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50/50'}
             `}
-            onDragOver={activeProjectId ? handleDragOver : undefined}
-            onDragLeave={activeProjectId ? handleDragLeave : undefined}
-            onDrop={activeProjectId ? handleDrop : undefined}
+            onDragOver={activeProjectId && !isProjectBusy ? handleDragOver : undefined}
+            onDragLeave={activeProjectId && !isProjectBusy ? handleDragLeave : undefined}
+            onDrop={activeProjectId && !isProjectBusy ? handleDrop : undefined}
           >
-            {!activeProjectId && (
+            {(!activeProjectId || isProjectBusy) && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/40 backdrop-blur-[1px] rounded-2xl">
                 <div className="bg-white p-4 rounded-xl shadow-xl border border-zinc-200 flex flex-col items-center gap-3 max-w-xs">
                   <Lock className="w-8 h-8 text-amber-500" />
-                  <p className="text-sm font-medium text-zinc-900">Create or select a project first</p>
-                  <button 
-                    onClick={() => navigateGroupSub('projects')}
-                    className="w-full px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-all"
-                  >
-                    Go to Projects
-                  </button>
+                  {isProjectBusy ? (
+                    <p className="text-sm font-medium text-zinc-900">Another client is running a project-wide operation.</p>
+                  ) : (
+                    <>
+                      <p className="text-sm font-medium text-zinc-900">Create or select a project first</p>
+                      <button 
+                        onClick={() => navigateGroupSub('projects')}
+                        className="w-full px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-all"
+                      >
+                        Go to Projects
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -3953,8 +3985,8 @@ FAILURE CONDITIONS TO AVOID:
                   <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
                     <button
                       type="button"
-                      onClick={() => void runKeywordRating()}
-                      disabled={kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating'}
+                      onClick={() => void runWithExclusiveOperation('keyword-rating', runKeywordRating)}
+                      disabled={isProjectBusy || kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating'}
                       className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                       title="Generate core-intent summary then rate every keyword (1–3)"
                     >
@@ -4575,6 +4607,8 @@ FAILURE CONDITIONS TO AVOID:
                   logAndToast={logAndToast}
                   persistedSuggestions={autoGroupSuggestions}
                   onSuggestionsChange={persistence.updateSuggestions}
+                  isProjectBusy={isProjectBusy}
+                  runWithExclusiveOperation={runWithExclusiveOperation}
                 />
               )}
 
@@ -4714,7 +4748,10 @@ FAILURE CONDITIONS TO AVOID:
                     )}
                     {tokenMgmtSubTab === 'auto-merge' && autoMergeRecommendations.some(r => r.status === 'pending') && (
                       <button
-                        onClick={applyAllAutoMergeRecommendations}
+                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
+                          applyAllAutoMergeRecommendations();
+                        })}
+                        disabled={isProjectBusy}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors whitespace-nowrap"
                       >
                         Merge All
@@ -4898,7 +4935,10 @@ FAILURE CONDITIONS TO AVOID:
                                 <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{ruleRow.parentStats.avgKd !== null ? ruleRow.parentStats.avgKd : '-'}</td>
                                 <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                                   <button
-                                    onClick={() => handleUndoMergeParent(ruleRow.ruleId)}
+                                    onClick={() => void runWithExclusiveOperation('token-merge', async () => {
+                                      handleUndoMergeParent(ruleRow.ruleId);
+                                    })}
+                                    disabled={isProjectBusy}
                                     className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
                                     title="Unmerge parent"
                                   >
@@ -4944,7 +4984,10 @@ FAILURE CONDITIONS TO AVOID:
                                     <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{st.avgKd !== null ? st.avgKd : '-'}</td>
                                     <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                                       <button
-                                        onClick={() => handleUndoMergeChild(ruleRow.ruleId, childToken)}
+                                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
+                                          handleUndoMergeChild(ruleRow.ruleId, childToken);
+                                        })}
+                                        disabled={isProjectBusy}
                                         className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
                                         title="Unmerge child"
                                       >
@@ -5056,7 +5099,10 @@ FAILURE CONDITIONS TO AVOID:
                                   {rec.status === 'pending' ? (
                                     <>
                                       <button
-                                        onClick={() => applyAutoMergeRecommendation(rec.id)}
+                                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
+                                          applyAutoMergeRecommendation(rec.id);
+                                        })}
+                                        disabled={isProjectBusy}
                                         className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-600 text-white hover:bg-emerald-700"
                                       >
                                         Merge
@@ -5806,7 +5852,11 @@ FAILURE CONDITIONS TO AVOID:
             tokenSummary={tokenSummary}
             impact={results && clusterSummary ? computeMergeImpact(results, groupedClusters, approvedGroups, mergeModalTokens[0], mergeModalTokens.slice(1)) : { pagesAffected: 0, groupsAffected: 0, approvedGroupsAffected: 0, pageCollisions: 0 }}
             universalBlockedTokens={universalBlockedTokens}
-            onConfirm={handleMergeTokens}
+            onConfirm={(parentToken) => {
+              void runWithExclusiveOperation('token-merge', async () => {
+                handleMergeTokens(parentToken);
+              });
+            }}
             onCancel={() => { setIsMergeModalOpen(false); setMergeModalTokens([]); }}
           />
         )}

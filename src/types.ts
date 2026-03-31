@@ -256,3 +256,113 @@ export interface FeedbackEntry {
   /** Up to 3 screenshot URLs (Firebase Storage). */
   attachmentUrls?: string[];
 }
+
+export interface ProjectRevisionFields {
+  revision: number;
+  updatedAt: string;
+  updatedByClientId: string;
+  lastMutationId?: string | null;
+}
+
+export interface ProjectCollabMetaDoc extends ProjectRevisionFields {
+  schemaVersion: 2;
+  migrationState: 'running' | 'complete' | 'failed';
+  datasetEpoch: number;
+  lastMigratedAt: string;
+  migrationOwnerClientId: string | null;
+  migrationStartedAt: string | null;
+  migrationHeartbeatAt: string | null;
+  migrationExpiresAt: string | null;
+  readMode: 'legacy' | 'v2';
+  requiredClientSchema?: number;
+  lastWriterClientId?: string | null;
+  lastWriterUserId?: string | null;
+}
+
+export interface ProjectGroupDoc extends ProjectRevisionFields {
+  id: string;
+  groupName: string;
+  status: 'grouped' | 'approved';
+  datasetEpoch: number;
+  lastWriterClientId?: string | null;
+  lastWriterUserId?: string | null;
+  clusterTokens: string[];
+  clusters: ClusterSummary[];
+  reviewStatus?: 'pending' | 'reviewing' | 'approve' | 'mismatch' | 'error';
+  reviewMismatchedPages?: string[];
+  reviewReason?: string;
+  reviewCost?: number;
+  reviewedAt?: string;
+  mergeAffected?: boolean;
+  groupAutoMerged?: boolean;
+  pageCount?: number;
+  totalVolume?: number;
+  keywordCount?: number;
+  avgKd?: number | null;
+  avgKwRating?: number | null;
+}
+
+export interface ProjectBlockedTokenDoc extends ProjectRevisionFields {
+  id: string;
+  token: string;
+  datasetEpoch: number;
+  lastWriterClientId?: string | null;
+  lastWriterUserId?: string | null;
+}
+
+export interface ProjectBlockedKeywordDoc extends ProjectRevisionFields {
+  id: string;
+  datasetEpoch: number;
+  lastWriterClientId?: string | null;
+  lastWriterUserId?: string | null;
+  keyword: string;
+  volume: number;
+  kd: number | null;
+  kwRating?: 1 | 2 | 3 | null;
+  reason: string;
+  tokenArr?: string[];
+}
+
+export interface ProjectTokenMergeRuleDoc extends ProjectRevisionFields {
+  id: string;
+  datasetEpoch: number;
+  lastWriterClientId?: string | null;
+  lastWriterUserId?: string | null;
+  parentToken: string;
+  childTokens: string[];
+  createdAt: string;
+  source?: 'manual' | 'auto-merge';
+  recommendationId?: string;
+}
+
+export interface ProjectLabelSectionDoc extends ProjectRevisionFields {
+  id: string;
+  datasetEpoch: number;
+  lastWriterClientId?: string | null;
+  lastWriterUserId?: string | null;
+  name: string;
+  tokens: string[];
+  colorIndex: number;
+}
+
+export interface ProjectActivityLogDoc {
+  id: string;
+  timestamp: string;
+  action: ActivityAction;
+  details: string;
+  count: number;
+  datasetEpoch: number;
+  createdByClientId?: string | null;
+  mutationId?: string | null;
+}
+
+export interface ProjectOperationLockDoc {
+  type: 'csv-import' | 'keyword-rating' | 'auto-group' | 'token-merge' | 'bulk-update';
+  ownerId: string;
+  ownerClientId?: string | null;
+  ownerUserId?: string | null;
+  startedAt: string;
+  heartbeatAt: string;
+  expiresAt: string;
+  status?: 'running' | 'releasing';
+}

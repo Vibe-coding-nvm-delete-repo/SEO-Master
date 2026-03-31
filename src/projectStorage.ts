@@ -14,6 +14,7 @@ import {
   loadQaLocalCache,
   saveQaLocalCache,
 } from './qa/contentPipelineQaRuntime';
+import { withPersistTimeout } from './persistTimeout';
 import type {
   ActivityLogEntry,
   AutoMergeRecommendation,
@@ -201,6 +202,18 @@ export const saveToLS = (key: string, data: unknown) => {
  */
 let cachedDb: IDBDatabase | null = null;
 let dbOpenPromise: Promise<IDBDatabase> | null = null;
+const IDB_OPEN_TIMEOUT_MS = 8_000;
+const IDB_TX_TIMEOUT_MS = 12_000;
+
+function invalidateCachedDb(): void {
+  try {
+    cachedDb?.close();
+  } catch {
+    // Ignore close errors; we only care about dropping the cached handle.
+  }
+  cachedDb = null;
+  dbOpenPromise = null;
+}
 
 const getIDB = (): Promise<IDBDatabase> => {
   // Return existing healthy connection
@@ -216,7 +229,7 @@ const getIDB = (): Promise<IDBDatabase> => {
   // Deduplicate concurrent open requests
   if (dbOpenPromise) return dbOpenPromise;
 
-  dbOpenPromise = new Promise<IDBDatabase>((resolve, reject) => {
+  const openPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(IDB_NAME, IDB_VERSION);
     request.onupgradeneeded = () => {
       const dbInstance = request.result;
@@ -241,6 +254,13 @@ const getIDB = (): Promise<IDBDatabase> => {
       reject(request.error);
     };
   });
+  dbOpenPromise = withPersistTimeout(openPromise, IDB_OPEN_TIMEOUT_MS, 'indexedDB.open').catch((error) => {
+    dbOpenPromise = null;
+    if ((error as { code?: string })?.code === 'persist-timeout') {
+      invalidateCachedDb();
+    }
+    throw error;
+  });
   return dbOpenPromise;
 };
 
@@ -261,10 +281,37 @@ function isTransientIDBError(err: unknown): boolean {
   if (name === 'AbortError' || name === 'TimeoutError' || name === 'UnknownError') return true;
   // InvalidStateError can mean the connection was unexpectedly closed — retry with fresh connection
   if (name === 'InvalidStateError') {
-    cachedDb = null;
+    invalidateCachedDb();
     return true;
   }
+  if ((err as { code?: string })?.code === 'persist-timeout') return true;
   return false;
+}
+
+async function awaitIDBTransaction(
+  tx: IDBTransaction,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  const txDone = new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+
+  try {
+    await withPersistTimeout(txDone, timeoutMs, label);
+  } catch (error) {
+    if ((error as { code?: string })?.code === 'persist-timeout') {
+      try {
+        tx.abort();
+      } catch {
+        // Ignore abort failures; the connection will be invalidated below.
+      }
+      invalidateCachedDb();
+    }
+    throw error;
+  }
 }
 
 export const saveToIDB = async (projectId: string, data: unknown) => {
@@ -272,6 +319,8 @@ export const saveToIDB = async (projectId: string, data: unknown) => {
     await saveQaLocalCache(projectId, data);
     return;
   }
+  // IDB uses the browser's structured-clone algorithm internally — no need
+  // for JSON round-trip.  toIDBRecord just normalises the shape.
   const record = toIDBRecord(projectId, data);
 
   let lastError: unknown;
@@ -280,21 +329,13 @@ export const saveToIDB = async (projectId: string, data: unknown) => {
       const dbInstance = await getIDB();
       const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
       tx.objectStore(IDB_STORE).put(record);
-      await withTimeout(
-        new Promise<void>((resolve, reject) => {
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-          tx.onabort = () => reject(tx.error);
-        }),
-        15_000,
-        'IDB write transaction',
-      );
+      await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, `IndexedDB write (${projectId})`);
       return; // success
     } catch (error) {
       lastError = error;
       // If connection went bad, clear cache so next attempt gets a fresh one
       if ((error as { name?: string })?.name === 'InvalidStateError') {
-        cachedDb = null;
+        invalidateCachedDb();
       }
       if (attempt < IDB_MAX_RETRIES && isTransientIDBError(error)) {
         const delay = IDB_BASE_DELAY_MS * Math.pow(2, attempt);
@@ -317,7 +358,7 @@ export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
     const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readonly');
     const request = tx.objectStore(IDB_STORE).get(projectId);
-    return new Promise((resolve, reject) => {
+    const result = new Promise<T | null>((resolve, reject) => {
       request.onsuccess = () => {
         resolve((request.result as T) || null);
       };
@@ -325,8 +366,12 @@ export const loadFromIDB = async <T,>(projectId: string): Promise<T | null> => {
         reject(request.error);
       };
     });
+    return await withPersistTimeout(result, IDB_TX_TIMEOUT_MS, `IndexedDB read (${projectId})`);
   } catch (error) {
     console.error('IndexedDB load error:', error);
+    if ((error as { code?: string })?.code === 'persist-timeout') {
+      invalidateCachedDb();
+    }
     return null;
   }
 };
@@ -340,10 +385,7 @@ export const deleteFromIDB = async (projectId: string) => {
     const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).delete(projectId);
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, `IndexedDB delete (${projectId})`);
   } catch (error) {
     console.error('IndexedDB delete error:', error);
   }
@@ -499,10 +541,7 @@ export const saveAppPrefsToIDB = async (activeId: string | null, clusters: any[]
       savedClusters: clusters,
       updatedAt: new Date().toISOString(),
     });
-    await new Promise<void>((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    await awaitIDBTransaction(tx, IDB_TX_TIMEOUT_MS, 'IndexedDB write (__app_prefs__)');
   } catch (error) {
     console.warn('IDB app prefs save error:', error);
   }
@@ -529,7 +568,7 @@ export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
     const dbInstance = await getIDB();
     const tx = dbInstance.transaction(IDB_STORE, 'readonly');
     const request = tx.objectStore(IDB_STORE).get('__app_prefs__');
-    return new Promise((resolve, reject) => {
+    const result = new Promise<AppPrefs | null>((resolve, reject) => {
       request.onsuccess = () => {
         if (request.result) {
           const wrapped = request.result.value ?? request.result;
@@ -545,22 +584,15 @@ export const loadAppPrefsFromIDB = async (): Promise<AppPrefs | null> => {
         reject(request.error);
       };
     });
+    return await withPersistTimeout(result, IDB_TX_TIMEOUT_MS, 'IndexedDB read (__app_prefs__)');
   } catch (error) {
     console.warn('IDB app prefs load error:', error);
+    if ((error as { code?: string })?.code === 'persist-timeout') {
+      invalidateCachedDb();
+    }
     return null;
   }
 };
-
-/** Race a promise against a timeout. Rejects with a descriptive error if the timeout fires first. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  return Promise.race([
-    promise,
-    new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
 
 /** Firestore batch commit timeout — prevents indefinite hangs if the connection is stale. */
 const FIRESTORE_BATCH_TIMEOUT_MS = 30_000;
@@ -686,7 +718,7 @@ export const saveProjectDataToFirestore = async (
     });
 
     if (ops > 0) writeBatches.push(batch.commit());
-    await withTimeout(
+    await withPersistTimeout(
       Promise.all(writeBatches),
       FIRESTORE_BATCH_TIMEOUT_MS,
       `Firestore project save (${writeBatches.length} batches, project ${projectId})`,

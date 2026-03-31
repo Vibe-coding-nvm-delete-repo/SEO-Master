@@ -19,7 +19,7 @@
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, doc, onSnapshot } from 'firebase/firestore';
 import { db } from './firebase';
 import {
   saveProjectDataToFirestore,
@@ -72,6 +72,47 @@ import {
   recordProjectFlushExit,
   isLocalWriteFailed,
 } from './cloudSyncStatus';
+import {
+  acquireProjectOperationLock,
+  appendActivityLogEntry,
+  assembleCanonicalPayload,
+  buildBaseSnapshotFromResolvedPayload,
+  buildBlockedTokenDocChanges,
+  buildEntityStateFromResolvedPayload,
+  buildGroupDocChanges,
+  buildLabelSectionDocChanges,
+  buildManualBlockedKeywordDocChanges,
+  buildTokenMergeRuleDocChanges,
+  commitRevisionedDocChanges,
+  createMutationId,
+  loadCanonicalProjectState,
+  PROJECT_ACTIVITY_LOG_SUBCOLLECTION,
+  PROJECT_BASE_SUBCOLLECTION,
+  PROJECT_BLOCKED_TOKENS_SUBCOLLECTION,
+  PROJECT_COLLAB_META_COLLECTION,
+  PROJECT_COLLAB_META_DOC,
+  PROJECT_GROUPS_SUBCOLLECTION,
+  PROJECT_LABEL_SECTIONS_SUBCOLLECTION,
+  PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION,
+  PROJECT_OPERATIONS_SUBCOLLECTION,
+  PROJECT_OPERATION_CURRENT_DOC,
+  PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION,
+  releaseProjectOperationLock,
+  replaceActivityLog,
+  replaceCollabEntities,
+  saveBaseSnapshotToFirestore,
+  type CanonicalProjectState,
+  type ProjectBaseSnapshot,
+} from './projectCollabV2';
+import type {
+  ProjectActivityLogDoc,
+  ProjectBlockedKeywordDoc,
+  ProjectBlockedTokenDoc,
+  ProjectGroupDoc,
+  ProjectLabelSectionDoc,
+  ProjectOperationLockDoc,
+  ProjectTokenMergeRuleDoc,
+} from './types';
 
 export const PROJECT_LOCAL_WRITE_TIMEOUT_MS = 15_000;
 export const PROJECT_CLOUD_WRITE_TIMEOUT_MS = 30_000;
@@ -182,6 +223,13 @@ export interface ProjectPersistence extends PersistedState {
   syncFileNameLocal: (name: string | null) => void;
   /** Force immediate Firestore flush and wait until queued writes complete. */
   flushNow: () => Promise<void>;
+  storageMode: 'legacy' | 'v2';
+  activeOperation: ProjectOperationLockDoc | null;
+  isProjectBusy: boolean;
+  runWithExclusiveOperation: <T>(
+    type: ProjectOperationLockDoc['type'],
+    task: () => Promise<T>,
+  ) => Promise<T | null>;
 
   // Atomic mutations
   addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => void;
@@ -390,9 +438,24 @@ export function useProjectPersistence(options: {
 
   // ── Project ID ────────────────────────────────────────────────────────
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
+  const [storageMode, setStorageMode] = useState<'legacy' | 'v2'>('legacy');
+  const [activeOperation, setActiveOperation] = useState<ProjectOperationLockDoc | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);
+  const storageModeRef = useRef<'legacy' | 'v2'>('legacy');
   const projectsRef = useRef(projects);
+  const baseSnapshotRef = useRef<ProjectBaseSnapshot | null>(null);
+  const groupDocsRef = useRef<ProjectGroupDoc[]>([]);
+  const blockedTokenDocsRef = useRef<ProjectBlockedTokenDoc[]>([]);
+  const manualBlockedKeywordDocsRef = useRef<ProjectBlockedKeywordDoc[]>([]);
+  const tokenMergeRuleDocsRef = useRef<ProjectTokenMergeRuleDoc[]>([]);
+  const labelSectionDocsRef = useRef<ProjectLabelSectionDoc[]>([]);
+  const activityLogDocsRef = useRef<ProjectActivityLogDoc[]>([]);
+  const activeOperationRef = useRef<ProjectOperationLockDoc | null>(null);
+  const pendingV2WriteRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingV2LocalRef = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => { activeProjectIdRef.current = activeProjectId; }, [activeProjectId]);
+  useEffect(() => { storageModeRef.current = storageMode; }, [storageMode]);
+  useEffect(() => { activeOperationRef.current = activeOperation; }, [activeOperation]);
 
   // ── Consolidated "latest" ref — always in sync, never stale ──────────
   const latest = useRef<PersistedState>({ ...EMPTY });
@@ -596,6 +659,11 @@ export function useProjectPersistence(options: {
    */
   const flushNow = useCallback(async () => {
     if (!activeProjectIdRef.current) return;
+    if (storageModeRef.current === 'v2') {
+      await pendingV2LocalRef.current;
+      await pendingV2WriteRef.current;
+      return;
+    }
     enqueueSave();
     await pendingLocalPersistRef.current;
     await pendingSaveRef.current;
@@ -612,13 +680,212 @@ export function useProjectPersistence(options: {
     await persistProjectPayloadToIDB(projectId, payload, { mode: 'checkpoint' });
   }, [buildPayload, persistProjectPayloadToIDB]);
 
+  const applyViewState = useCallback((vs: ProjectViewState) => {
+    const next: PersistedState = {
+      results: ensureNullableArray(vs.results),
+      clusterSummary: ensureNullableArray(vs.clusterSummary),
+      tokenSummary: ensureNullableArray(vs.tokenSummary),
+      groupedClusters: ensureArray(vs.groupedClusters),
+      approvedGroups: ensureArray(vs.approvedGroups),
+      activityLog: ensureArray(vs.activityLog),
+      tokenMergeRules: ensureArray(vs.tokenMergeRules),
+      autoGroupSuggestions: ensureArray(vs.autoGroupSuggestions),
+      autoMergeRecommendations: ensureArray(vs.autoMergeRecommendations),
+      groupMergeRecommendations: ensureArray(vs.groupMergeRecommendations),
+      stats: vs.stats,
+      datasetStats: vs.datasetStats as any,
+      blockedTokens: new Set<string>(ensureArray(vs.blockedTokens)),
+      blockedKeywords: ensureArray(vs.blockedKeywords),
+      labelSections: ensureArray(vs.labelSections),
+      fileName: vs.fileName,
+    };
+    latest.current = next;
+    setResults(next.results);
+    setClusterSummary(next.clusterSummary);
+    setTokenSummary(next.tokenSummary);
+    setGroupedClusters(next.groupedClusters);
+    setApprovedGroups(next.approvedGroups);
+    setActivityLog(next.activityLog);
+    setTokenMergeRules(next.tokenMergeRules);
+    setAutoGroupSuggestions(next.autoGroupSuggestions);
+    setAutoMergeRecommendations(next.autoMergeRecommendations);
+    setGroupMergeRecommendations(next.groupMergeRecommendations);
+    setStats(next.stats);
+    setDatasetStats(next.datasetStats);
+    setBlockedTokens(next.blockedTokens);
+    setBlockedKeywords(next.blockedKeywords);
+    setLabelSections(next.labelSections);
+    setFileName(next.fileName);
+  }, []);
+
+  const syncCanonicalRefsFromResolvedPayload = useCallback((payload: ProjectDataPayload) => {
+    baseSnapshotRef.current = buildBaseSnapshotFromResolvedPayload(payload);
+    const entities = buildEntityStateFromResolvedPayload(
+      payload,
+      clientIdRef.current,
+      baseSnapshotRef.current?.datasetEpoch ?? (payload.lastSaveId ?? 1),
+    );
+    groupDocsRef.current = entities.groups;
+    blockedTokenDocsRef.current = entities.blockedTokens;
+    manualBlockedKeywordDocsRef.current = entities.manualBlockedKeywords;
+    tokenMergeRuleDocsRef.current = entities.tokenMergeRules;
+    labelSectionDocsRef.current = entities.labelSections;
+    activityLogDocsRef.current = entities.activityLog;
+  }, []);
+
+  const currentDatasetEpoch = useCallback(() => {
+    const baseEpoch = baseSnapshotRef.current?.datasetEpoch ?? 0;
+    return Math.max(baseEpoch, saveCounterRef.current, 1);
+  }, []);
+
+  const recomposeFromCanonicalRefs = useCallback(() => {
+    const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
+    const payload = assembleCanonicalPayload(baseSnapshotRef.current, {
+      meta: null,
+      groups: groupDocsRef.current,
+      blockedTokens: blockedTokenDocsRef.current,
+      manualBlockedKeywords: manualBlockedKeywordDocsRef.current,
+      tokenMergeRules: tokenMergeRuleDocsRef.current,
+      labelSections: labelSectionDocsRef.current,
+      activityLog: activityLogDocsRef.current,
+      activeOperation: activeOperationRef.current,
+    });
+    if (!payload) {
+      applyViewState(createEmptyProjectViewState());
+      return null;
+    }
+    applyViewState(toProjectViewState(payload, project));
+    return payload;
+  }, [applyViewState]);
+
+  const persistCanonicalPayloadV2 = useCallback((payload: ProjectDataPayload) => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    syncCanonicalRefsFromResolvedPayload(payload);
+    const base = baseSnapshotRef.current;
+    if (!base) return;
+    const entities = {
+      meta: null,
+      groups: groupDocsRef.current,
+      blockedTokens: blockedTokenDocsRef.current,
+      manualBlockedKeywords: manualBlockedKeywordDocsRef.current,
+      tokenMergeRules: tokenMergeRuleDocsRef.current,
+      labelSections: labelSectionDocsRef.current,
+      activityLog: activityLogDocsRef.current,
+      activeOperation: activeOperationRef.current,
+    };
+    pendingV2LocalRef.current = persistProjectPayloadToIDB(projectId, payload, { mode: 'checkpoint' });
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(async () => {
+        await saveBaseSnapshotToFirestore(projectId, base, {
+          saveId: base.datasetEpoch,
+          clientId: clientIdRef.current,
+        });
+        await replaceCollabEntities(projectId, entities, clientIdRef.current, base.datasetEpoch);
+      })
+      .catch((err) => {
+        reportPersistFailure(addToast, 'project V2 save', err);
+      });
+  }, [addToast, persistProjectPayloadToIDB, syncCanonicalRefsFromResolvedPayload]);
+
+  const applyChangesLocally = useCallback((changes: Partial<PersistedState>) => {
+    latest.current = { ...latest.current, ...changes };
+    if ('results' in changes) setResults(changes.results!);
+    if ('clusterSummary' in changes) setClusterSummary(changes.clusterSummary!);
+    if ('tokenSummary' in changes) setTokenSummary(changes.tokenSummary!);
+    if ('groupedClusters' in changes) setGroupedClusters(changes.groupedClusters!);
+    if ('approvedGroups' in changes) setApprovedGroups(changes.approvedGroups!);
+    if ('blockedKeywords' in changes) setBlockedKeywords(changes.blockedKeywords!);
+    if ('activityLog' in changes) setActivityLog(changes.activityLog!);
+    if ('stats' in changes) setStats(changes.stats!);
+    if ('datasetStats' in changes) setDatasetStats(changes.datasetStats!);
+    if ('autoGroupSuggestions' in changes) setAutoGroupSuggestions(changes.autoGroupSuggestions!);
+    if ('autoMergeRecommendations' in changes) setAutoMergeRecommendations(changes.autoMergeRecommendations!);
+    if ('groupMergeRecommendations' in changes) setGroupMergeRecommendations(changes.groupMergeRecommendations!);
+    if ('tokenMergeRules' in changes) setTokenMergeRules(changes.tokenMergeRules!);
+    if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
+    if ('labelSections' in changes) setLabelSections(changes.labelSections!);
+    if ('fileName' in changes) setFileName(changes.fileName!);
+  }, []);
+
+  const applyCanonicalState = useCallback((canonical: CanonicalProjectState) => {
+    if (canonical.mode !== 'v2' || !canonical.resolved) return;
+    baseSnapshotRef.current = canonical.base;
+    groupDocsRef.current = canonical.entities.groups;
+    blockedTokenDocsRef.current = canonical.entities.blockedTokens;
+    manualBlockedKeywordDocsRef.current = canonical.entities.manualBlockedKeywords;
+    tokenMergeRuleDocsRef.current = canonical.entities.tokenMergeRules;
+    labelSectionDocsRef.current = canonical.entities.labelSections;
+    activityLogDocsRef.current = canonical.entities.activityLog;
+    setActiveOperation(canonical.entities.activeOperation);
+    activeOperationRef.current = canonical.entities.activeOperation;
+    const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
+    applyViewState(toProjectViewState(canonical.resolved, project));
+    saveCounterRef.current = canonical.resolved.lastSaveId ?? saveCounterRef.current;
+  }, [applyViewState]);
+
+  const reloadCanonicalStateFromCloud = useCallback(async () => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId || storageModeRef.current !== 'v2') return;
+    const canonical = await loadCanonicalProjectState(
+      projectId,
+      clientIdRef.current,
+      () => loadProjectDataForView(projectId),
+    );
+    if (activeProjectIdRef.current !== projectId) return;
+    applyCanonicalState(canonical);
+    if (canonical.resolved) {
+      saveToIDB(projectId, canonical.resolved).catch((err) =>
+        logPersistError('cache canonical reload to IDB', err),
+      );
+    }
+  }, [applyCanonicalState]);
+
+  const queueV2Write = useCallback((label: string, task: () => Promise<void>) => {
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(task)
+      .catch(async (err) => {
+        if (String((err as Error)?.message || '').startsWith('conflict:')) {
+          addToast('Another client changed this project item. The latest shared state was reloaded.', 'warning');
+          await reloadCanonicalStateFromCloud();
+          return;
+        }
+        reportPersistFailure(addToast, label, err);
+      });
+  }, [addToast, reloadCanonicalStateFromCloud]);
+
+  const runWithExclusiveOperation = useCallback(async <T,>(
+    type: ProjectOperationLockDoc['type'],
+    task: () => Promise<T>,
+  ): Promise<T | null> => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return null;
+    if (storageModeRef.current !== 'v2') {
+      return task();
+    }
+    const lock = await acquireProjectOperationLock(projectId, type, clientIdRef.current);
+    if (!lock) {
+      addToast('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
+      return null;
+    }
+    setActiveOperation(lock);
+    activeOperationRef.current = lock;
+    try {
+      return await task();
+    } finally {
+      await releaseProjectOperationLock(projectId, clientIdRef.current);
+      setActiveOperation(null);
+      activeOperationRef.current = null;
+    }
+  }, [addToast]);
+
   // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === 'hidden') enqueueSave();
+      if (document.visibilityState === 'hidden' && storageModeRef.current === 'legacy') enqueueSave();
     };
     const onPageHide = () => {
-      enqueueSave();
+      if (storageModeRef.current === 'legacy') enqueueSave();
     };
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('pagehide', onPageHide);
@@ -677,44 +944,244 @@ export function useProjectPersistence(options: {
     enqueueSave();
   }, [checkpointToIDB, enqueueSave]);
 
+  const applyLocalChanges = useCallback((
+    changes: Partial<PersistedState>,
+    options?: { checkpoint?: boolean },
+  ) => {
+    latest.current = { ...latest.current, ...changes };
+    saveCounterRef.current += 1;
+    if ('results' in changes) setResults(changes.results!);
+    if ('clusterSummary' in changes) setClusterSummary(changes.clusterSummary!);
+    if ('tokenSummary' in changes) setTokenSummary(changes.tokenSummary!);
+    if ('groupedClusters' in changes) setGroupedClusters(changes.groupedClusters!);
+    if ('approvedGroups' in changes) setApprovedGroups(changes.approvedGroups!);
+    if ('blockedKeywords' in changes) setBlockedKeywords(changes.blockedKeywords!);
+    if ('activityLog' in changes) setActivityLog(changes.activityLog!);
+    if ('stats' in changes) setStats(changes.stats!);
+    if ('datasetStats' in changes) setDatasetStats(changes.datasetStats!);
+    if ('autoGroupSuggestions' in changes) setAutoGroupSuggestions(changes.autoGroupSuggestions!);
+    if ('autoMergeRecommendations' in changes) setAutoMergeRecommendations(changes.autoMergeRecommendations!);
+    if ('groupMergeRecommendations' in changes) setGroupMergeRecommendations(changes.groupMergeRecommendations!);
+    if ('tokenMergeRules' in changes) setTokenMergeRules(changes.tokenMergeRules!);
+    if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
+    if ('labelSections' in changes) setLabelSections(changes.labelSections!);
+    if ('fileName' in changes) setFileName(changes.fileName!);
+    if (options?.checkpoint) {
+      pendingV2LocalRef.current = checkpointToIDB(changes);
+    }
+  }, [checkpointToIDB]);
+
   // ── applyViewState: batch-set all 14 fields from a ProjectViewState ──
-  const applyViewState = useCallback((vs: ProjectViewState) => {
-    const next: PersistedState = {
-      results: ensureNullableArray(vs.results),
-      clusterSummary: ensureNullableArray(vs.clusterSummary),
-      tokenSummary: ensureNullableArray(vs.tokenSummary),
-      groupedClusters: ensureArray(vs.groupedClusters),
-      approvedGroups: ensureArray(vs.approvedGroups),
-      activityLog: ensureArray(vs.activityLog),
-      tokenMergeRules: ensureArray(vs.tokenMergeRules),
-      autoGroupSuggestions: ensureArray(vs.autoGroupSuggestions),
-      autoMergeRecommendations: ensureArray(vs.autoMergeRecommendations),
-      groupMergeRecommendations: ensureArray(vs.groupMergeRecommendations),
-      stats: vs.stats,
-      datasetStats: vs.datasetStats as any,
-      blockedTokens: new Set<string>(ensureArray(vs.blockedTokens)),
-      blockedKeywords: ensureArray(vs.blockedKeywords),
-      labelSections: ensureArray(vs.labelSections),
-      fileName: vs.fileName,
-    };
-    latest.current = next;
-    setResults(next.results);
-    setClusterSummary(next.clusterSummary);
-    setTokenSummary(next.tokenSummary);
-    setGroupedClusters(next.groupedClusters);
-    setApprovedGroups(next.approvedGroups);
-    setActivityLog(next.activityLog);
-    setTokenMergeRules(next.tokenMergeRules);
-    setAutoGroupSuggestions(next.autoGroupSuggestions);
-    setAutoMergeRecommendations(next.autoMergeRecommendations);
-    setGroupMergeRecommendations(next.groupMergeRecommendations);
-    setStats(next.stats);
-    setDatasetStats(next.datasetStats);
-    setBlockedTokens(next.blockedTokens);
-    setBlockedKeywords(next.blockedKeywords);
-    setLabelSections(next.labelSections);
-    setFileName(next.fileName);
-  }, []);
+  const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    const mutationId = createMutationId(clientIdRef.current);
+    const changes = buildGroupDocChanges(
+      groupDocsRef.current,
+      nextGrouped,
+      nextApproved,
+      clientIdRef.current,
+      base.datasetEpoch,
+    ).map((change) => ({ ...change, mutationId }));
+    groupDocsRef.current = [
+      ...nextGrouped.map((group) => ({
+        id: group.id,
+        groupName: group.groupName,
+        status: 'grouped' as const,
+        datasetEpoch: base.datasetEpoch,
+        lastWriterClientId: clientIdRef.current,
+        clusterTokens: group.clusters.map((cluster) => cluster.tokens),
+        reviewStatus: group.reviewStatus,
+        reviewMismatchedPages: group.reviewMismatchedPages,
+        reviewReason: group.reviewReason,
+        reviewCost: group.reviewCost,
+        reviewedAt: group.reviewedAt,
+        mergeAffected: group.mergeAffected,
+        groupAutoMerged: group.groupAutoMerged,
+        pageCount: group.clusters.length,
+        totalVolume: group.totalVolume,
+        keywordCount: group.keywordCount,
+        avgKd: group.avgKd,
+        avgKwRating: group.avgKwRating,
+        revision: 0,
+        updatedAt: new Date().toISOString(),
+        updatedByClientId: clientIdRef.current,
+        lastMutationId: mutationId,
+      })),
+      ...nextApproved.map((group) => ({
+        id: group.id,
+        groupName: group.groupName,
+        status: 'approved' as const,
+        datasetEpoch: base.datasetEpoch,
+        lastWriterClientId: clientIdRef.current,
+        clusterTokens: group.clusters.map((cluster) => cluster.tokens),
+        reviewStatus: group.reviewStatus,
+        reviewMismatchedPages: group.reviewMismatchedPages,
+        reviewReason: group.reviewReason,
+        reviewCost: group.reviewCost,
+        reviewedAt: group.reviewedAt,
+        mergeAffected: group.mergeAffected,
+        groupAutoMerged: group.groupAutoMerged,
+        pageCount: group.clusters.length,
+        totalVolume: group.totalVolume,
+        keywordCount: group.keywordCount,
+        avgKd: group.avgKd,
+        avgKwRating: group.avgKwRating,
+        revision: 0,
+        updatedAt: new Date().toISOString(),
+        updatedByClientId: clientIdRef.current,
+        lastMutationId: mutationId,
+      })),
+    ];
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => commitRevisionedDocChanges(projectId, PROJECT_GROUPS_SUBCOLLECTION, changes, clientIdRef.current))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'project groups save', err);
+      });
+  }, [addToast]);
+
+  const persistBlockedTokensV2 = useCallback((nextTokens: Set<string>) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    const mutationId = createMutationId(clientIdRef.current);
+    const changes = buildBlockedTokenDocChanges(
+      blockedTokenDocsRef.current,
+      Array.from(nextTokens),
+      clientIdRef.current,
+      base.datasetEpoch,
+    ).map((change) => ({ ...change, mutationId }));
+    blockedTokenDocsRef.current = Array.from(nextTokens).map((token) => ({
+      token,
+      datasetEpoch: base.datasetEpoch,
+      lastWriterClientId: clientIdRef.current,
+      revision: 0,
+      updatedAt: new Date().toISOString(),
+      updatedByClientId: clientIdRef.current,
+      lastMutationId: mutationId,
+    }));
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => commitRevisionedDocChanges(projectId, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, changes, clientIdRef.current))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'blocked tokens save', err);
+      });
+  }, [addToast]);
+
+  const persistLabelSectionsV2 = useCallback((sections: LabelSection[]) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    const mutationId = createMutationId(clientIdRef.current);
+    const changes = buildLabelSectionDocChanges(
+      labelSectionDocsRef.current,
+      sections,
+      clientIdRef.current,
+      base.datasetEpoch,
+    ).map((change) => ({ ...change, mutationId }));
+    labelSectionDocsRef.current = sections.map((section) => ({
+      ...section,
+      datasetEpoch: base.datasetEpoch,
+      lastWriterClientId: clientIdRef.current,
+      revision: 0,
+      updatedAt: new Date().toISOString(),
+      updatedByClientId: clientIdRef.current,
+      lastMutationId: mutationId,
+    }));
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => commitRevisionedDocChanges(projectId, PROJECT_LABEL_SECTIONS_SUBCOLLECTION, changes, clientIdRef.current))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'label sections save', err);
+      });
+  }, [addToast]);
+
+  const persistTokenMergeRulesV2 = useCallback((rules: TokenMergeRule[]) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    const mutationId = createMutationId(clientIdRef.current);
+    const changes = buildTokenMergeRuleDocChanges(
+      tokenMergeRuleDocsRef.current,
+      rules,
+      clientIdRef.current,
+      base.datasetEpoch,
+    ).map((change) => ({ ...change, mutationId }));
+    tokenMergeRuleDocsRef.current = rules.map((rule) => ({
+      ...rule,
+      datasetEpoch: base.datasetEpoch,
+      lastWriterClientId: clientIdRef.current,
+      revision: 0,
+      updatedAt: new Date().toISOString(),
+      updatedByClientId: clientIdRef.current,
+      lastMutationId: mutationId,
+    }));
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => commitRevisionedDocChanges(projectId, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, changes, clientIdRef.current))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'token merge rules save', err);
+      });
+  }, [addToast]);
+
+  const persistManualBlockedKeywordsV2 = useCallback((keywords: BlockedKeyword[]) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    const mutationId = createMutationId(clientIdRef.current);
+    const changes = buildManualBlockedKeywordDocChanges(
+      manualBlockedKeywordDocsRef.current,
+      keywords,
+      clientIdRef.current,
+      base.datasetEpoch,
+    ).map((change) => ({ ...change, mutationId }));
+    manualBlockedKeywordDocsRef.current = keywords.map((keyword) => ({
+      id: `${keyword.keyword.toLowerCase()}::${keyword.reason}`,
+      ...keyword,
+      datasetEpoch: base.datasetEpoch,
+      lastWriterClientId: clientIdRef.current,
+      revision: 0,
+      updatedAt: new Date().toISOString(),
+      updatedByClientId: clientIdRef.current,
+      lastMutationId: mutationId,
+    }));
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => commitRevisionedDocChanges(projectId, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, changes, clientIdRef.current))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'manual blocked keywords save', err);
+      });
+  }, [addToast]);
+
+  const persistActivityLogEntryV2 = useCallback((entry: ActivityLogEntry) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    const mutationId = createMutationId(clientIdRef.current);
+    activityLogDocsRef.current = [
+      { ...entry, datasetEpoch: base.datasetEpoch, createdByClientId: clientIdRef.current, mutationId },
+      ...activityLogDocsRef.current,
+    ].slice(0, 500);
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => appendActivityLogEntry(projectId, entry, clientIdRef.current, base.datasetEpoch, mutationId))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'activity log append', err);
+      });
+  }, [addToast]);
+
+  const replaceActivityLogV2 = useCallback((entries: ActivityLogEntry[]) => {
+    const projectId = activeProjectIdRef.current;
+    const base = baseSnapshotRef.current;
+    if (!projectId || !base) return;
+    activityLogDocsRef.current = entries.map((entry) => ({
+      ...entry,
+      datasetEpoch: base.datasetEpoch,
+      createdByClientId: clientIdRef.current,
+      mutationId: null,
+    }));
+    pendingV2WriteRef.current = pendingV2WriteRef.current
+      .then(() => replaceActivityLog(projectId, entries, clientIdRef.current, base.datasetEpoch))
+      .catch((err) => {
+        reportPersistFailure(addToast, 'activity log replace', err);
+      });
+  }, [addToast]);
 
   // ── Project lifecycle ─────────────────────────────────────────────────
 
@@ -726,6 +1193,57 @@ export function useProjectPersistence(options: {
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
     const project = projectList.find(p => p.id === projectId);
+    const idbData = await loadProjectDataFromIDBOnly(projectId);
+    if (idbData) {
+      applyViewState(toProjectViewState(idbData, project, { skipRebuild: true }));
+    }
+
+    const canonical = await loadCanonicalProjectState(
+      projectId,
+      clientIdRef.current,
+      async () => idbData ?? loadProjectDataForView(projectId),
+    );
+
+    if (activeProjectIdRef.current !== projectId) {
+      projectLoadingRef.current = false;
+      return;
+    }
+
+    if (canonical.mode === 'v2' && canonical.resolved) {
+      setStorageMode('v2');
+      baseSnapshotRef.current = canonical.base;
+      groupDocsRef.current = canonical.entities.groups;
+      blockedTokenDocsRef.current = canonical.entities.blockedTokens;
+      manualBlockedKeywordDocsRef.current = canonical.entities.manualBlockedKeywords;
+      tokenMergeRuleDocsRef.current = canonical.entities.tokenMergeRules;
+      labelSectionDocsRef.current = canonical.entities.labelSections;
+      activityLogDocsRef.current = canonical.entities.activityLog;
+      setActiveOperation(canonical.entities.activeOperation);
+      activeOperationRef.current = canonical.entities.activeOperation;
+
+      const viewState = toProjectViewState(canonical.resolved, project);
+      applyViewState(viewState);
+      saveCounterRef.current = canonical.resolved.lastSaveId ?? 0;
+      loadFenceRef.current = countGroupedPages(viewState);
+      saveToIDB(projectId, canonical.resolved).catch((err) =>
+        logPersistError('cache canonical V2 project to IDB', err),
+      );
+    } else {
+      setStorageMode('legacy');
+      const data = canonical.resolved ?? idbData;
+      const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
+      applyViewState(viewState);
+      const loadedSaveId = data?.lastSaveId ?? 0;
+      if (loadedSaveId > saveCounterRef.current) {
+        saveCounterRef.current = loadedSaveId;
+      }
+      loadFenceRef.current = countGroupedPages(viewState);
+    }
+
+    projectLoadingRef.current = false;
+    return;
+
+    {
 
     // ── Phase 1: IDB-first fast path (~5ms) ──────────────────────────────
     // Show cached data instantly. Reconcile with Firestore in background.
@@ -784,12 +1302,25 @@ export function useProjectPersistence(options: {
     loadFenceRef.current = countGroupedPages(viewState);
 
     projectLoadingRef.current = false;
+    }
   }, [applyViewState]);
 
   const clearProject = useCallback(() => {
     // Cancel any pending flushes so stale mutations from the previous project
     // don't persist empty state to the NEW project's IDB/Firestore slot.
     needsPersistFlushRef.current = false;
+    pendingV2WriteRef.current = Promise.resolve();
+    pendingV2LocalRef.current = Promise.resolve();
+    baseSnapshotRef.current = null;
+    groupDocsRef.current = [];
+    blockedTokenDocsRef.current = [];
+    manualBlockedKeywordDocsRef.current = [];
+    tokenMergeRuleDocsRef.current = [];
+    labelSectionDocsRef.current = [];
+    activityLogDocsRef.current = [];
+    setStorageMode('legacy');
+    setActiveOperation(null);
+    activeOperationRef.current = null;
     applyViewState(createEmptyProjectViewState());
   }, [applyViewState]);
 
@@ -809,6 +1340,7 @@ export function useProjectPersistence(options: {
   useEffect(() => {
     const pid = activeProjectIdRef.current;
     if (!pid) return;
+    if (storageMode !== 'legacy') return;
     const ourClientId = clientIdRef.current;
     const unsub = onSnapshot(
       collection(db, 'projects', pid, 'chunks'),
@@ -896,29 +1428,188 @@ export function useProjectPersistence(options: {
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
       if (typeof unsub === 'function') unsub();
     };
-  }, [activeProjectId, applyViewState, addToast]);
+  }, [activeProjectId, applyViewState, addToast, storageMode]);
+
+  useEffect(() => {
+    const pid = activeProjectIdRef.current;
+    if (!pid) return;
+    if (storageMode !== 'v2') return;
+
+    const mergeRevisionedDocs = <T extends { id: string }>(
+      current: T[],
+      changes: Array<{ type: string; doc: { id: string; data: () => unknown } }>,
+    ): T[] => {
+      const next = new Map(current.map((item) => [item.id, item]));
+      for (const change of changes) {
+        if (change.type === 'removed') {
+          next.delete(change.doc.id);
+        } else {
+          next.set(change.doc.id, { id: change.doc.id, ...(change.doc.data() as object) } as T);
+        }
+      }
+      return Array.from(next.values());
+    };
+
+    const cacheRecomposedView = () => {
+      const payload = recomposeFromCanonicalRefs();
+      if (payload) {
+        saveToIDB(pid, payload).catch((err) =>
+          logPersistError('cache recomposed V2 project to IDB', err),
+        );
+      }
+    };
+
+    const baseUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_BASE_SUBCOLLECTION),
+      (snap) => {
+        if (snap.empty) return;
+        const payload = buildProjectDataPayloadFromChunkDocs(snap.docs);
+        if (!payload) return;
+        baseSnapshotRef.current = buildBaseSnapshotFromResolvedPayload(payload);
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'project base listener', err),
+    );
+
+    const groupsUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_GROUPS_SUBCOLLECTION),
+      (snap) => {
+        groupDocsRef.current = mergeRevisionedDocs(groupDocsRef.current, snap.docChanges() as any);
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'project groups listener', err),
+    );
+
+    const blockedTokensUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION),
+      (snap) => {
+        blockedTokenDocsRef.current = mergeRevisionedDocs(blockedTokenDocsRef.current, snap.docChanges() as any);
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'blocked tokens listener', err),
+    );
+
+    const manualBlockedUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION),
+      (snap) => {
+        manualBlockedKeywordDocsRef.current = mergeRevisionedDocs(
+          manualBlockedKeywordDocsRef.current,
+          snap.docChanges() as any,
+        );
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'manual blocked keywords listener', err),
+    );
+
+    const tokenMergeRulesUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION),
+      (snap) => {
+        tokenMergeRuleDocsRef.current = mergeRevisionedDocs(tokenMergeRuleDocsRef.current, snap.docChanges() as any);
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'token merge rules listener', err),
+    );
+
+    const labelSectionsUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_LABEL_SECTIONS_SUBCOLLECTION),
+      (snap) => {
+        labelSectionDocsRef.current = mergeRevisionedDocs(labelSectionDocsRef.current, snap.docChanges() as any);
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'label sections listener', err),
+    );
+
+    const activityLogUnsub = onSnapshot(
+      collection(db, 'projects', pid, PROJECT_ACTIVITY_LOG_SUBCOLLECTION),
+      (snap) => {
+        activityLogDocsRef.current = mergeRevisionedDocs(activityLogDocsRef.current, snap.docChanges() as any);
+        cacheRecomposedView();
+      },
+      (err) => reportPersistFailure(addToast, 'activity log listener', err),
+    );
+
+    const operationUnsub = onSnapshot(
+      doc(db, 'projects', pid, PROJECT_OPERATIONS_SUBCOLLECTION, PROJECT_OPERATION_CURRENT_DOC),
+      (snap) => {
+        const nextOperation = snap.exists() ? (snap.data() as ProjectOperationLockDoc) : null;
+        activeOperationRef.current = nextOperation;
+        setActiveOperation(nextOperation);
+      },
+      (err) => reportPersistFailure(addToast, 'project operation listener', err),
+    );
+
+    return () => {
+      baseUnsub();
+      groupsUnsub();
+      blockedTokensUnsub();
+      manualBlockedUnsub();
+      tokenMergeRulesUnsub();
+      labelSectionsUnsub();
+      activityLogUnsub();
+      operationUnsub();
+    };
+  }, [activeProjectId, addToast, recomposeFromCanonicalRefs, storageMode]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
   const addGroupsAndRemovePages = useCallback((newGroups: GroupedCluster[], removedTokens: Set<string>) => {
+    if (storageModeRef.current === 'v2') {
+      const s = latest.current;
+      const nextGrouped = [...s.groupedClusters, ...newGroups];
+      const nextClusters = s.clusterSummary?.filter(c => !removedTokens.has(c.tokens)) || null;
+      const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
+      applyLocalChanges({
+        groupedClusters: nextGrouped,
+        clusterSummary: nextClusters,
+        results: nextResults,
+      }, { checkpoint: true });
+      persistGroupsV2(nextGrouped, s.approvedGroups);
+      return;
+    }
     mutateAndSave(s => {
       const nextGrouped = [...s.groupedClusters, ...newGroups];
       const nextClusters = s.clusterSummary?.filter(c => !removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
       return { groupedClusters: nextGrouped, clusterSummary: nextClusters, results: nextResults };
     });
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const mergeGroupsByName = useCallback((opts: MergeGroupsByNameOpts) => {
+    if (storageModeRef.current === 'v2') {
+      const s = latest.current;
+      const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
+      const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
+      const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
+      applyLocalChanges({
+        groupedClusters: merged,
+        clusterSummary: nextClusters,
+        results: nextResults,
+      }, { checkpoint: true });
+      persistGroupsV2(merged, s.approvedGroups);
+      return;
+    }
     mutateAndSave(s => {
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
       const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
       return { groupedClusters: merged, clusterSummary: nextClusters, results: nextResults };
     });
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const updateGroups = useCallback((updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => {
+    if (storageModeRef.current === 'v2') {
+      const s = latest.current;
+      const nextGrouped = typeof updaterOrValue === 'function'
+        ? updaterOrValue(s.groupedClusters)
+        : updaterOrValue;
+      const nextApproved = approvedOverride !== undefined ? approvedOverride : s.approvedGroups;
+      applyLocalChanges({
+        groupedClusters: nextGrouped,
+        approvedGroups: nextApproved,
+      }, { checkpoint: true });
+      persistGroupsV2(nextGrouped, nextApproved);
+      return;
+    }
     mutateAndSave(s => {
       const nextGrouped = typeof updaterOrValue === 'function'
         ? updaterOrValue(s.groupedClusters)
@@ -927,7 +1618,7 @@ export function useProjectPersistence(options: {
       if (approvedOverride !== undefined) changes.approvedGroups = approvedOverride;
       return changes;
     });
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const approveGroup = useCallback((groupName: string): GroupedCluster | null => {
     const s = latest.current;
@@ -935,9 +1626,14 @@ export function useProjectPersistence(options: {
     if (!group) return null;
     const nextGrouped = s.groupedClusters.filter(g => g.groupName !== groupName);
     const nextApproved = [...s.approvedGroups, group];
+    if (storageModeRef.current === 'v2') {
+      applyLocalChanges({ groupedClusters: nextGrouped, approvedGroups: nextApproved }, { checkpoint: true });
+      persistGroupsV2(nextGrouped, nextApproved);
+      return group;
+    }
     mutateAndSave(() => ({ groupedClusters: nextGrouped, approvedGroups: nextApproved }));
     return group;
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const unapproveGroup = useCallback((groupName: string): GroupedCluster | null => {
     const s = latest.current;
@@ -945,9 +1641,14 @@ export function useProjectPersistence(options: {
     if (!group) return null;
     const nextApproved = s.approvedGroups.filter(g => g.groupName !== groupName);
     const nextGrouped = [...s.groupedClusters, group];
+    if (storageModeRef.current === 'v2') {
+      applyLocalChanges({ approvedGroups: nextApproved, groupedClusters: nextGrouped }, { checkpoint: true });
+      persistGroupsV2(nextGrouped, nextApproved);
+      return group;
+    }
     mutateAndSave(() => ({ approvedGroups: nextApproved, groupedClusters: nextGrouped }));
     return group;
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const removeFromApproved = useCallback((
     groupIds: Set<string>,
@@ -1010,6 +1711,17 @@ export function useProjectPersistence(options: {
       nextResults = appendResultRowsRemoveFromApproved(s.results, clustersToAppend);
     }
 
+    if (storageModeRef.current === 'v2') {
+      applyLocalChanges({
+        approvedGroups: newApproved,
+        groupedClusters: nextGrouped,
+        clusterSummary: nextClusters,
+        results: nextResults,
+      }, { checkpoint: true });
+      persistGroupsV2(nextGrouped, newApproved);
+      return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+    }
+
     mutateAndSave(() => ({
       approvedGroups: newApproved,
       groupedClusters: nextGrouped,
@@ -1018,7 +1730,7 @@ export function useProjectPersistence(options: {
     }));
 
     return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const ungroupPages = useCallback((
     groupIds: Set<string>,
@@ -1076,6 +1788,16 @@ export function useProjectPersistence(options: {
       nextResults = appendResultRowsUngroup(s.results, clustersToAppend);
     }
 
+    if (storageModeRef.current === 'v2') {
+      applyLocalChanges({
+        groupedClusters: newGrouped,
+        clusterSummary: nextClusters,
+        results: nextResults,
+      }, { checkpoint: true });
+      persistGroupsV2(newGrouped, s.approvedGroups);
+      return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+    }
+
     mutateAndSave(() => ({
       groupedClusters: newGrouped,
       clusterSummary: nextClusters,
@@ -1083,25 +1805,39 @@ export function useProjectPersistence(options: {
     }));
 
     return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const blockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
+    if (storageModeRef.current === 'v2') {
+      const next = new Set(latest.current.blockedTokens);
+      tokens.forEach(t => next.add(t));
+      applyLocalChanges({ blockedTokens: next }, { checkpoint: true });
+      persistBlockedTokensV2(next);
+      return;
+    }
     mutateAndSave(s => {
       const next = new Set(s.blockedTokens);
       tokens.forEach(t => next.add(t));
       return { blockedTokens: next };
     });
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistBlockedTokensV2]);
 
   const unblockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
+    if (storageModeRef.current === 'v2') {
+      const next = new Set(latest.current.blockedTokens);
+      tokens.forEach(t => next.delete(t));
+      applyLocalChanges({ blockedTokens: next }, { checkpoint: true });
+      persistBlockedTokensV2(next);
+      return;
+    }
     mutateAndSave(s => {
       const next = new Set(s.blockedTokens);
       tokens.forEach(t => next.delete(t));
       return { blockedTokens: next };
     });
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistBlockedTokensV2]);
 
   const applyMergeCascade = useCallback((cascade: {
     results: ProcessedRow[] | null;
@@ -1110,6 +1846,19 @@ export function useProjectPersistence(options: {
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
   }, newRule: TokenMergeRule) => {
+    if (storageModeRef.current === 'v2') {
+      const payload = buildPayload({
+        results: cascade.results,
+        clusterSummary: cascade.clusterSummary,
+        tokenSummary: cascade.tokenSummary,
+        groupedClusters: cascade.groupedClusters,
+        approvedGroups: cascade.approvedGroups,
+        tokenMergeRules: [...latest.current.tokenMergeRules, newRule],
+      });
+      applyViewState(toProjectViewState(payload));
+      persistCanonicalPayloadV2(payload);
+      return;
+    }
     mutateAndSave(s => ({
       results: cascade.results,
       clusterSummary: cascade.clusterSummary,
@@ -1118,7 +1867,7 @@ export function useProjectPersistence(options: {
       approvedGroups: cascade.approvedGroups,
       tokenMergeRules: [...s.tokenMergeRules, newRule],
     }));
-  }, [mutateAndSave]);
+  }, [applyViewState, buildPayload, mutateAndSave, persistCanonicalPayloadV2]);
 
   const undoMerge = useCallback((data: {
     results: ProcessedRow[] | null;
@@ -1128,6 +1877,19 @@ export function useProjectPersistence(options: {
     approvedGroups: GroupedCluster[];
     tokenMergeRules: TokenMergeRule[];
   }) => {
+    if (storageModeRef.current === 'v2') {
+      const payload = buildPayload({
+        results: data.results,
+        clusterSummary: data.clusterSummary,
+        tokenSummary: data.tokenSummary,
+        groupedClusters: data.groupedClusters,
+        approvedGroups: data.approvedGroups,
+        tokenMergeRules: data.tokenMergeRules,
+      });
+      applyViewState(toProjectViewState(payload));
+      persistCanonicalPayloadV2(payload);
+      return;
+    }
     mutateAndSave(() => ({
       results: data.results,
       clusterSummary: data.clusterSummary,
@@ -1136,25 +1898,48 @@ export function useProjectPersistence(options: {
       approvedGroups: data.approvedGroups,
       tokenMergeRules: data.tokenMergeRules,
     }));
-  }, [mutateAndSave]);
+  }, [applyViewState, buildPayload, mutateAndSave, persistCanonicalPayloadV2]);
 
   const updateLabelSections = useCallback((sections: LabelSection[]) => {
+    if (storageModeRef.current === 'v2') {
+      applyLocalChanges({ labelSections: sections }, { checkpoint: true });
+      persistLabelSectionsV2(sections);
+      return;
+    }
     mutateAndSave(() => ({ labelSections: sections }));
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistLabelSectionsV2]);
 
   const updateAutoMergeRecommendations = useCallback((recommendations: AutoMergeRecommendation[]) => {
+    if (storageModeRef.current === 'v2') {
+      const payload = buildPayload({ autoMergeRecommendations: recommendations });
+      applyViewState(toProjectViewState(payload));
+      persistCanonicalPayloadV2(payload);
+      return;
+    }
     mutateAndSave(() => ({ autoMergeRecommendations: recommendations }));
-  }, [mutateAndSave]);
+  }, [applyViewState, buildPayload, mutateAndSave, persistCanonicalPayloadV2]);
 
   const updateGroupMergeRecommendations = useCallback((recommendations: GroupMergeRecommendation[]) => {
+    if (storageModeRef.current === 'v2') {
+      const payload = buildPayload({ groupMergeRecommendations: recommendations });
+      applyViewState(toProjectViewState(payload));
+      persistCanonicalPayloadV2(payload);
+      return;
+    }
     mutateAndSave(() => ({ groupMergeRecommendations: recommendations }));
-  }, [mutateAndSave]);
+  }, [applyViewState, buildPayload, mutateAndSave, persistCanonicalPayloadV2]);
 
   // Debounced suggestion-only persistence — onSuggestionsChange can still fire very
   // often; main mutations now coalesce in flushPersistQueue. Suggestions alone use
   // a 2s idle timer so we do not schedule redundant flushes on every keystroke.
   const suggestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const updateSuggestions = useCallback((suggestions: AutoGroupSuggestion[]) => {
+    if (storageModeRef.current === 'v2') {
+      const payload = buildPayload({ autoGroupSuggestions: suggestions });
+      applyViewState(toProjectViewState(payload));
+      persistCanonicalPayloadV2(payload);
+      return;
+    }
     // Update state + ref immediately (UI stays responsive)
     latest.current = { ...latest.current, autoGroupSuggestions: suggestions };
     setAutoGroupSuggestions(suggestions);
@@ -1168,18 +1953,29 @@ export function useProjectPersistence(options: {
       suggestionTimerRef.current = null;
       enqueueSave();
     }, 2000);
-  }, [checkpointToIDB, enqueueSave]);
+  }, [applyViewState, buildPayload, checkpointToIDB, enqueueSave, persistCanonicalPayloadV2]);
 
   const addActivityEntry = useCallback((entry: ActivityLogEntry) => {
+    if (storageModeRef.current === 'v2') {
+      const next = [entry, ...latest.current.activityLog].slice(0, 500);
+      applyLocalChanges({ activityLog: next }, { checkpoint: true });
+      persistActivityLogEntryV2(entry);
+      return;
+    }
     mutateAndSave(s => {
       const next = [entry, ...s.activityLog];
       return { activityLog: next.length > 500 ? next.slice(0, 500) : next };
     });
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, persistActivityLogEntryV2]);
 
   const clearActivityLog = useCallback(() => {
+    if (storageModeRef.current === 'v2') {
+      applyLocalChanges({ activityLog: [] }, { checkpoint: true });
+      replaceActivityLogV2([]);
+      return;
+    }
     mutateAndSave(() => ({ activityLog: [] }));
-  }, [mutateAndSave]);
+  }, [applyLocalChanges, mutateAndSave, replaceActivityLogV2]);
 
   const bulkSet = useCallback((data: Partial<ProjectViewState>) => {
     const changes: Partial<PersistedState> = {};
@@ -1215,10 +2011,23 @@ export function useProjectPersistence(options: {
         }
       }
     }
+    if (storageModeRef.current === 'v2') {
+      const payload = buildPayload(changes);
+      const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
+      applyViewState(toProjectViewState(payload, project));
+      persistCanonicalPayloadV2(payload);
+      return;
+    }
     mutateAndSave(() => changes);
-  }, [mutateAndSave, projects, setProjects, addToast]);
+  }, [addToast, applyViewState, buildPayload, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
+  const isProjectBusy = Boolean(
+    activeOperation &&
+    activeOperation.ownerId !== clientIdRef.current &&
+    Date.parse(activeOperation.expiresAt || '0') > Date.now(),
+  );
+
   return {
     // Read-only state
     results, clusterSummary, tokenSummary, groupedClusters,
@@ -1234,6 +2043,10 @@ export function useProjectPersistence(options: {
     clearProject,
     syncFileNameLocal,
     flushNow,
+    storageMode,
+    activeOperation,
+    isProjectBusy,
+    runWithExclusiveOperation,
 
     // Atomic mutations
     addGroupsAndRemovePages,
