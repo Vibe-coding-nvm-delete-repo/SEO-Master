@@ -1675,6 +1675,20 @@ async function recoverStuckV2Meta(
     };
   }
 
+  // Acquire an operation lock before the recovery write.
+  // Firestore rules require an owned lock for any write that changes
+  // migrationState (classified as an epoch activation write).
+  // Without this, recovery fails with permission-denied.
+  const lock = await acquireProjectOperationLock(projectId, 'bulk-update', actorId).catch(() => null);
+  if (!lock) {
+    return {
+      recovery: {
+        attempted: true,
+        outcome: 'unchanged',
+      },
+    };
+  }
+
   try {
     return await runTransaction(db, async (tx): Promise<NonNullable<CanonicalProjectState['diagnostics']>> => {
       const metaRef = collabMetaDoc(projectId);
@@ -1706,10 +1720,10 @@ async function recoverStuckV2Meta(
         };
       }
 
+      // Verify WE own the lock (it was acquired above, but confirm it wasn't stolen)
       const lockSnap = await tx.get(lockRef);
       const currentLock = lockSnap.exists() ? (lockSnap.data() as ProjectOperationLockDoc) : null;
-      const lockActive = lockIsActive(currentLock, actorId);
-      if (lockActive) {
+      if (!currentLock || (currentLock.ownerId !== actorId && currentLock.ownerClientId !== actorId)) {
         return {
           recovery: {
             attempted: true,
@@ -1762,6 +1776,15 @@ async function recoverStuckV2Meta(
         : {
           ...current,
           migrationState: 'failed',
+          // Reset to legacy so the client can save via the legacy chunk path
+          // and Firestore rules (!hasV2Meta) allow those writes. Without this,
+          // the client falls back to legacy mode locally but Firestore still
+          // blocks legacy chunk writes because readMode is still 'v2'.
+          readMode: 'legacy',
+          // Ensure commitState has a valid value for Firestore rules validation.
+          // The meta may be missing commitState entirely (e.g. incomplete migration
+          // that wrote migrationState:'complete' without commitState/baseCommitId).
+          commitState: current.commitState ?? 'writing',
           lastMigratedAt: now,
           lastWriterClientId: actorId,
           revision: current.revision + 1,
@@ -1790,6 +1813,8 @@ async function recoverStuckV2Meta(
         step: errorInfo.step,
       },
     };
+  } finally {
+    await releaseProjectOperationLock(projectId, actorId).catch(() => undefined);
   }
 }
 
@@ -1818,6 +1843,32 @@ export async function loadCanonicalProjectState(
           ...canonical,
           diagnostics: recoveryDiagnostics,
         };
+      }
+    }
+
+    // If migration failed and no base commit exists, the V2 state is unrecoverable
+    // from Firestore alone. Fall back to legacy data and re-attempt migration.
+    // This handles the case where the meta doc has migrationState:'complete' or 'failed'
+    // but is missing commitState/baseCommitId (e.g. incomplete original migration).
+    if (recoveredMeta.migrationState === 'failed' || !recoveredMeta.baseCommitId) {
+      const legacyPayload = await legacyLoader();
+      if (legacyPayload) {
+        try {
+          const reMigrated = await migrateLegacyProjectToV2(projectId, legacyPayload, actorId);
+          return {
+            ...reMigrated,
+            diagnostics: recoveryDiagnostics,
+          };
+        } catch {
+          // Re-migration failed — return legacy mode so user can still work
+          return {
+            mode: 'legacy',
+            base: null,
+            entities: emptyEntities(),
+            resolved: legacyPayload,
+            diagnostics: recoveryDiagnostics,
+          };
+        }
       }
     }
 

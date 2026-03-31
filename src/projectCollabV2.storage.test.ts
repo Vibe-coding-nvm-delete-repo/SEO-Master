@@ -421,7 +421,32 @@ describe('projectCollabV2 storage contract', () => {
       return { exists: () => false, data: () => undefined };
     });
     firestoreMocks.getDocs.mockResolvedValue({ docs: [], empty: true });
-    firestoreMocks.runTransaction.mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'permission-denied' }));
+    // First runTransaction call is lock acquisition (succeeds),
+    // second is the recovery transaction (fails with permission-denied),
+    // third is lock release (succeeds).
+    firestoreMocks.runTransaction
+      .mockImplementationOnce(async (_db: unknown, fn: (tx: unknown) => unknown) => {
+        // Lock acquisition: return a lock doc
+        const tx = {
+          get: async (ref: { path: string }) => {
+            if (ref.path.includes('project_operations')) {
+              return { exists: () => false, data: () => undefined };
+            }
+            return { exists: () => false, data: () => undefined };
+          },
+          set: vi.fn(),
+        };
+        return fn(tx);
+      })
+      .mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'permission-denied' }))
+      .mockImplementationOnce(async (_db: unknown, fn: (tx: unknown) => unknown) => {
+        // Lock release
+        const tx = {
+          get: async () => ({ exists: () => false, data: () => undefined }),
+          set: vi.fn(),
+        };
+        return fn(tx);
+      });
 
     const canonical = await loadCanonicalProjectState('project-1', 'client-a', vi.fn(async () => makePayload(9)));
 
