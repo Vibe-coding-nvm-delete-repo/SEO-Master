@@ -1,6 +1,20 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClusterSummary, GroupedCluster, Project, ProjectCollabMetaDoc, ProjectOperationLockDoc } from './types';
+import type {
+  ActivityLogEntry,
+  AutoGroupSuggestion,
+  BlockedKeyword,
+  ClusterSummary,
+  GroupedCluster,
+  LabelSection,
+  ProcessedRow,
+  Project,
+  ProjectCollabMetaDoc,
+  ProjectOperationLockDoc,
+  Stats,
+  TokenMergeRule,
+  TokenSummary,
+} from './types';
 
 const firestoreMocks = vi.hoisted(() => {
   const listeners = new Map<string, Array<(snap: any) => void>>();
@@ -33,7 +47,7 @@ const storageMocks = vi.hoisted(() => ({
   saveProjectDataToFirestore: vi.fn(() => Promise.resolve()),
   saveToIDB: vi.fn(() => Promise.resolve()),
   saveProjectToFirestore: vi.fn(() => Promise.resolve()),
-  buildProjectDataPayloadFromChunkDocs: vi.fn(() => null),
+  buildProjectDataPayloadFromChunkDocs: vi.fn((_docs: Array<{ data: () => unknown }>) => null),
   countGroupedPages: vi.fn(() => 0),
   groupedPageMass: vi.fn(() => 0),
 }));
@@ -130,6 +144,7 @@ vi.mock('./projectCollabV2', async () => {
 });
 
 import { blockedTokenDocId, CLIENT_SCHEMA_VERSION } from './projectCollabV2';
+import { buildProjectDataPayloadFromChunkDocs } from './projectChunkPayload';
 import { useProjectPersistence } from './useProjectPersistence';
 
 function deferred<T>() {
@@ -250,6 +265,86 @@ function emitQuerySnapshot(path: string, changes: any[], hasPendingWrites = fals
     metadata: { hasPendingWrites },
     docChanges: () => changes,
   });
+}
+
+/** Drive the legacy `projects/{id}/chunks` onSnapshot used when storageMode is legacy. */
+function emitLegacyChunksSnapshot(
+  projectId: string,
+  payload: {
+    results?: ProcessedRow[];
+    clusterSummary?: ClusterSummary[];
+    groupedClusters?: GroupedCluster[];
+    approvedGroups?: GroupedCluster[];
+    tokenSummary?: TokenSummary[];
+    stats?: Stats | null;
+    datasetStats?: unknown | null;
+    blockedTokens?: string[];
+    blockedKeywords?: BlockedKeyword[];
+    labelSections?: LabelSection[];
+    activityLog?: ActivityLogEntry[];
+    tokenMergeRules?: TokenMergeRule[];
+    autoGroupSuggestions?: AutoGroupSuggestion[];
+  },
+) {
+  const results = payload.results ?? [];
+  const clusters = payload.clusterSummary ?? [];
+  const groupedClusters = payload.groupedClusters ?? [];
+  const approvedGroups = payload.approvedGroups ?? [];
+  const blockedKeywords = payload.blockedKeywords ?? [];
+  const suggestions = payload.autoGroupSuggestions ?? [];
+
+  const docs: Array<{ data: () => Record<string, unknown> }> = [
+    {
+      data: () => ({
+        type: 'meta',
+        stats: payload.stats ?? null,
+        datasetStats: payload.datasetStats ?? null,
+        tokenSummary: payload.tokenSummary ?? [],
+        groupedClusters,
+        approvedGroups,
+        blockedTokens: payload.blockedTokens ?? [],
+        labelSections: payload.labelSections ?? [],
+        activityLog: payload.activityLog ?? [],
+        tokenMergeRules: payload.tokenMergeRules ?? [],
+        resultChunkCount: results.length > 0 ? 1 : 0,
+        clusterChunkCount: clusters.length > 0 ? 1 : 0,
+        blockedChunkCount: blockedKeywords.length > 0 ? 1 : 0,
+        suggestionChunkCount: suggestions.length > 0 ? 1 : 0,
+        autoMergeChunkCount: 0,
+        groupMergeChunkCount: 0,
+        groupedClusterCount: groupedClusters.length > 0 ? 1 : 0,
+        approvedGroupCount: approvedGroups.length > 0 ? 1 : 0,
+        saveId: 99,
+      }),
+    },
+  ];
+
+  if (results.length > 0) {
+    docs.push({ data: () => ({ type: 'results', index: 0, data: results }) });
+  }
+  if (clusters.length > 0) {
+    docs.push({ data: () => ({ type: 'clusters', index: 0, data: clusters }) });
+  }
+  if (blockedKeywords.length > 0) {
+    docs.push({ data: () => ({ type: 'blocked', index: 0, data: blockedKeywords }) });
+  }
+  if (suggestions.length > 0) {
+    docs.push({ data: () => ({ type: 'suggestions', index: 0, data: suggestions }) });
+  }
+
+  const snap = {
+    empty: false,
+    docs,
+    metadata: { hasPendingWrites: false, fromCache: false },
+  };
+
+  const path = `projects/${projectId}/chunks`;
+  const listeners = firestoreMocks.listeners.get(path) ?? [];
+  const cb = listeners[listeners.length - 1];
+  if (!cb) {
+    throw new Error(`[test] no chunks listener for ${path}`);
+  }
+  cb(snap);
 }
 
 const PROJECTS: Project[] = [
@@ -1571,6 +1666,118 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     expect(Array.from(result.current.blockedTokens)).toEqual(['Project Two']);
+  });
+
+  it('clears projectLoadingRef after loadProject failure so legacy chunk snapshots are not stuck on guard 1a', async () => {
+    collabMocks.loadCanonicalProjectState.mockRejectedValueOnce(new Error('canonical boom'));
+    storageMocks.buildProjectDataPayloadFromChunkDocs.mockImplementation(buildProjectDataPayloadFromChunkDocs);
+    try {
+      const { result } = renderHook(() =>
+        useProjectPersistence({
+          projects: PROJECTS,
+          setProjects: vi.fn(),
+          addToast: vi.fn(),
+        }),
+      );
+
+      act(() => {
+        result.current.setActiveProjectId('project-1');
+      });
+
+      await act(async () => {
+        await expect(result.current.loadProject('project-1', PROJECTS)).rejects.toThrow('canonical boom');
+      });
+
+      await waitFor(() =>
+        expect(firestoreMocks.listeners.has('projects/project-1/chunks')).toBe(true),
+      );
+
+      const cluster: ClusterSummary = {
+        pageName: 'Snap Page',
+        pageNameLower: 'snap page',
+        pageNameLen: 9,
+        tokens: 'snap',
+        tokenArr: ['snap'],
+        keywordCount: 1,
+        totalVolume: 10,
+        avgKd: 20,
+        avgKwRating: 1,
+        label: '',
+        labelArr: [],
+        locationCity: null,
+        locationState: null,
+        keywords: [],
+      };
+
+      act(() => {
+        emitLegacyChunksSnapshot('project-1', {
+          clusterSummary: [cluster],
+        });
+      });
+
+      await waitFor(() => expect(result.current.clusterSummary?.map((c) => c.tokens)).toEqual(['snap']));
+    } finally {
+      storageMocks.buildProjectDataPayloadFromChunkDocs.mockReset();
+      storageMocks.buildProjectDataPayloadFromChunkDocs.mockImplementation((_docs: Array<{ data: () => unknown }>) => null);
+    }
+  });
+
+  it('live collab meta snapshot without V2 readMode flips storage to legacy and reloads chunk view', async () => {
+    workspaceMocks.loadProjectDataForView.mockResolvedValue({
+      results: [],
+      clusterSummary: [],
+      tokenSummary: [],
+      groupedClusters: [],
+      approvedGroups: [],
+      stats: null,
+      datasetStats: null,
+      blockedTokens: [],
+      blockedKeywords: [],
+      labelSections: [],
+      activityLog: [],
+      tokenMergeRules: [],
+      autoGroupSuggestions: [],
+      autoMergeRecommendations: [],
+      groupMergeRecommendations: [],
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      lastSaveId: 42,
+    });
+
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    const callsBeforeLegacyFlip = workspaceMocks.loadProjectDataForView.mock.calls.length;
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', null);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('legacy'));
+    await waitFor(() =>
+      expect(workspaceMocks.loadProjectDataForView.mock.calls.length).toBeGreaterThan(callsBeforeLegacyFlip),
+    );
+    expect(workspaceMocks.loadProjectDataForView).toHaveBeenCalledWith('project-1');
   });
 
   it('blocks transitional setter writes for active V2 projects', async () => {

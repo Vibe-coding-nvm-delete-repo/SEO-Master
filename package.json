@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit && eslint src/",
+    "lint": "tsc --noEmit && eslint src/ && node scripts/check-chunk-writer.cjs",
     "release:check": "node scripts/release.mjs check",
     "release:preview": "node scripts/release.mjs preview",
     "release:live": "node scripts/release.mjs live",

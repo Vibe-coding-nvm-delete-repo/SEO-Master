@@ -1919,6 +1919,7 @@ export function useProjectPersistence(options: {
       projectCount: projectList.length,
     });
     const project = projectList.find(p => p.id === projectId);
+    try {
     const canonicalCache = await loadCanonicalCacheFromIDB(projectId);
     const idbData = canonicalCache?.payload ?? await loadProjectDataFromIDBOnly(projectId);
     traceRuntimeEvent({
@@ -2057,7 +2058,6 @@ export function useProjectPersistence(options: {
       loadFenceRef.current = countGroupedPages(viewState);
     }
 
-    projectLoadingRef.current = false;
     traceRuntimeEvent({
       traceId: loadTraceId,
       event: 'load:complete',
@@ -2066,6 +2066,20 @@ export function useProjectPersistence(options: {
       data: { activeProjectId: activeProjectIdRef.current },
     });
     return;
+    } catch (error) {
+      traceRuntimeEvent({
+        traceId: loadTraceId,
+        event: 'load:failed',
+        source: 'useProjectPersistence.loadProject',
+        projectId,
+        data: { error: error instanceof Error ? error.message : String(error) },
+      });
+      throw error;
+    } finally {
+      if (activeProjectIdRef.current === projectId) {
+        projectLoadingRef.current = false;
+      }
+    }
     /*
 
     // ── Phase 1: IDB-first fast path (~5ms) ──────────────────────────────
@@ -2547,6 +2561,53 @@ export function useProjectPersistence(options: {
         if (!nextMeta || nextMeta.readMode !== 'v2') {
           setCanonicalReloading(false);
           setWriteUnsafe(false);
+          // Firestore recovered to legacy (or meta doc removed): match loadProject legacy branch
+          // so chunk listeners attach — do not leave storageMode 'v2' with non-V2 meta (H1).
+          epochLoadGenerationRef.current += 1;
+          epochLoadAbortRef.current?.abort();
+          epochLoadAbortRef.current = null;
+          entityListenersCleanupRef.current?.();
+          entityListenersCleanupRef.current = null;
+          serverRevisionByDocKeyRef.current.clear();
+          pendingMutationByDocKeyRef.current.clear();
+          optimisticOverlayByDocKeyRef.current.clear();
+          lastAckedMutationByDocKeyRef.current.clear();
+          baseSnapshotRef.current = null;
+          groupDocsRef.current = [];
+          blockedTokenDocsRef.current = [];
+          manualBlockedKeywordDocsRef.current = [];
+          tokenMergeRuleDocsRef.current = [];
+          labelSectionDocsRef.current = [];
+          activityLogDocsRef.current = [];
+          activeEpochRef.current = null;
+          clearWritableCanonical();
+          setLegacyWritesBlocked(false);
+          setActiveOperation(null);
+          activeOperationRef.current = null;
+          setStorageMode('legacy');
+          storageModeRef.current = 'legacy';
+          projectStorageModeResolvedRef.current = true;
+          const loadPid = pid;
+          void (async () => {
+            try {
+              const data = await loadProjectDataForView(loadPid);
+              if (activeProjectIdRef.current !== loadPid) return;
+              const proj = projectsRef.current.find((p) => p.id === loadPid);
+              const viewState = data ? toProjectViewState(data, proj) : createEmptyProjectViewState();
+              applyViewState(viewState);
+              const loadedSaveId = data?.lastSaveId ?? 0;
+              if (loadedSaveId > saveCounterRef.current) {
+                saveCounterRef.current = loadedSaveId;
+              }
+              loadFenceRef.current = countGroupedPages(viewState);
+            } catch (loadErr) {
+              if (activeProjectIdRef.current !== loadPid) return;
+              reportPersistFailure(addToastRef.current, 'legacy transition after collab meta change', loadErr, {
+                channel: 'listener',
+                ...getActiveProjectNotificationMeta(),
+              });
+            }
+          })();
           return;
         }
         if (legacyWritesBlockedRef.current) {
@@ -2673,7 +2734,24 @@ export function useProjectPersistence(options: {
       operationUnsub();
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
-  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, getActiveProjectNotificationMeta, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, storageMode, updateCanonicalCache, v2DocKey]);
+  }, [
+    activeProjectId,
+    applyCanonicalState,
+    applyViewState,
+    clearPendingForEpoch,
+    clearWritableCanonical,
+    getActiveProjectNotificationMeta,
+    recomposeFromCanonicalRefs,
+    reloadCanonicalStateFromCloud,
+    setActiveOperation,
+    setCanonicalReloading,
+    setLegacyWritesBlocked,
+    setStorageMode,
+    setWriteUnsafe,
+    storageMode,
+    updateCanonicalCache,
+    v2DocKey,
+  ]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
