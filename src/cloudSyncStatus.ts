@@ -6,6 +6,7 @@
  */
 
 import { WORKSPACE_FIRESTORE_DATABASE_ID } from './firestoreDbConfig';
+import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
 
 const subscribers = new Set<() => void>();
 
@@ -407,12 +408,26 @@ export function recordProjectFlushExit(): void {
   markStateChanged();
 }
 
-export function recordLocalPersistStart(): void {
+type LocalPersistTraceContext = {
+  traceId?: string;
+  source?: string;
+  data?: Record<string, unknown>;
+};
+
+export function recordLocalPersistStart(trace?: LocalPersistTraceContext): void {
   localWritePendingCount += 1;
+  const source = trace?.source ?? 'cloudSyncStatus.recordLocalPersistStart';
+  const traceId = trace?.traceId ?? beginRuntimeTrace(source);
+  traceRuntimeEvent({
+    traceId,
+    event: 'local-persist:pending-increment',
+    source,
+    data: { localWritePendingCount, ...(trace?.data ?? {}) },
+  });
   markStateChanged();
 }
 
-export function recordLocalPersistOk(options?: { decrementPending?: boolean }): void {
+export function recordLocalPersistOk(options?: { decrementPending?: boolean; trace?: LocalPersistTraceContext }): void {
   const decrementPending = options?.decrementPending ?? true;
   const now = Date.now();
   let changed = false;
@@ -432,9 +447,17 @@ export function recordLocalPersistOk(options?: { decrementPending?: boolean }): 
     changed = true;
   }
   if (changed) markStateChanged();
+  const source = options?.trace?.source ?? 'cloudSyncStatus.recordLocalPersistOk';
+  const traceId = options?.trace?.traceId ?? beginRuntimeTrace(source);
+  traceRuntimeEvent({
+    traceId,
+    event: 'local-persist:pending-decrement-success',
+    source,
+    data: { decrementPending, localWritePendingCount, localWriteFailed, ...(options?.trace?.data ?? {}) },
+  });
 }
 
-export function recordLocalPersistError(options?: { decrementPending?: boolean }): void {
+export function recordLocalPersistError(options?: { decrementPending?: boolean; trace?: LocalPersistTraceContext }): void {
   const decrementPending = options?.decrementPending ?? true;
   let changed = false;
   if (decrementPending) {
@@ -449,6 +472,14 @@ export function recordLocalPersistError(options?: { decrementPending?: boolean }
     changed = true;
   }
   if (changed) markStateChanged();
+  const source = options?.trace?.source ?? 'cloudSyncStatus.recordLocalPersistError';
+  const traceId = options?.trace?.traceId ?? beginRuntimeTrace(source);
+  traceRuntimeEvent({
+    traceId,
+    event: 'local-persist:pending-decrement-error',
+    source,
+    data: { decrementPending, localWritePendingCount, localWriteFailed, ...(options?.trace?.data ?? {}) },
+  });
 }
 
 export function recordProjectCloudWriteStart(): void {
@@ -699,6 +730,27 @@ export function deriveCloudStatusLine(
   }
 
   if (hasActiveProject) {
+    if (snap.shared.criticalListenerErrors.length > 0) {
+      return {
+        label: 'Workspace sync problem — check status',
+        tone: 'rose',
+        detail: detailLastOk(snap.shared.lastCloudWriteOkAtMs, 'Last workspace OK '),
+      };
+    }
+    if (snap.shared.writeFailed) {
+      return {
+        label: 'Cloud sync failed — needs attention',
+        tone: 'rose',
+        detail: detailLastOk(snap.shared.lastCloudWriteOkAtMs, 'Last workspace OK '),
+      };
+    }
+    if (snap.listeners.auxiliaryErrors.length > 0) {
+      return {
+        label: 'Background sync issue',
+        tone: 'amber',
+        detail: detailLastOk(snap.shared.lastCloudWriteOkAtMs, 'Last workspace OK '),
+      };
+    }
     if (snap.project.criticalListenerErrors.length > 0) {
       return {
         label: 'Project sync problem — check status',

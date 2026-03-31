@@ -363,6 +363,42 @@ describe('GenerateTab clear scoping', () => {
     expect(screen.queryByTestId('generate-log-table')).toBeNull();
   });
 
+  it('keeps hidden instances silent until runtime effects are activated', async () => {
+    const { rerender } = render(
+      <GenerateTabInstance
+        runtimeEffectsActive={false}
+        storageKey="_test"
+        starredModels={new Set()}
+        onToggleStar={() => undefined}
+        defaultPrompt="Primary prompt"
+        primaryPromptLabel="Pages"
+      />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(testState.subscriptions.size).toBe(0);
+
+    rerender(
+      <GenerateTabInstance
+        runtimeEffectsActive
+        storageKey="_test"
+        starredModels={new Set()}
+        onToggleStar={() => undefined}
+        defaultPrompt="Primary prompt"
+        primaryPromptLabel="Pages"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(testState.subscriptions.has('generate_rows_test')).toBe(true);
+      expect(testState.subscriptions.has('generate_logs_test')).toBe(true);
+      expect(testState.subscriptions.has('generate_settings_test')).toBe(true);
+    });
+  });
+
   it('notifies the parent when the user switches between table and log panels', async () => {
     setCachedDoc('generate_rows_test', [
       {

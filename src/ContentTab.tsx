@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef } from 'react';
 import { GenerateTabInstance, PromptSlotConfig, ExternalViewTab } from './GenerateTab';
 import { BookOpenText, Code2, FileCode2, FileText, Heading, Layers3, MessageSquareQuote, NotebookPen, OctagonAlert, PanelTop, ScrollText, Sparkles } from 'lucide-react';
 import ContentOverviewPanel from './ContentOverviewPanel';
@@ -1156,6 +1156,8 @@ async function persistGenerateRowsDoc(docId: string, rows: Array<Record<string, 
 
 interface ContentTabProps {
   activeProjectId: string | null;
+  isVisible?: boolean;
+  runtimeEffectsActive?: boolean;
   starredModels: Set<string>;
   onToggleStar: (modelId: string) => void;
   onBusyStateChange?: (isBusy: boolean) => void;
@@ -1181,7 +1183,14 @@ const CONTENT_OVERVIEW_TAB: ExternalViewTab = {
   icon: <Layers3 className="w-3.5 h-3.5" />,
 };
 
-export default function ContentTab({ activeProjectId, starredModels, onToggleStar, onBusyStateChange }: ContentTabProps) {
+export default function ContentTab({
+  activeProjectId,
+  isVisible = true,
+  runtimeEffectsActive = true,
+  starredModels,
+  onToggleStar,
+  onBusyStateChange,
+}: ContentTabProps) {
   const { addToast } = useToast();
   const [workspaceStatusByProject, setWorkspaceStatusByProject] = useState<Record<string, { ready: boolean; error: string | null }>>({});
   const [instanceBusyStateByProject, setInstanceBusyStateByProject] = useState<Record<string, Record<string, boolean>>>({});
@@ -1221,7 +1230,10 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
   const workspaceStatus = activeProjectId ? workspaceStatusByProject[activeProjectId] : undefined;
   const workspaceReady = workspaceStatus?.ready ?? false;
   const workspaceError = workspaceStatus?.error ?? null;
-  const instanceBusyState = activeProjectId ? instanceBusyStateByProject[activeProjectId] ?? {} : {};
+  const instanceBusyState = useMemo(
+    () => (activeProjectId ? instanceBusyStateByProject[activeProjectId] ?? {} : {}),
+    [activeProjectId, instanceBusyStateByProject],
+  );
   const setInstanceBusy = useCallback((instanceKey: string, isBusy: boolean) => {
     if (!activeProjectId) return;
     setInstanceBusyStateByProject((prev) => {
@@ -1236,16 +1248,65 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
       };
     });
   }, [activeProjectId]);
-  const handleInstanceBusyChange = useCallback((instanceKey: string, isBusy: boolean) => {
-    setInstanceBusy(instanceKey, isBusy);
+  const setInstanceBusyRef = useRef(setInstanceBusy);
+  useLayoutEffect(() => {
+    setInstanceBusyRef.current = setInstanceBusy;
   }, [setInstanceBusy]);
+  const contentInstanceBusyHandlers = useMemo(
+    () => ({
+      page_names: (isBusy: boolean) => setInstanceBusyRef.current('page_names', isBusy),
+      h2_content: (isBusy: boolean) => setInstanceBusyRef.current('h2_content', isBusy),
+      h2_rating: (isBusy: boolean) => setInstanceBusyRef.current('h2_rating', isBusy),
+      h2_html: (isBusy: boolean) => setInstanceBusyRef.current('h2_html', isBusy),
+      h2_summary: (isBusy: boolean) => setInstanceBusyRef.current('h2_summary', isBusy),
+      h1_body: (isBusy: boolean) => setInstanceBusyRef.current('h1_body', isBusy),
+      h1_html: (isBusy: boolean) => setInstanceBusyRef.current('h1_html', isBusy),
+      quick_answer: (isBusy: boolean) => setInstanceBusyRef.current('quick_answer', isBusy),
+      quick_answer_html: (isBusy: boolean) => setInstanceBusyRef.current('quick_answer_html', isBusy),
+      metas_slug_ctas: (isBusy: boolean) => setInstanceBusyRef.current('metas_slug_ctas', isBusy),
+      tips_redflags: (isBusy: boolean) => setInstanceBusyRef.current('tips_redflags', isBusy),
+    }),
+    [],
+  );
+  const onContentBusyParentRef = useRef(onBusyStateChange);
+  useLayoutEffect(() => {
+    onContentBusyParentRef.current = onBusyStateChange;
+  }, [onBusyStateChange]);
+  const lastReportedContentBusyRef = useRef<boolean | null>(null);
+  const isAnyContentInstanceBusy = useMemo(
+    () => Object.values(instanceBusyState).some(Boolean),
+    [instanceBusyState],
+  );
+  const isStageRuntimeActive = useCallback((instanceKey: keyof typeof contentInstanceBusyHandlers, visibleWhenShown: boolean) => (
+    runtimeEffectsActive && (Boolean(instanceBusyState[instanceKey]) || (isVisible && visibleWhenShown))
+  ), [instanceBusyState, isVisible, runtimeEffectsActive]);
+  const pageNamesRuntimeEffectsActive = isStageRuntimeActive('page_names', true);
+  const h2ContentRuntimeEffectsActive = isStageRuntimeActive('h2_content', externalView === 'h2-content');
+  const ratingRuntimeEffectsActive = isStageRuntimeActive('h2_rating', externalView === 'rating');
+  const h2HtmlRuntimeEffectsActive = isStageRuntimeActive('h2_html', externalView === 'h2-html');
+  const h2SummaryRuntimeEffectsActive = isStageRuntimeActive('h2_summary', externalView === 'h2-summary');
+  const h1BodyRuntimeEffectsActive = isStageRuntimeActive('h1_body', externalView === 'h1-body');
+  const h1HtmlRuntimeEffectsActive = isStageRuntimeActive('h1_html', externalView === 'h1-html');
+  const quickAnswerRuntimeEffectsActive = isStageRuntimeActive('quick_answer', externalView === 'quick-answer');
+  const quickAnswerHtmlRuntimeEffectsActive = isStageRuntimeActive('quick_answer_html', externalView === 'quick-answer-html');
+  const metasSlugCtasRuntimeEffectsActive = isStageRuntimeActive('metas_slug_ctas', externalView === 'metas-slug-ctas');
+  const tipsRedflagsRuntimeEffectsActive = isStageRuntimeActive('tips_redflags', externalView === 'tips-redflags');
 
   useEffect(() => {
-    onBusyStateChange?.(Object.values(instanceBusyState).some(Boolean));
-  }, [instanceBusyState, onBusyStateChange]);
+    lastReportedContentBusyRef.current = null;
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (lastReportedContentBusyRef.current === isAnyContentInstanceBusy) return;
+    lastReportedContentBusyRef.current = isAnyContentInstanceBusy;
+    onContentBusyParentRef.current?.(isAnyContentInstanceBusy);
+  }, [isAnyContentInstanceBusy]);
 
   useEffect(() => {
     let alive = true;
+    if (!runtimeEffectsActive) return () => {
+      alive = false;
+    };
     if (!activeProjectId) return () => {
       alive = false;
     };
@@ -1271,7 +1332,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
     return () => {
       alive = false;
     };
-  }, [activeProjectId]);
+  }, [activeProjectId, runtimeEffectsActive]);
 
   const syncContentUrl = useCallback((route: ContentRouteState, mode: 'push' | 'replace' = 'push') => {
     if (typeof window === 'undefined') return;
@@ -1498,6 +1559,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
   }), [scopedDocIds]);
 
   useEffect(() => {
+    if (!h2ContentRuntimeEffectsActive) return undefined;
     const recomputeRedoCount = async () => {
       const ratingRows = await loadPersistedRatingRowsFromFirestore(scopedDocIds.h2RatingRows);
       const nextCount = ratingRows.filter((row) => {
@@ -1516,7 +1578,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
       onError: () => { /* Generate surfaces already report snapshot errors */ },
     });
     return () => unsub();
-  }, [scopedDocIds.h2RatingRows]);
+  }, [h2ContentRuntimeEffectsActive, scopedDocIds.h2RatingRows]);
 
   const handleRedoLowRatedH2 = useCallback(async () => {
     try {
@@ -1608,6 +1670,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
     <div className="max-w-4xl mx-auto mt-1 space-y-1.5">
       {/* Single column: shell (view tabs) + optional H2 instance â€” one max-width, same rhythm as GenerateTabInstance internals */}
       <GenerateTabInstance
+        runtimeEffectsActive={pageNamesRuntimeEffectsActive}
         storageKey="_page_names"
         starredModels={starredModels}
         onToggleStar={onToggleStar}
@@ -1624,7 +1687,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
         onTableViewChange={handlePagesTableViewChange}
         rootLayout="flush"
         primaryColumnPreset="compact"
-        onBusyStateChange={(isBusy) => handleInstanceBusyChange('page_names', isBusy)}
+        onBusyStateChange={contentInstanceBusyHandlers.page_names}
         {...sharedContentPanelProps}
       />
 
@@ -1656,6 +1719,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           </button>
         </div>
         <GenerateTabInstance
+          runtimeEffectsActive={h2ContentRuntimeEffectsActive}
           storageKey="_h2_content"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1668,13 +1732,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           rootLayout="flush"
           showSyncButton={false}
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('h2_content', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.h2_content}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-rating" style={{ display: externalView === 'rating' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={ratingRuntimeEffectsActive}
           storageKey="_h2_rating"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1691,13 +1756,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           responseFormat="json_object"
           transformPrimaryOutput={({ rawOutput }) => parseRatingModelOutput(rawOutput)}
           clearMetadataKeysOnReset={['ratingScore']}
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('h2_rating', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.h2_rating}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-h2-html" style={{ display: externalView === 'h2-html' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={h2HtmlRuntimeEffectsActive}
           storageKey="_h2_html"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1718,13 +1784,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           primaryOutputHeaderLabel="Output (HTML)"
           lockMetadataKey={H2_HTML_LOCK_REASON_KEY}
           transformPrimaryOutput={({ rawOutput }) => validateGeneratedHtmlOutput(rawOutput)}
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('h2_html', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.h2_html}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-h2-summary" style={{ display: externalView === 'h2-summary' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={h2SummaryRuntimeEffectsActive}
           storageKey="_h2_summary"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1739,13 +1806,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           generateButtonLabel="Generate Summary"
           primaryOutputHeaderLabel="Summary"
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('h2_summary', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.h2_summary}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-h1-body" style={{ display: externalView === 'h1-body' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={h1BodyRuntimeEffectsActive}
           storageKey="_h1_body"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1760,13 +1828,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           generateButtonLabel="Generate H1"
           primaryOutputHeaderLabel="H1 Body"
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('h1_body', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.h1_body}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-h1-html" style={{ display: externalView === 'h1-html' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={h1HtmlRuntimeEffectsActive}
           storageKey="_h1_html"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1785,13 +1854,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           primaryOutputHeaderLabel="Output (HTML)"
           transformPrimaryOutput={({ rawOutput }) => validateGeneratedHtmlOutput(rawOutput)}
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('h1_html', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.h1_html}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-quick-answer" style={{ display: externalView === 'quick-answer' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={quickAnswerRuntimeEffectsActive}
           storageKey="_quick_answer"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1806,13 +1876,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           generateButtonLabel="Generate Quick Answer"
           primaryOutputHeaderLabel="Quick Answer"
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('quick_answer', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.quick_answer}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-quick-answer-html" style={{ display: externalView === 'quick-answer-html' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={quickAnswerHtmlRuntimeEffectsActive}
           storageKey="_quick_answer_html"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1831,13 +1902,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           primaryOutputHeaderLabel="Output (HTML)"
           transformPrimaryOutput={({ rawOutput }) => validateGeneratedHtmlOutput(rawOutput)}
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('quick_answer_html', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.quick_answer_html}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-metas-slug-ctas" style={{ display: externalView === 'metas-slug-ctas' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={metasSlugCtasRuntimeEffectsActive}
           storageKey="_metas_slug_ctas"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1853,13 +1925,14 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           generateButtonLabel="Generate Metas"
           primaryOutputHeaderLabel="Meta Description"
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('metas_slug_ctas', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.metas_slug_ctas}
           {...sharedContentPanelProps}
         />
       </div>
 
       <div data-testid="content-panel-tips-redflags" style={{ display: externalView === 'tips-redflags' ? undefined : 'none' }}>
         <GenerateTabInstance
+          runtimeEffectsActive={tipsRedflagsRuntimeEffectsActive}
           storageKey="_tips_redflags"
           logsStorageKey="_page_names"
           sharedSelectedModelStorageKey="_page_names"
@@ -1875,7 +1948,7 @@ export default function ContentTab({ activeProjectId, starredModels, onToggleSta
           generateButtonLabel="Generate Pro Tip"
           primaryOutputHeaderLabel="Pro Tip"
           primaryColumnPreset="compact"
-          onBusyStateChange={(isBusy) => handleInstanceBusyChange('tips_redflags', isBusy)}
+          onBusyStateChange={contentInstanceBusyHandlers.tips_redflags}
           {...sharedContentPanelProps}
         />
       </div>

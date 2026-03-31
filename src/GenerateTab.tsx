@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/exhaustive-deps */
-import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef } from 'react';
 import { Loader2, Play, Square, Settings, ChevronDown, ChevronRight, Search, Check, AlertCircle, X, Trash2, RotateCcw, Copy, Clock, Download, Zap, ScrollText, RefreshCw, Globe, HelpCircle, Star, Lock, Unlock } from 'lucide-react';
 import { useToast } from './ToastContext';
 import { reportPersistFailure } from './persistenceErrors';
@@ -372,6 +372,10 @@ function hasSlotContent(
     slotData.completionTokens !== undefined ||
     slotData.cost !== undefined
   );
+}
+
+export function shouldSkipUpstreamEmptyApply(nextRows: GenerateRow[], currentRows: GenerateRow[]): boolean {
+  return nextRows.length === 0 && currentRows.some(hasPrimaryRowContent);
 }
 
 export function countClearableRowsForView(
@@ -1367,6 +1371,8 @@ type PrimaryOutputTransformer = (args: {
 
 interface GenerateTabProps {
   activeProjectId?: string | null;
+  isVisible?: boolean;
+  runtimeEffectsActive?: boolean;
   workspaceProjectId?: string | null;
   storageKey?: string; // '' (default) or '_2' for second sub-tab
   logsStorageKey?: string; // optionally share one log surface across related tabs
@@ -1547,7 +1553,7 @@ export function resetPageGuideRowsForPolicyMigration(args: {
   });
 }
 
-export const GenerateTabInstance = React.memo(function GenerateTabInstance({ activeProjectId: _activeProjectId, workspaceProjectId = null, storageKey = '', logsStorageKey, sharedSelectedModelStorageKey, starredModels, onToggleStar, defaultPrompt = '', promptSlots = [], primaryPromptLabel, primaryPromptIcon, extraColumns = [], populateFromSource, externalViewTabsBeforePrimary = [], externalViewTabs = [], activeExternalView = null, onExternalViewSelect, controlledTableView, onTableViewChange, controlledGenSubTab, onGenSubTabChange, rootLayout = 'default', showSyncButton = true, onBusyStateChange, disableViewSwitching = false, disableViewSwitchingReason, primaryColumnPreset = 'default', generateButtonLabel = 'Generate', primaryInputHeaderLabel = 'Input', primaryOutputHeaderLabel = 'Output', transformPrimaryOutput, responseFormat = 'text', clearMetadataKeysOnReset = [], lockMetadataKey }: GenerateTabProps) {
+export const GenerateTabInstance = React.memo(function GenerateTabInstance({ activeProjectId: _activeProjectId, runtimeEffectsActive = true, workspaceProjectId = null, storageKey = '', logsStorageKey, sharedSelectedModelStorageKey, starredModels, onToggleStar, defaultPrompt = '', promptSlots = [], primaryPromptLabel, primaryPromptIcon, extraColumns = [], populateFromSource, externalViewTabsBeforePrimary = [], externalViewTabs = [], activeExternalView = null, onExternalViewSelect, controlledTableView, onTableViewChange, controlledGenSubTab, onGenSubTabChange, rootLayout = 'default', showSyncButton = true, onBusyStateChange, disableViewSwitching = false, disableViewSwitchingReason, primaryColumnPreset = 'default', generateButtonLabel = 'Generate', primaryInputHeaderLabel = 'Input', primaryOutputHeaderLabel = 'Output', transformPrimaryOutput, responseFormat = 'text', clearMetadataKeysOnReset = [], lockMetadataKey }: GenerateTabProps) {
   const { addToast } = useToast();
   const suffix = storageKey; // e.g. '' or '_2'
   const logsSuffix = logsStorageKey ?? storageKey;
@@ -1580,7 +1586,6 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     applyRowsState(nextRows, options);
     return nextRows;
   }, [applyRowsState]);
-  const lastBroadcastRowsJsonRef = useRef('');
   const [isLoaded, setIsLoaded] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logsRef = useRef(logs);
@@ -1644,6 +1649,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   // Load rows from Firestore and keep them live-synced
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     let alive = true;
     rowsFirestoreLoadedRef.current = false;
 
@@ -1773,7 +1779,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       alive = false;
       unsub();
     };
-  }, [suffix, addToast, loadCachedRows, normalizeLoadedRows, rowsDocId]);
+  }, [runtimeEffectsActive, suffix, addToast, loadCachedRows, normalizeLoadedRows, rowsDocId]);
 
   const isGeneratingRef = useRef(false);
   const lastSavedRowsJsonRef = useRef('');
@@ -1781,6 +1787,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   const upstreamSourceVersionRef = useRef(0);
   const upstreamSyncDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const deferredUpstreamSyncRef = useRef(false);
+  const lastUpstreamSyncToastKeyRef = useRef('');
 
   const persistRows = useCallback(async (rowsToSave: GenerateRow[]) => {
     const sanitizedRows = sanitizeJsonForFirestore(stripUndefinedDeep(rowsToSave));
@@ -1825,6 +1832,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   /** One-shot: load upstream + apply if safe (shared by Firestore listener and isLoaded retry). */
   const flushUpstreamPipelineSync = useCallback(async () => {
+    if (!runtimeEffectsActive) return;
     if (!populateFromSource?.load) return;
     if (hasActiveGeneration(isGeneratingRef.current, slotGeneratingRef.current)) {
       deferredUpstreamSyncRef.current = true;
@@ -1854,27 +1862,30 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       }
       const json = JSON.stringify(next);
       if (json === lastAppliedUpstreamJsonRef.current) return;
-      // Guard: don't let an empty upstream response wipe rows that have generated output.
-      // This prevents the save-storm where empty → restore → save → snapshot echo → save
-      // cascades and overwhelms IDB with competing readwrite transactions.
-      if (next.length === 0 && rowsRef.current.some(r => r.output.trim())) {
+      // Guard: don't let an empty upstream response wipe non-empty local rows.
+      // Protects both generated-output rows and synced-input rows from transient empties.
+      if (shouldSkipUpstreamEmptyApply(next, rowsRef.current)) {
         return;
       }
       setIsSyncingSource(true);
       try {
         await applyPipelineRows(next);
-        addToast(
-          next.length > 0
-            ? `Auto-synced ${next.length} H2 rows from upstream step.`
-            : 'Cleared H2 rows because upstream data is empty.',
-          'success',
-          {
-            notification: {
-              mode: 'shared',
-              source: 'generate',
+        const toastKey = next.length > 0 ? `sync:${next.length}` : 'clear:0';
+        if (toastKey !== lastUpstreamSyncToastKeyRef.current) {
+          lastUpstreamSyncToastKeyRef.current = toastKey;
+          addToast(
+            next.length > 0
+              ? `Auto-synced ${next.length} H2 rows from upstream step.`
+              : 'Cleared H2 rows because upstream data is empty.',
+            'success',
+            {
+              notification: {
+                mode: 'shared',
+                source: 'generate',
+              },
             },
-          },
-        );
+          );
+        }
       } finally {
         setIsSyncingSource(false);
       }
@@ -1891,9 +1902,10 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
         },
       );
     }
-  }, [populateFromSource, addToast, applyPipelineRows]);
+  }, [populateFromSource, addToast, applyPipelineRows, runtimeEffectsActive]);
 
   const doSave = useCallback(async () => {
+    if (!runtimeEffectsActive) return;
     // Don't persist until Firestore has confirmed its state â€” prevents
     // writing stale/empty IDB cache to Firestore and destroying real data
     if (!rowsFirestoreLoadedRef.current) return;
@@ -1914,29 +1926,18 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       },
     });
     emitLocalAppSettingsRowsUpdated(rowsDocId);
-  }, [addToast, persistRows, rowsDocId, suffix]);
+  }, [addToast, persistRows, rowsDocId, runtimeEffectsActive, suffix]);
   const { schedule: scheduleRowsSave, flushNow: flushRowsSaveNow } = useLatestPersistQueue(doSave);
 
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!isLoaded) return;
     if (hasActiveGeneration(isGeneratingRef.current, slotGeneratingRef.current)) return;
     scheduleRowsSave();
-  }, [rows, isLoaded, scheduleRowsSave]);
+  }, [rows, isLoaded, runtimeEffectsActive, scheduleRowsSave]);
 
   useEffect(() => {
-    if (!isLoaded) return;
-    const json = JSON.stringify(rows);
-    if (json === lastBroadcastRowsJsonRef.current) return;
-    lastBroadcastRowsJsonRef.current = json;
-    cacheStateLocallyBestEffort({
-      idbKey: appSettingsIdbKey(rowsDocId),
-      value: rows,
-      localStorageKey: rowsCacheKey(rowsDocId),
-    });
-    emitLocalAppSettingsRowsUpdated(rowsDocId);
-  }, [isLoaded, rows, rowsDocId, suffix]);
-
-  useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!pendingPageGuidePromptResetRef.current) return;
     if (!isLoaded || !firestoreLoadedRef.current || !rowsFirestoreLoadedRef.current) return;
     if (hasActiveGeneration(isGeneratingRef.current, slotGeneratingRef.current)) return;
@@ -1954,7 +1955,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     lastSavedRowsJsonRef.current = '';
     applyRowsState(nextRows);
     void flushRowsSaveNow();
-  }, [applyRowsState, flushRowsSaveNow, isLoaded, promptSlots, rows, suffix]);
+  }, [applyRowsState, flushRowsSaveNow, isLoaded, promptSlots, rows, runtimeEffectsActive, suffix]);
 
   // Load logs from Firestore and keep them live-synced
   const loadCachedLogs = useCallback(() => loadCachedState<LogEntry[]>({
@@ -1962,12 +1963,15 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     localStorageKey: logsCacheKey(logsDocId),
   }), [logsDocId, logsSuffix]);
   const lastSavedLogsJsonRef = useRef('');
+  const logsFirestoreLoadedRef = useRef(false);
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     let alive = true;
+    logsFirestoreLoadedRef.current = false;
     const applyCachedLogs = async () => {
       if (!alive) return;
       const cached = await loadCachedLogs();
-      if (!alive) return;
+      if (!alive || logsFirestoreLoadedRef.current) return;
       const next = Array.isArray(cached) ? cached : [];
       setLogs(next);
       lastSavedLogsJsonRef.current = JSON.stringify(next);
@@ -1982,6 +1986,9 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       onData: async (snap) => {
         const isFromCache = snap.metadata.fromCache;
         if (!snap.exists() && isFromCache) return;
+        if (!isFromCache) {
+          logsFirestoreLoadedRef.current = true;
+        }
         if (snap.exists()) {
           const logData = snap.data();
           // Suppress echo from our own write
@@ -2002,18 +2009,22 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
             return;
           }
         }
-        await applyCachedLogs();
+        if (!logsFirestoreLoadedRef.current) {
+          await applyCachedLogs();
+        }
       },
       onError: async (err) => {
         reportPersistFailure(addToast, 'generate logs sync', err);
-        await applyCachedLogs();
+        if (!logsFirestoreLoadedRef.current) {
+          await applyCachedLogs();
+        }
       },
     });
     return () => {
       alive = false;
       unsub();
     };
-  }, [addToast, loadCachedLogs, logsDocId, logsSuffix]);
+  }, [addToast, loadCachedLogs, logsDocId, logsSuffix, runtimeEffectsActive]);
 
   // suppressLogsSnapshotRef prevents onSnapshot echo from overwriting in-flight log state.
   const suppressLogsSnapshotRef = useRef(false);
@@ -2021,7 +2032,8 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   // Save logs when they change
   const persistLogs = useCallback(async () => {
-    if (!logsLoadedRef.current) return;
+    if (!runtimeEffectsActive) return;
+    if (!logsLoadedRef.current || !logsFirestoreLoadedRef.current) return;
     const trimmed = logsRef.current.slice(-500);
     const json = JSON.stringify(trimmed);
     if (json === lastSavedLogsJsonRef.current) return;
@@ -2047,12 +2059,13 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       throw err;
     }
     suppressLogsSnapshotRef.current = false;
-  }, [addToast, logsDocId, logsSuffix]);
+  }, [addToast, logsDocId, logsSuffix, runtimeEffectsActive]);
   const { schedule: scheduleLogsPersist, flushNow: flushLogsPersistNow } = useLatestPersistQueue(persistLogs);
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!logsLoadedRef.current) return;
     scheduleLogsPersist();
-  }, [logs, scheduleLogsPersist]);
+  }, [logs, runtimeEffectsActive, scheduleLogsPersist]);
 
   // Add a log entry with optional structured data
   const addLog = useCallback((action: string, details: string, extra?: Partial<LogEntry>) => {
@@ -2247,20 +2260,33 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     addToast(mutatingControlsDisabledReason, 'warning');
   }, [addToast, mutatingControlsDisabledReason]);
 
-  useEffect(() => {
-    onBusyStateChange?.(instanceBusy);
-    return () => onBusyStateChange?.(false);
-  }, [instanceBusy, onBusyStateChange]);
+  const onBusyParentRef = useRef(onBusyStateChange);
+  useLayoutEffect(() => {
+    onBusyParentRef.current = onBusyStateChange;
+  }, [onBusyStateChange]);
 
   useEffect(() => {
+    onBusyParentRef.current?.(instanceBusy);
+  }, [instanceBusy]);
+
+  useEffect(
+    () => () => {
+      onBusyParentRef.current?.(false);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!populateFromSource?.load) return;
     if (hasActiveGeneration(isGenerating, slotGenerating)) return;
     if (!deferredUpstreamSyncRef.current) return;
     deferredUpstreamSyncRef.current = false;
     void flushUpstreamPipelineSync();
-  }, [populateFromSource, isGenerating, slotGenerating, flushUpstreamPipelineSync]);
+  }, [populateFromSource, isGenerating, runtimeEffectsActive, slotGenerating, flushUpstreamPipelineSync]);
 
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (hasActiveGeneration(isGenerating, slotGenerating)) return;
     if (!deferredRowsSnapshotReloadRef.current) return;
     deferredRowsSnapshotReloadRef.current = false;
@@ -2281,7 +2307,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
         // Keep local generation state if the deferred reload fails.
       }
     })();
-  }, [applyRowsState, isGenerating, normalizeLoadedRows, rowsDocId, slotGenerating]);
+  }, [applyRowsState, isGenerating, normalizeLoadedRows, rowsDocId, runtimeEffectsActive, slotGenerating]);
 
   // Sync live cost for slot generation (mirrors primary liveCost sync)
   useEffect(() => {
@@ -2369,6 +2395,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   const viewStateLoadedRef = useRef(false);
   const lastSavedViewStateRef = useRef<string>('');
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     let alive = true;
     const applyCachedViewState = async () => {
       const parsed = await loadCachedState<{ genSubTab?: 'table' | 'log'; statusFilter?: 'all' | 'pending' | 'generated' | 'error'; tableView?: string }>({
@@ -2396,7 +2423,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     return () => {
       alive = false;
     };
-  }, [controlledGenSubTab, controlledTableView, suffix, viewStateDocId]);
+  }, [controlledGenSubTab, controlledTableView, runtimeEffectsActive, suffix, viewStateDocId]);
 
   useEffect(() => {
     if (!controlledTableView) return;
@@ -2419,6 +2446,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   }, [promptSlots, tableView]);
 
   const persistViewState = useCallback(async () => {
+    if (!runtimeEffectsActive) return;
     if (!viewStateLoadedRef.current) return;
     const json = JSON.stringify({ genSubTab, statusFilter, tableView });
     if (json === lastSavedViewStateRef.current) return;
@@ -2431,12 +2459,13 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       addToast,
       localContext: 'generate view state',
     });
-  }, [addToast, genSubTab, statusFilter, tableView, suffix, viewStateDocId]);
+  }, [addToast, genSubTab, runtimeEffectsActive, statusFilter, tableView, suffix, viewStateDocId]);
   const { schedule: scheduleViewStatePersist, flushNow: flushViewStatePersistNow } = useLatestPersistQueue(persistViewState);
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!viewStateLoadedRef.current) return;
     scheduleViewStatePersist();
-  }, [genSubTab, statusFilter, tableView, scheduleViewStatePersist]);
+  }, [genSubTab, runtimeEffectsActive, statusFilter, tableView, scheduleViewStatePersist]);
 
   // Clear all inputs
   const handleClearAll = useCallback(() => {
@@ -2676,6 +2705,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   // SECURITY: apiKey is persisted ONLY to localStorage (above), never to Firestore/IDB.
   const lastSavedSettingsRef = useRef<string>(JSON.stringify(toSharedGenerateSettings(settings)));
   const persistSettings = useCallback(async () => {
+    if (!runtimeEffectsActive) return;
     if (!settingsLoadedRef.current) return;
     // Don't persist until Firestore has confirmed its state â€” prevents
     // writing empty defaults that overwrite real data in Firestore
@@ -2704,12 +2734,13 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       throw err;
     }
     suppressSettingsSnapshotRef.current = false;
-  }, [addToast, settings, settingsDocId, suffix, toSharedGenerateSettings]);
+  }, [addToast, runtimeEffectsActive, settings, settingsDocId, suffix, toSharedGenerateSettings]);
   const { schedule: scheduleSettingsPersist, flushNow: flushSettingsPersistNow } = useLatestPersistQueue(persistSettings);
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!settingsLoadedRef.current) return;
     scheduleSettingsPersist();
-  }, [settings, scheduleSettingsPersist]);
+  }, [runtimeEffectsActive, settings, scheduleSettingsPersist]);
   const persistProjectedSettingsImmediately = useCallback((nextSettings: GenerateSettings) => {
     const projected = toSharedGenerateSettings(nextSettings);
     const json = JSON.stringify(projected);
@@ -2719,6 +2750,10 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       localStorageKey: settingsCacheKey(settingsDocId),
       localStorageValue: json,
     });
+
+    if (!settingsLoadedRef.current || !firestoreLoadedRef.current) {
+      return;
+    }
 
     const updatedAt = new Date().toISOString();
     lastSettingsWrittenAtRef.current = updatedAt;
@@ -2762,6 +2797,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     selectedModelLockedByView: settings.selectedModelLockedByView ?? {},
   });
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!selectedModelPersistMountedRef.current) {
       selectedModelPersistMountedRef.current = true;
       return;
@@ -2780,7 +2816,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       cloudContext: 'shared model setting',
       merge: true,
     });
-  }, [addToast, flushSettingsPersistNow, selectedModelStateJson, settings.selectedModel, settings.selectedModelLocked, sharedSelectedModelDocId, settingsDocId]);
+  }, [addToast, flushSettingsPersistNow, runtimeEffectsActive, selectedModelStateJson, settings.selectedModel, settings.selectedModelLocked, sharedSelectedModelDocId, settingsDocId]);
 
   // Load settings from Firestore and keep them live-synced
   // firestoreLoadedRef prevents the async IDB fallback from overwriting
@@ -2788,6 +2824,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   const firestoreLoadedRef = useRef(false);
 
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     let alive = true;
     firestoreLoadedRef.current = false;
 
@@ -2945,9 +2982,10 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       alive = false;
       unsub();
     };
-  }, [suffix, toSharedGenerateSettings, addToast, settingsDocId]);
+  }, [suffix, toSharedGenerateSettings, addToast, runtimeEffectsActive, settingsDocId]);
 
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     if (sharedSelectedModelDocId === settingsDocId) return;
     const unsub = subscribeAppSettingsDoc({
       docId: sharedSelectedModelDocId,
@@ -2970,7 +3008,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       },
     });
     return () => unsub();
-  }, [addToast, sharedSelectedModelDocId, settingsDocId]);
+  }, [addToast, runtimeEffectsActive, sharedSelectedModelDocId, settingsDocId]);
 
   // Close model dropdown on outside click â€” only listen when dropdown is actually open
   useEffect(() => {
@@ -3007,6 +3045,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   // beforeunload â€” flush on tab close / browser close
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     const handleBeforeUnload = () => {
       void flushAllSaves();
     };
@@ -3016,7 +3055,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       // Also flush on component unmount (e.g., switching main tabs)
       void flushAllSaves();
     };
-  }, [flushAllSaves]);
+  }, [flushAllSaves, runtimeEffectsActive]);
 
   // Fetch models from OpenRouter
   const fetchModels = useCallback(async () => {
@@ -3100,11 +3139,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   // Auto-fetch models + balance when API key changes
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (settings.apiKey.trim().length > 10) {
       fetchModels();
       fetchBalance();
     }
-  }, [settings.apiKey]);
+  }, [fetchBalance, fetchModels, runtimeEffectsActive, settings.apiKey]);
 
   // Filtered + sorted models for dropdown â€” starred always pinned to top
   const filteredModels = useMemo(() => {
@@ -3388,6 +3428,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   // When upstreamDocId is set, the Firestore listener handles sync â€” skip mount auto-sync entirely.
   const autoSyncDoneRef = useRef(false);
   useEffect(() => {
+    if (!runtimeEffectsActive) return;
     if (!populateFromSource || populateFromSource.upstreamDocId || autoSyncDoneRef.current || !isLoaded) return;
     const allEmpty = rowsRef.current.every(r => !r.input.trim() && !r.output.trim());
     if (!allEmpty) {
@@ -3422,9 +3463,10 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
         setIsSyncingSource(false);
       }
     })();
-  }, [populateFromSource, isLoaded, addToast, applyPipelineRows]);
+  }, [populateFromSource, isLoaded, addToast, applyPipelineRows, runtimeEffectsActive]);
   // Live-sync H2 pipeline when upstream rows doc and/or pipeline settings doc change (debounced).
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     const upstreamDocId = populateFromSource?.upstreamDocId;
     const additionalUpstreamDocIds = populateFromSource?.additionalUpstreamDocIds ?? [];
     const pipelineSettingsDocId = populateFromSource?.pipelineSettingsDocId;
@@ -3493,17 +3535,18 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       if (upstreamSyncDebounceRef.current) clearTimeout(upstreamSyncDebounceRef.current);
       window.removeEventListener(APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, handleLocalRowsUpdated as EventListener);
     };
-  }, [populateFromSource, addToast, flushUpstreamPipelineSync]);
+  }, [populateFromSource, addToast, flushUpstreamPipelineSync, runtimeEffectsActive]);
 
   // Retry pipeline sync once H2 instance has finished initial load (catches missed early snapshots).
   useEffect(() => {
+    if (!runtimeEffectsActive) return undefined;
     if (!isLoaded) return;
     if (!populateFromSource?.upstreamDocId && !(populateFromSource?.additionalUpstreamDocIds?.length) && !populateFromSource?.pipelineSettingsDocId) return;
     const t = setTimeout(() => {
       void flushUpstreamPipelineSync();
     }, 300);
     return () => clearTimeout(t);
-  }, [isLoaded, populateFromSource?.upstreamDocId, populateFromSource?.additionalUpstreamDocIds, populateFromSource?.pipelineSettingsDocId, flushUpstreamPipelineSync]);
+  }, [isLoaded, populateFromSource?.upstreamDocId, populateFromSource?.additionalUpstreamDocIds, populateFromSource?.pipelineSettingsDocId, flushUpstreamPipelineSync, runtimeEffectsActive]);
 
 
   // Generate all pending rows with rate limiting + batched UI updates
@@ -5399,6 +5442,8 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 // ============ Wrapper with sub-tabs ============
 export default function GenerateTab({
   activeProjectId = null,
+  isVisible = true,
+  runtimeEffectsActive = true,
   starredModels,
   onToggleStar,
   onBusyStateChange,
@@ -5418,6 +5463,11 @@ export default function GenerateTab({
   const tabRef = useRef(activeSubTab);
   const [gen2Activated, setGen2Activated] = useState(() => activeSubTab === '2');
   const activeSubTabDocId = 'generate_active_subtab';
+  const lastReportedBusyRef = useRef<boolean | null>(null);
+  const onBusyParentRef = useRef(onBusyStateChange);
+  useLayoutEffect(() => {
+    onBusyParentRef.current = onBusyStateChange;
+  }, [onBusyStateChange]);
   const setInstanceBusy = useCallback((instanceKey: string, isBusy: boolean) => {
     setInstanceBusyState((prev) => {
       if (prev[instanceKey] === isBusy) return prev;
@@ -5425,17 +5475,36 @@ export default function GenerateTab({
     });
   }, []);
 
-  useEffect(() => {
-    setInstanceBusyState({});
-    onBusyStateChange?.(false);
-  }, [activeProjectId, onBusyStateChange]);
+  const handleGenerate1BusyChange = useCallback((isBusy: boolean) => {
+    setInstanceBusy('generate_1', isBusy);
+  }, [setInstanceBusy]);
+  const handleGenerate2BusyChange = useCallback((isBusy: boolean) => {
+    setInstanceBusy('generate_2', isBusy);
+  }, [setInstanceBusy]);
+  const isAnyInstanceBusy = useMemo(
+    () => Object.values(instanceBusyState).some(Boolean),
+    [instanceBusyState],
+  );
+  const generate1RuntimeEffectsActive = runtimeEffectsActive && (instanceBusyState.generate_1 || isVisible && activeSubTab === '1');
+  const generate2RuntimeEffectsActive = runtimeEffectsActive && (instanceBusyState.generate_2 || isVisible && activeSubTab === '2');
 
   useEffect(() => {
-    onBusyStateChange?.(Object.values(instanceBusyState).some(Boolean));
-  }, [instanceBusyState, onBusyStateChange]);
+    setInstanceBusyState({});
+    lastReportedBusyRef.current = false;
+    onBusyParentRef.current?.(false);
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (lastReportedBusyRef.current === isAnyInstanceBusy) return;
+    lastReportedBusyRef.current = isAnyInstanceBusy;
+    onBusyParentRef.current?.(isAnyInstanceBusy);
+  }, [isAnyInstanceBusy]);
 
   useEffect(() => {
     let alive = true;
+    if (!runtimeEffectsActive) return () => {
+      alive = false;
+    };
     if (!activeProjectId) {
       setWorkspaceReady(false);
       setWorkspaceError(null);
@@ -5459,7 +5528,7 @@ export default function GenerateTab({
     return () => {
       alive = false;
     };
-  }, [activeProjectId]);
+  }, [activeProjectId, runtimeEffectsActive]);
 
   useEffect(() => {
     let alive = true;
@@ -5558,20 +5627,22 @@ export default function GenerateTab({
       <div style={activeSubTab === '1' ? undefined : { display: 'none' }}>
         <GenerateTabInstance
           workspaceProjectId={activeProjectId}
+          runtimeEffectsActive={generate1RuntimeEffectsActive}
           storageKey=""
           starredModels={starredModels}
           onToggleStar={onToggleStar}
-          onBusyStateChange={(isBusy) => setInstanceBusy('generate_1', isBusy)}
+          onBusyStateChange={handleGenerate1BusyChange}
         />
       </div>
       {gen2Activated && (
         <div style={activeSubTab === '2' ? undefined : { display: 'none' }}>
           <GenerateTabInstance
             workspaceProjectId={activeProjectId}
+            runtimeEffectsActive={generate2RuntimeEffectsActive}
             storageKey="_2"
             starredModels={starredModels}
             onToggleStar={onToggleStar}
-            onBusyStateChange={(isBusy) => setInstanceBusy('generate_2', isBusy)}
+            onBusyStateChange={handleGenerate2BusyChange}
           />
         </div>
       )}

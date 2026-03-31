@@ -410,6 +410,17 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       if (typeof d.assignmentPrompt === 'string' && d.assignmentPrompt.trim()) setAgAssignmentPrompt(d.assignmentPrompt);
       if (typeof d.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
       if (typeof d.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
+      lastAgSavedRef.current = JSON.stringify({
+        apiKey: typeof d.apiKey === 'string' ? d.apiKey : '',
+        model: typeof d.model === 'string' ? d.model : '',
+        temperature: d.temperature !== undefined ? Number(d.temperature) : 1,
+        concurrency: d.concurrency !== undefined ? Math.min(250, Math.max(1, Number(d.concurrency) || 5)) : 5,
+        batchSize: d.batchSize !== undefined ? Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))) : 5,
+        reasoning: d.reasoning === 'low' || d.reasoning === 'medium' || d.reasoning === 'high' ? d.reasoning : 'off',
+        assignmentPrompt: typeof d.assignmentPrompt === 'string' ? d.assignmentPrompt : DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT,
+        qaPrompt: typeof d.qaPrompt === 'string' ? d.qaPrompt : DEFAULT_AUTO_GROUP_QA_PROMPT,
+        cosineSummaryPrompt: typeof d.cosineSummaryPrompt === 'string' ? d.cosineSummaryPrompt : DEFAULT_COSINE_SUMMARY_PROMPT,
+      });
       setAgSettingsHydrated(true);
     });
     const unsub = subscribeAppSettingsDoc({
@@ -433,6 +444,17 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
         if (typeof d?.qaPrompt === 'string' && d.qaPrompt.trim()) setAgQaPrompt(d.qaPrompt);
         if (typeof d?.cosineSummaryPrompt === 'string' && d.cosineSummaryPrompt.trim()) setCosineSummaryPrompt(d.cosineSummaryPrompt);
         if (d) {
+          lastAgSavedRef.current = JSON.stringify({
+            apiKey: typeof d.apiKey === 'string' ? d.apiKey : '',
+            model: typeof d.model === 'string' ? d.model : '',
+            temperature: d.temperature !== undefined ? Number(d.temperature) : 1,
+            concurrency: d.concurrency !== undefined ? Math.min(250, Math.max(1, Number(d.concurrency) || 5)) : 5,
+            batchSize: d.batchSize !== undefined ? Math.min(AUTO_GROUP_MAX_BATCH_PAGES, Math.max(5, Number(d.batchSize))) : 5,
+            reasoning: d.reasoning === 'low' || d.reasoning === 'medium' || d.reasoning === 'high' ? d.reasoning : 'off',
+            assignmentPrompt: typeof d.assignmentPrompt === 'string' ? d.assignmentPrompt : DEFAULT_AUTO_GROUP_ASSIGNMENT_PROMPT,
+            qaPrompt: typeof d.qaPrompt === 'string' ? d.qaPrompt : DEFAULT_AUTO_GROUP_QA_PROMPT,
+            cosineSummaryPrompt: typeof d.cosineSummaryPrompt === 'string' ? d.cosineSummaryPrompt : DEFAULT_COSINE_SUMMARY_PROMPT,
+          });
           cacheStateLocallyBestEffort({
             idbKey: appSettingsIdbKey('autogroup_settings'),
             value: d,

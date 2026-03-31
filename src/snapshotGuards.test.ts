@@ -16,10 +16,13 @@ const base: SnapshotGuardInput = {
   incomingApprovedChunkCount: 2,
   incomingDataGroupedCount: 5,
   incomingDataApprovedCount: 2,
+  incomingResultsCount: 10,
+  incomingClusterCount: 8,
   loadFence: 0,
   incomingGroupedPageMass: 50,
   incomingSaveId: 100,
   localSaveId: 50,
+  incomingFromCache: false,
 };
 
 describe('evaluateSnapshotGuards', () => {
@@ -94,6 +97,46 @@ describe('evaluateSnapshotGuards', () => {
     const r = evaluateSnapshotGuards({
       ...base, dataExists: false, localResults: 0, localGroupedCount: 0,
       localApprovedCount: 0, localClusterCount: 0,
+    });
+    expect(r.action).toBe('apply');
+  });
+
+  it('Guard 3b: skips effective-empty payload when local has data and snapshot is not authoritative', () => {
+    const r = evaluateSnapshotGuards({
+      ...base,
+      dataExists: true,
+      localResults: 10,
+      localGroupedCount: 2,
+      localApprovedCount: 1,
+      localClusterCount: 4,
+      incomingResultsCount: 0,
+      incomingDataGroupedCount: 0,
+      incomingDataApprovedCount: 0,
+      incomingClusterCount: 0,
+      incomingSaveId: 0,
+      localSaveId: 50,
+      incomingFromCache: false,
+    });
+    expect(r).toEqual({ action: 'skip', guard: '3b:effectiveEmpty_hasLocal' });
+  });
+
+  it('Guard 3b: allows effective-empty payload only when server-authoritative and newer', () => {
+    const r = evaluateSnapshotGuards({
+      ...base,
+      dataExists: true,
+      localResults: 10,
+      localGroupedCount: 2,
+      localApprovedCount: 1,
+      localClusterCount: 4,
+      incomingResultsCount: 0,
+      incomingDataGroupedCount: 0,
+      incomingDataApprovedCount: 0,
+      incomingClusterCount: 0,
+      incomingGroupedChunkCount: 0,
+      incomingApprovedChunkCount: 0,
+      incomingSaveId: 70,
+      localSaveId: 50,
+      incomingFromCache: false,
     });
     expect(r.action).toBe('apply');
   });

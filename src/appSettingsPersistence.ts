@@ -1,5 +1,6 @@
 import type { DocumentData, FirestoreError, Unsubscribe } from 'firebase/firestore';
 import { loadFromIDB, saveToIDB } from './projectStorage';
+import { withPersistTimeout } from './persistTimeout';
 import { setAppSettingsDocData, subscribeAppSettingsDocData } from './appSettingsDocStore';
 import {
   clearListenerError,
@@ -14,6 +15,13 @@ import {
   recordSharedCloudWriteStart,
 } from './cloudSyncStatus';
 import { reportLocalPersistFailure, reportPersistFailure, type PersistToastFn } from './persistenceErrors';
+
+/**
+ * Upper bound for app-settings IDB durability (includes time queued behind other IDB writes).
+ * Without this, a hung `saveToIDB` would leave `localWritePendingCount` stuck and the status
+ * bar on "Saving… don't refresh" indefinitely.
+ */
+export const APP_SETTINGS_LOCAL_DURABILITY_TIMEOUT_MS = 90_000;
 
 type CachedRecord<T> = {
   value: T;
@@ -106,7 +114,11 @@ export async function persistLocalCachedState<T>({
 }: PersistLocalCachedStateOptions<T>): Promise<boolean> {
   recordLocalPersistStart();
   try {
-    await cacheStateLocally({ idbKey, value, localStorageKey, localStorageValue });
+    await withPersistTimeout(
+      cacheStateLocally({ idbKey, value, localStorageKey, localStorageValue }),
+      APP_SETTINGS_LOCAL_DURABILITY_TIMEOUT_MS,
+      `app settings local cache (${localContext})`,
+    );
     recordLocalPersistOk();
     return true;
   } catch (err) {
@@ -147,7 +159,11 @@ export async function persistTrackedState<T>({
 
   recordLocalPersistStart();
   try {
-    await cacheStateLocally({ idbKey, value, localStorageKey, localStorageValue });
+    await withPersistTimeout(
+      cacheStateLocally({ idbKey, value, localStorageKey, localStorageValue }),
+      APP_SETTINGS_LOCAL_DURABILITY_TIMEOUT_MS,
+      `app settings local durability (${localContext})`,
+    );
     localOk = true;
     recordLocalPersistOk();
   } catch (err) {

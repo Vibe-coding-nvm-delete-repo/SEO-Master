@@ -53,7 +53,7 @@ describe('AppStatusBar', () => {
     expect(labels.easternLine).toMatch(/^US Eastern \(EST\/EDT\):/);
   });
 
-  it('updates the open tooltip when auxiliary diagnostics change without changing the project-first headline', async () => {
+  it('updates the open tooltip when auxiliary diagnostics change and surfaces background sync status', async () => {
     await flushCloud(() => {
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, { metadata: { fromCache: false } });
     });
@@ -74,7 +74,7 @@ describe('AppStatusBar', () => {
     await waitFor(() => {
       expect(screen.getByText(/1 error\(s\): Notifications/)).toBeTruthy();
     });
-    expect(screen.getByTestId('cloud-status-chip').textContent).toContain('Cloud: synced');
+    expect(screen.getByTestId('cloud-status-chip').textContent).toContain('Background sync issue');
   });
 
   it('renders the tooltip from the same current snapshot as the chip and shows split project/shared sync rows', async () => {

@@ -55,6 +55,11 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     toastsRef.current = toasts;
   }, [toasts]);
 
+  const commitToasts = useCallback((next: Toast[]) => {
+    toastsRef.current = next;
+    setToasts(next);
+  }, []);
+
   useEffect(() => {
     const dismissTimers = dismissTimersRef.current;
     const exitTimers = exitTimersRef.current;
@@ -81,8 +86,8 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const finalizeRemoveToast = useCallback((id: string) => {
     clearTimersForToast(id);
-    setToasts(prev => prev.filter(t => t.id !== id));
-  }, [clearTimersForToast]);
+    commitToasts(toastsRef.current.filter(t => t.id !== id));
+  }, [clearTimersForToast, commitToasts]);
 
   const removeToast = useCallback((id: string) => {
     const current = toastsRef.current.find(t => t.id === id);
@@ -96,10 +101,10 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       dismissTimersRef.current.delete(id);
     }
     if (current.exiting || exitTimersRef.current.has(id)) return;
-    setToasts(prev => prev.map(t => (t.id === id ? { ...t, exiting: true } : t)));
+    commitToasts(toastsRef.current.map(t => (t.id === id ? { ...t, exiting: true } : t)));
     const exitTimer = setTimeout(() => finalizeRemoveToast(id), TOAST_EXIT_MS);
     exitTimersRef.current.set(id, exitTimer);
-  }, [clearTimersForToast, finalizeRemoveToast]);
+  }, [clearTimersForToast, commitToasts, finalizeRemoveToast]);
 
   const addToast = useCallback((message: string, type: ToastType = 'info', options?: ToastOptions) => {
     const createdAtMs = Date.now();
@@ -110,28 +115,26 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     if (existing) {
       clearTimersForToast(existing.id);
-      setToasts(prev => {
-        const current = prev.find(toast => toast.id === existing.id);
-        if (!current) return prev;
-        return [
+      const current = toastsRef.current.find(toast => toast.id === existing.id);
+      if (current) {
+        commitToasts([
           {
             ...current,
             createdAtMs,
             duplicateCount: (current.duplicateCount ?? 1) + 1,
             exiting: false,
           },
-          ...prev.filter(toast => toast.id !== existing.id),
-        ];
-      });
+          ...toastsRef.current.filter(toast => toast.id !== existing.id),
+        ]);
+      }
     } else {
       const toast: Toast = { id, message, type, createdAtMs };
-      setToasts(prev => {
-        const next = [toast, ...prev];
-        if (next.length <= MAX_TOASTS) return next;
+      const next = [toast, ...toastsRef.current];
+      if (next.length > MAX_TOASTS) {
         const removed = next.slice(MAX_TOASTS);
         removed.forEach(item => clearTimersForToast(item.id));
-        return next.slice(0, MAX_TOASTS);
-      });
+      }
+      commitToasts(next.slice(0, MAX_TOASTS));
     }
 
     if (shouldPersistSharedNotification(options)) {
@@ -150,7 +153,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const timer = setTimeout(() => removeToast(id), AUTO_DISMISS_MS);
     dismissTimersRef.current.set(id, timer);
-  }, [clearTimersForToast, removeToast]);
+  }, [clearTimersForToast, commitToasts, removeToast]);
 
   return (
     <ToastContext.Provider value={{ toasts, addToast, removeToast }}>

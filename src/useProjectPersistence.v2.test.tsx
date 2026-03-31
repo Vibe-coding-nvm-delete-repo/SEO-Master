@@ -640,6 +640,89 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('surfaces a rules-focused warning when shared-project recovery is blocked by permissions', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue({
+      ...makeCanonical(1),
+      entities: {
+        ...makeCanonical(1).entities,
+        meta: {
+          ...makeMeta(1, 2),
+          commitState: 'writing',
+          migrationState: 'running',
+        },
+      },
+      resolved: null,
+      diagnostics: {
+        recovery: {
+          attempted: true,
+          outcome: 'failed',
+          code: 'permission-denied',
+          step: 'repair collab meta',
+        },
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('recovery is blocked by Firestore permissions'),
+      'warning',
+    );
+  });
+
+  it('suppresses legacy chunk writes while project storage mode is unresolved', async () => {
+    const canonicalLoad = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalProjectState.mockImplementation(() => canonicalLoad.promise);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+      void result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await flush();
+
+    act(() => {
+      result.current.bulkSet({
+        results: [{ tokens: 'alpha' } as any],
+        fileName: 'Suppressed during bootstrap',
+      });
+    });
+
+    await flush();
+
+    expect(storageMocks.saveProjectDataToFirestore).not.toHaveBeenCalled();
+    expect(storageMocks.saveProjectToFirestore).not.toHaveBeenCalled();
+    expect(storageMocks.saveToIDB).not.toHaveBeenCalled();
+
+    await act(async () => {
+      canonicalLoad.resolve(makeCanonical(1));
+      await canonicalLoad.promise;
+    });
+  });
+
   it('drops conflicted optimistic state and reloads canonical docs from cloud', async () => {
     const addToast = vi.fn();
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));

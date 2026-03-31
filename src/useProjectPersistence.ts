@@ -55,7 +55,7 @@ import type {
   ProjectCollabMetaDoc,
 } from './types';
 import { parseSubClusterKey } from './subClusterKeys';
-import { logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
+import { getPersistErrorInfo, logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
 import { withPersistTimeout } from './persistTimeout';
 import {
   clearListenerError,
@@ -72,6 +72,7 @@ import {
   recordProjectFlushExit,
   isLocalWriteFailed,
 } from './cloudSyncStatus';
+import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
 import {
   acquireProjectOperationLock,
   activityLogDocId,
@@ -365,10 +366,13 @@ export type SnapshotGuardInput = {
   incomingApprovedChunkCount: number | null;
   incomingDataGroupedCount: number;
   incomingDataApprovedCount: number;
+  incomingResultsCount: number;
+  incomingClusterCount: number;
   loadFence: number;
   incomingGroupedPageMass: number;
   incomingSaveId: number;
   localSaveId: number;
+  incomingFromCache: boolean;
 };
 
 export type SnapshotGuardResult =
@@ -386,6 +390,29 @@ export function evaluateSnapshotGuards(input: SnapshotGuardInput): SnapshotGuard
     if (input.localGroupedCount > 0) return { action: 'skip', guard: '3:emptySnap_hasGrouped' };
     if (input.localApprovedCount > 0) return { action: 'skip', guard: '3:emptySnap_hasApproved' };
     if (input.localClusterCount > 0) return { action: 'skip', guard: '3:emptySnap_hasClusters' };
+  }
+
+  if (input.dataExists) {
+    const localHasData =
+      input.localResults > 0 ||
+      input.localGroupedCount > 0 ||
+      input.localApprovedCount > 0 ||
+      input.localClusterCount > 0;
+    const incomingHasData =
+      input.incomingResultsCount > 0 ||
+      input.incomingDataGroupedCount > 0 ||
+      input.incomingDataApprovedCount > 0 ||
+      input.incomingClusterCount > 0;
+    if (localHasData && !incomingHasData) {
+      const authoritativeDestructiveApply =
+        !input.incomingFromCache &&
+        input.incomingSaveId > 0 &&
+        input.localSaveId > 0 &&
+        input.incomingSaveId >= input.localSaveId;
+      if (!authoritativeDestructiveApply) {
+        return { action: 'skip', guard: '3b:effectiveEmpty_hasLocal' };
+      }
+    }
   }
 
   if (input.dataExists) {
@@ -471,6 +498,7 @@ export function useProjectPersistence(options: {
   const lastAckedMutationByDocKeyRef = useRef<Map<string, string | null>>(new Map());
   const legacyWritesBlockedRef = useRef(false);
   const v2RecoveryModeRef = useRef(false);
+  const projectStorageModeResolvedRef = useRef(false);
   const lockHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lockHeartbeatLostRef = useRef(false);
   const activeOperationRef = useRef<ProjectOperationLockDoc | null>(null);
@@ -546,6 +574,8 @@ export function useProjectPersistence(options: {
   const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
   const pendingLocalPersistRef = useRef<Promise<void>>(Promise.resolve());
   const saveCounterRef = useRef(0);
+  const activePersistTraceRef = useRef<string | null>(null);
+  const activePersistSourceRef = useRef<string>('unknown');
   /** True if a mutation happened since we started the current persist iteration (coalesced saves). */
   const needsPersistFlushRef = useRef(false);
   /** True while flushPersistQueue is awaiting IDB/Firestore writes. Prevents onSnapshot
@@ -556,6 +586,16 @@ export function useProjectPersistence(options: {
   // different clientId) from shrinking grouped/approved state below what was
   // loaded from IDB. Set after loadProject, cleared on first local save.
   const loadFenceRef = useRef(0);
+  const getLegacyPersistBlockReason = useCallback((): string | null => {
+    if (!activeProjectIdRef.current) return 'no-active-project';
+    if (storageModeRef.current !== 'legacy') return 'storage-mode-not-legacy';
+    if (!projectStorageModeResolvedRef.current) return 'storage-mode-unresolved';
+    if (projectLoadingRef.current) return 'project-loading';
+    if (legacyWritesBlockedRef.current) return 'legacy-writes-blocked';
+    if (v2RecoveryModeRef.current) return 'v2-recovery';
+    if (collabMetaRef.current?.readMode === 'v2') return 'collab-meta-v2';
+    return null;
+  }, []);
 
   /** Build a full ProjectDataPayload from `latest.current` + optional overrides. */
   const buildPayload = useCallback((overrides?: Partial<PersistedState>): ProjectDataPayload => {
@@ -584,11 +624,18 @@ export function useProjectPersistence(options: {
   const persistProjectPayloadToIDB = useCallback(async (
     projectId: string,
     payload: ProjectDataPayload,
-    options?: { mode?: 'checkpoint' | 'flush' },
+    options?: { mode?: 'checkpoint' | 'flush'; traceId?: string; traceSource?: string },
   ): Promise<boolean> => {
     const mode = options?.mode ?? 'checkpoint';
+    const localTrace = options?.traceId
+      ? {
+          traceId: options.traceId,
+          source: options.traceSource ?? 'useProjectPersistence.persistProjectPayloadToIDB',
+          data: { mode },
+        }
+      : undefined;
     if (mode === 'checkpoint') {
-      recordLocalPersistStart();
+      recordLocalPersistStart(localTrace);
     }
     try {
       await withPersistTimeout(
@@ -598,16 +645,16 @@ export function useProjectPersistence(options: {
       );
       // Both modes clear the failed flag on success — this is critical so that
       // a flush after a failed checkpoint can recover the durability status.
-      recordLocalPersistOk({ decrementPending: mode === 'checkpoint' });
+      recordLocalPersistOk({ decrementPending: mode === 'checkpoint', trace: localTrace });
       return true;
     } catch (err) {
       if (mode === 'checkpoint') {
-        recordLocalPersistError();
+        recordLocalPersistError({ trace: localTrace });
         reportLocalPersistFailure(addToastRef.current, 'project data local save', err);
       } else {
         // Flush mode: still update durability status so the UI reflects reality,
         // but skip the toast (flushes are background work, don't spam the user).
-        recordLocalPersistError({ decrementPending: false });
+        recordLocalPersistError({ decrementPending: false, trace: localTrace });
         logPersistError('IDB save (flush)', err);
       }
       return false;
@@ -623,6 +670,29 @@ export function useProjectPersistence(options: {
   const flushPersistQueue = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    const traceId = activePersistTraceRef.current;
+    const blockReason = getLegacyPersistBlockReason();
+    if (blockReason) {
+      if (traceId) {
+        traceRuntimeEvent({
+          traceId,
+          event: 'persist:flush-suppressed',
+          source: 'useProjectPersistence.flushPersistQueue',
+          projectId,
+          data: { trigger: activePersistSourceRef.current, reason: blockReason },
+        });
+      }
+      return;
+    }
+    if (traceId) {
+      traceRuntimeEvent({
+        traceId,
+        event: 'persist:flush-enter',
+        source: 'useProjectPersistence.flushPersistQueue',
+        projectId,
+        data: { trigger: activePersistSourceRef.current },
+      });
+    }
 
     isFlushingRef.current = true;
     recordProjectFlushEnter();
@@ -636,6 +706,20 @@ export function useProjectPersistence(options: {
         const payload = buildPayload();
         payload.lastSaveId = saveId;
         const clientId = clientIdRef.current;
+        if (traceId) {
+          traceRuntimeEvent({
+            traceId,
+            event: 'persist:loop-iteration',
+            source: 'useProjectPersistence.flushPersistQueue',
+            projectId,
+            data: {
+              saveId,
+              resultsCount: payload.results?.length ?? 0,
+              groupedCount: payload.groupedClusters?.length ?? 0,
+              approvedCount: payload.approvedGroups?.length ?? 0,
+            },
+          });
+        }
 
         // Guard: refuse to save a completely empty payload. A project with zero
         // results, zero grouped clusters, AND zero approved groups is never a
@@ -643,20 +727,51 @@ export function useProjectPersistence(options: {
         // artifact. Saving it would overwrite real data in IDB/Firestore.
         if (!(payload.results?.length) && !(payload.groupedClusters?.length) && !(payload.approvedGroups?.length)) {
           console.warn('[PERSIST] Skipping flush of empty payload (no results/groups/approved)');
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:skip-empty-payload',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId },
+            });
+          }
           break;
         }
 
         loadFenceRef.current = 0;
 
-        await persistProjectPayloadToIDB(projectId, payload, { mode: 'flush' });
+        await persistProjectPayloadToIDB(projectId, payload, {
+          mode: 'flush',
+          traceId: traceId ?? undefined,
+          traceSource: 'useProjectPersistence.flushPersistQueue',
+        });
         try {
           recordProjectCloudWriteStart();
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:cloud-write-start',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId },
+            });
+          }
           await withPersistTimeout(
             saveProjectDataToFirestore(projectId, payload, { saveId, clientId }),
             PROJECT_CLOUD_WRITE_TIMEOUT_MS,
             `project cloud write (${projectId})`,
           );
           recordProjectFirestoreSaveOk();
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:cloud-write-ok',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId },
+            });
+          }
           console.log(
             '[PERSIST] Firestore save OK - grouped:',
             (payload.groupedClusters || []).length,
@@ -665,6 +780,15 @@ export function useProjectPersistence(options: {
           );
         } catch (err) {
           recordProjectFirestoreSaveError();
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'persist:cloud-write-error',
+              source: 'useProjectPersistence.flushPersistQueue',
+              projectId,
+              data: { saveId, error: err instanceof Error ? err.message : String(err) },
+            });
+          }
           reportPersistFailure(addToastRef.current, 'project data save', err);
         }
         // If mutateAndSave ran during the awaits above, needsPersistFlushRef is true → loop
@@ -672,17 +796,57 @@ export function useProjectPersistence(options: {
     } finally {
       isFlushingRef.current = false;
       recordProjectFlushExit();
+      if (traceId) {
+        traceRuntimeEvent({
+          traceId,
+          event: 'persist:flush-exit',
+          source: 'useProjectPersistence.flushPersistQueue',
+          projectId,
+        });
+      }
     }
-  }, [buildPayload, persistProjectPayloadToIDB]);
+  }, [buildPayload, getLegacyPersistBlockReason, persistProjectPayloadToIDB]);
 
   /** Queue Firestore + IDB flush (no debounce). `latest.current` is read at flush time. */
-  const enqueueSave = useCallback(() => {
-    if (!activeProjectIdRef.current) return;
+  const enqueueSave = useCallback((source: string = 'unknown', traceId?: string) => {
+    const projectId = activeProjectIdRef.current;
+    if (!projectId) return;
+    const blockReason = getLegacyPersistBlockReason();
+    if (blockReason) {
+      const existingTraceId = traceId ?? activePersistTraceRef.current;
+      if (existingTraceId) {
+        traceRuntimeEvent({
+          traceId: existingTraceId,
+          event: 'persist:enqueue-suppressed',
+          source: 'useProjectPersistence.enqueueSave',
+          projectId,
+          data: { source, reason: blockReason },
+        });
+      }
+      return;
+    }
+    if (traceId) {
+      activePersistTraceRef.current = traceId;
+    } else if (!activePersistTraceRef.current) {
+      activePersistTraceRef.current = beginRuntimeTrace('useProjectPersistence.enqueueSave', projectId, {
+        source,
+      });
+    }
+    activePersistSourceRef.current = source;
+    if (activePersistTraceRef.current) {
+      traceRuntimeEvent({
+        traceId: activePersistTraceRef.current,
+        event: 'persist:enqueue',
+        source: 'useProjectPersistence.enqueueSave',
+        projectId: activeProjectIdRef.current,
+        data: { source },
+      });
+    }
     needsPersistFlushRef.current = true;
     pendingSaveRef.current = pendingSaveRef.current
       .then(flushPersistQueue)
       .catch((err) => logPersistError('persist queue flush', err));
-  }, [flushPersistQueue]);
+  }, [flushPersistQueue, getLegacyPersistBlockReason]);
 
   /**
    * Durability barrier for long-running jobs that need a user-visible "done and synced"
@@ -715,7 +879,7 @@ export function useProjectPersistence(options: {
       }
       return;
     }
-    enqueueSave();
+    enqueueSave('flush-now');
     await pendingLocalPersistRef.current;
     await pendingSaveRef.current;
   }, [enqueueSave]);
@@ -724,11 +888,18 @@ export function useProjectPersistence(options: {
    * Crash-safety checkpoint: persist latest state to IDB immediately.
    * `enqueueSave` runs the same payload to Firestore on the serialized queue.
    */
-  const checkpointToIDB = useCallback(async (overrides?: Partial<PersistedState>) => {
+  const checkpointToIDB = useCallback(async (
+    overrides?: Partial<PersistedState>,
+    options?: { traceId?: string; traceSource?: string },
+  ) => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
     const payload = buildPayload(overrides);
-    await persistProjectPayloadToIDB(projectId, payload, { mode: 'checkpoint' });
+    await persistProjectPayloadToIDB(projectId, payload, {
+      mode: 'checkpoint',
+      traceId: options?.traceId,
+      traceSource: options?.traceSource,
+    });
   }, [buildPayload, persistProjectPayloadToIDB]);
 
   const applyViewState = useCallback((vs: ProjectViewState) => {
@@ -1067,6 +1238,7 @@ export function useProjectPersistence(options: {
         const message = String((err as Error)?.message || '');
         const isConflict = message.startsWith('conflict:') || message === 'meta-conflict';
         const isOperationConflict = message === 'lock-conflict' || message === 'operation-locked' || message === 'lock-lost';
+        const errorInfo = getPersistErrorInfo(err);
         const stillSameProject = isV2WriteContextCurrent(context);
         if (!stillSameProject) {
           recordProjectFirestoreSaveOk();
@@ -1091,7 +1263,11 @@ export function useProjectPersistence(options: {
           await reloadCanonicalStateFromCloud();
           return;
         }
-        reportPersistFailure(addToastRef.current, label, err);
+        reportPersistFailure(
+          addToastRef.current,
+          errorInfo.step ? `${label} (${errorInfo.step})` : label,
+          err,
+        );
       }
     });
   }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation]);
@@ -1242,10 +1418,14 @@ export function useProjectPersistence(options: {
   // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === 'hidden' && storageModeRef.current === 'legacy') enqueueSave();
+      if (document.visibilityState === 'hidden' && storageModeRef.current === 'legacy') {
+        enqueueSave('visibility-hidden');
+      }
     };
     const onPageHide = () => {
-      if (storageModeRef.current === 'legacy') enqueueSave();
+      if (storageModeRef.current === 'legacy') {
+        enqueueSave('pagehide');
+      }
     };
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('pagehide', onPageHide);
@@ -1266,7 +1446,7 @@ export function useProjectPersistence(options: {
       if (!activeProjectIdRef.current) return;
       if (isFlushingRef.current) return; // don't interfere with active flush
       console.log('[PERSIST] Local durability failed — attempting recovery save...');
-      enqueueSave();
+      enqueueSave('local-durability-recovery');
     }, RECOVERY_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [enqueueSave]);
@@ -1275,7 +1455,19 @@ export function useProjectPersistence(options: {
   const mutateAndSave = useCallback((
     updater: (s: PersistedState) => Partial<PersistedState>,
   ) => {
+    const projectId = activeProjectIdRef.current;
+    const traceId = beginRuntimeTrace('useProjectPersistence.mutateAndSave', projectId, {
+      storageMode: storageModeRef.current,
+      isFlushing: isFlushingRef.current,
+    });
     const changes = updater(latest.current);
+    traceRuntimeEvent({
+      traceId,
+      event: 'mutate:computed-changes',
+      source: 'useProjectPersistence.mutateAndSave',
+      projectId,
+      data: { keys: Object.keys(changes) },
+    });
     // 1. Update latest ref synchronously
     latest.current = { ...latest.current, ...changes };
     // 1b. Monotonic save id — every mutation gets a new id before IDB checkpoint so
@@ -1298,11 +1490,25 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
     if ('fileName' in changes) setFileName(changes.fileName!);
+    const blockReason = getLegacyPersistBlockReason();
+    if (blockReason) {
+      traceRuntimeEvent({
+        traceId,
+        event: 'mutate:legacy-persist-suppressed',
+        source: 'useProjectPersistence.mutateAndSave',
+        projectId,
+        data: { reason: blockReason },
+      });
+      return;
+    }
     // 3. Immediate local durability (crash-safe)
-    pendingLocalPersistRef.current = checkpointToIDB();
+    pendingLocalPersistRef.current = checkpointToIDB(undefined, {
+      traceId,
+      traceSource: 'useProjectPersistence.mutateAndSave',
+    });
     // 4. Queue Firestore + IDB flush (serialized queue; loop coalesces mid-await mutations)
-    enqueueSave();
-  }, [checkpointToIDB, enqueueSave]);
+    enqueueSave('mutate-and-save', traceId);
+  }, [checkpointToIDB, enqueueSave, getLegacyPersistBlockReason]);
 
   const applyLocalChanges = useCallback((
     changes: Partial<PersistedState>,
@@ -1326,10 +1532,10 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in changes) setBlockedTokens(changes.blockedTokens!);
     if ('labelSections' in changes) setLabelSections(changes.labelSections!);
     if ('fileName' in changes) setFileName(changes.fileName!);
-    if (options?.checkpoint && storageModeRef.current !== 'v2') {
+    if (options?.checkpoint && storageModeRef.current !== 'v2' && !getLegacyPersistBlockReason()) {
       pendingV2LocalRef.current = checkpointToIDB(changes);
     }
-  }, [checkpointToIDB]);
+  }, [checkpointToIDB, getLegacyPersistBlockReason]);
 
   // ── applyViewState: batch-set all 14 fields from a ProjectViewState ──
   const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]) => {
@@ -1512,14 +1718,31 @@ export function useProjectPersistence(options: {
 
   const setActiveProjectId = useCallback((id: string | null) => {
     activeProjectIdRef.current = id;
+    projectStorageModeResolvedRef.current = Boolean(id);
     setActiveProjectIdState(id);
   }, []);
 
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
+    projectStorageModeResolvedRef.current = false;
+    const loadTraceId = beginRuntimeTrace('useProjectPersistence.loadProject', projectId, {
+      activeProjectId: activeProjectIdRef.current,
+      projectCount: projectList.length,
+    });
     const project = projectList.find(p => p.id === projectId);
     const canonicalCache = await loadCanonicalCacheFromIDB(projectId);
     const idbData = canonicalCache?.payload ?? await loadProjectDataFromIDBOnly(projectId);
+    traceRuntimeEvent({
+      traceId: loadTraceId,
+      event: 'load:idb-stage-finished',
+      source: 'useProjectPersistence.loadProject',
+      projectId,
+      data: {
+        hasCanonicalCache: !!canonicalCache,
+        hasIdbData: !!idbData,
+        activeProjectId: activeProjectIdRef.current,
+      },
+    });
     if (activeProjectIdRef.current !== projectId) {
       projectLoadingRef.current = false;
       return;
@@ -1532,7 +1755,27 @@ export function useProjectPersistence(options: {
       projectId,
       clientIdRef.current,
       async () => idbData ?? loadProjectDataForView(projectId),
-    );
+    ).catch((error) => {
+      traceRuntimeEvent({
+        traceId: loadTraceId,
+        event: 'load:canonical-error',
+        source: 'useProjectPersistence.loadProject',
+        projectId,
+        data: { error: error instanceof Error ? error.message : String(error) },
+      });
+      throw error;
+    });
+    traceRuntimeEvent({
+      traceId: loadTraceId,
+      event: 'load:canonical-resolved',
+      source: 'useProjectPersistence.loadProject',
+      projectId,
+      data: {
+        mode: canonical.mode,
+        hasResolved: !!canonical.resolved,
+        activeProjectId: activeProjectIdRef.current,
+      },
+    });
 
     if (activeProjectIdRef.current !== projectId) {
       projectLoadingRef.current = false;
@@ -1542,6 +1785,7 @@ export function useProjectPersistence(options: {
     if (canonical.mode === 'v2') {
       setStorageMode('v2');
       storageModeRef.current = 'v2';
+      projectStorageModeResolvedRef.current = true;
       applyCanonicalState(canonical);
       if (canonical.resolved) {
         const viewState = toProjectViewState(canonical.resolved, project);
@@ -1556,13 +1800,21 @@ export function useProjectPersistence(options: {
           applyViewState(createEmptyProjectViewState());
           loadFenceRef.current = 0;
         }
-        addToastRef.current('Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.', 'warning');
+        const recoveryDiagnostics = canonical.diagnostics?.recovery;
+        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
+        addToastRef.current(
+          recoveryBlockedByPermissions
+            ? 'Shared project recovery is blocked by Firestore permissions. Edits are temporarily read-only until the shared rules or deployment are repaired.'
+            : 'Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.',
+          'warning',
+        );
       }
     } else {
       collabMetaRef.current = null;
       legacyWritesBlockedRef.current = false;
       setStorageMode('legacy');
       storageModeRef.current = 'legacy';
+      projectStorageModeResolvedRef.current = true;
       v2RecoveryModeRef.current = false;
       const data = canonical.resolved ?? idbData;
       const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
@@ -1575,6 +1827,13 @@ export function useProjectPersistence(options: {
     }
 
     projectLoadingRef.current = false;
+    traceRuntimeEvent({
+      traceId: loadTraceId,
+      event: 'load:complete',
+      source: 'useProjectPersistence.loadProject',
+      projectId,
+      data: { activeProjectId: activeProjectIdRef.current },
+    });
     return;
     /*
 
@@ -1662,6 +1921,7 @@ export function useProjectPersistence(options: {
     activityLogDocsRef.current = [];
     legacyWritesBlockedRef.current = false;
     v2RecoveryModeRef.current = false;
+    projectStorageModeResolvedRef.current = false;
     lockHeartbeatLostRef.current = false;
     lastV2WriteErrorRef.current = null;
     lastV2LocalErrorRef.current = null;
@@ -1700,6 +1960,22 @@ export function useProjectPersistence(options: {
       collection(db, 'projects', pid, 'chunks'),
       (snap) => {
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
+        const traceId = activePersistTraceRef.current;
+        if (traceId) {
+          traceRuntimeEvent({
+            traceId,
+            event: 'snapshot:received',
+            source: 'useProjectPersistence.projectChunksSnapshot',
+            projectId: pid,
+            data: {
+              fromCache: Boolean(snap.metadata?.fromCache),
+              hasPendingWrites: Boolean(snap.metadata?.hasPendingWrites),
+              docCount: snap.docs.length,
+              isProjectLoading: projectLoadingRef.current,
+              isFlushing: isFlushingRef.current,
+            },
+          });
+        }
 
         const metaDoc = snap.docs.find((d) => (d.data() as any)?.type === 'meta');
         const meta = metaDoc ? (metaDoc.data() as any) : null;
@@ -1722,13 +1998,29 @@ export function useProjectPersistence(options: {
             typeof meta?.approvedGroupCount === 'number' ? meta.approvedGroupCount : null,
           incomingDataGroupedCount: data?.groupedClusters?.length ?? 0,
           incomingDataApprovedCount: data?.approvedGroups?.length ?? 0,
+          incomingResultsCount: data?.results?.length ?? 0,
+          incomingClusterCount: data?.clusterSummary?.length ?? 0,
           loadFence: loadFenceRef.current,
           incomingGroupedPageMass: data ? groupedPageMass(data) : 0,
           incomingSaveId: data?.lastSaveId ?? 0,
           localSaveId: saveCounterRef.current,
+          incomingFromCache: Boolean(snap.metadata?.fromCache),
         });
 
         if (guardResult.action === 'skip') {
+          if (traceId) {
+            traceRuntimeEvent({
+              traceId,
+              event: 'snapshot:guard-skip',
+              source: 'useProjectPersistence.projectChunksSnapshot',
+              projectId: pid,
+              data: {
+                guard: guardResult.guard,
+                fromCache: Boolean(snap.metadata?.fromCache),
+                hasPendingWrites: Boolean(snap.metadata?.hasPendingWrites),
+              },
+            });
+          }
           if (guardResult.guard.startsWith('6:') || guardResult.guard.startsWith('3:') || guardResult.guard.startsWith('5:')) {
             console.warn('[PERSIST] Snapshot rejected by guard:', guardResult.guard);
           }
@@ -1745,6 +2037,20 @@ export function useProjectPersistence(options: {
         applyViewState(
           data ? toProjectViewState(data, project) : createEmptyProjectViewState()
         );
+        if (traceId) {
+          traceRuntimeEvent({
+            traceId,
+            event: 'snapshot:applied',
+            source: 'useProjectPersistence.projectChunksSnapshot',
+            projectId: pid,
+            data: {
+              incomingSaveId: data?.lastSaveId ?? 0,
+              localSaveId: saveCounterRef.current,
+              incomingGroupedCount: data?.groupedClusters?.length ?? 0,
+              incomingApprovedCount: data?.approvedGroups?.length ?? 0,
+            },
+          });
+        }
         // Advance saveCounterRef so subsequent local mutations produce IDs
         // higher than the remote snapshot. Without this, a local edit after a
         // remote apply could have a LOWER saveId than Firestore, causing
@@ -2483,14 +2789,20 @@ export function useProjectPersistence(options: {
     latest.current = { ...latest.current, autoGroupSuggestions: suggestions };
     setAutoGroupSuggestions(suggestions);
     saveCounterRef.current += 1;
+    const traceId = beginRuntimeTrace('useProjectPersistence.updateSuggestions', activeProjectIdRef.current, {
+      suggestionCount: suggestions.length,
+    });
     // Persist immediately to local cache for crash resilience.
-    pendingLocalPersistRef.current = checkpointToIDB({ autoGroupSuggestions: suggestions });
+    pendingLocalPersistRef.current = checkpointToIDB(
+      { autoGroupSuggestions: suggestions },
+      { traceId, traceSource: 'useProjectPersistence.updateSuggestions' },
+    );
 
     // Debounce the actual save
     if (suggestionTimerRef.current) clearTimeout(suggestionTimerRef.current);
     suggestionTimerRef.current = setTimeout(() => {
       suggestionTimerRef.current = null;
-      enqueueSave();
+      enqueueSave('suggestions-debounce', traceId);
     }, 2000);
   }, [applyViewState, buildPayload, checkpointToIDB, enqueueSave, ensureV2MutationAllowed, persistCanonicalPayloadV2]);
 
@@ -2535,7 +2847,9 @@ export function useProjectPersistence(options: {
     if ('blockedTokens' in data) changes.blockedTokens = new Set<string>(data.blockedTokens!);
     if ('blockedKeywords' in data) changes.blockedKeywords = data.blockedKeywords!;
     if ('labelSections' in data) changes.labelSections = data.labelSections!;
-    const metadataWriteAllowed = storageModeRef.current !== 'v2' || ensureV2MutationAllowed('Project metadata edits');
+    const metadataWriteAllowed = storageModeRef.current === 'v2'
+      ? ensureV2MutationAllowed('Project metadata edits')
+      : !getLegacyPersistBlockReason();
     if ('fileName' in data) {
       changes.fileName = data.fileName!;
       // Also update project metadata
@@ -2562,7 +2876,7 @@ export function useProjectPersistence(options: {
       return;
     }
     mutateAndSave(() => changes);
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
+  }, [applyViewState, buildPayload, ensureV2MutationAllowed, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
   const isProjectBusy = Boolean(

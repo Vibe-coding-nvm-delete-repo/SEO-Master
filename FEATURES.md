@@ -37,8 +37,11 @@
 ## Content Pipeline (Generate > Content)
 
 - Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts, and timed-out IndexedDB project writes now abort and reopen the cached DB connection before retrying so local durability does not keep hammering a poisoned transaction handle.
+- Shared **app settings** local durability (Generate/Content row caches, UI prefs, etc.) now has an outer time bound as well: if IndexedDB never settles, the local-write pending counter clears and the status bar can recover instead of staying on “Saving… don’t refresh” with stacked pending counts after refresh.
+- Runtime diagnostics hardening: persistence, snapshot-guard, and project lifecycle paths now emit structured correlation traces (`traceId` + ordered `hop`) through a shared `runtimeTrace` utility so save/snapshot loop causality can be proven from one session trace.
 
 - Renderer-stability hardening pass for Generate/Content:
+  - Per-instance `onBusyStateChange` wiring now uses stable callbacks and ref-forwarded parent notification so aggregate busy state does not thrash (avoids update-depth loops when the shell tracks Generate/Content busy).
   - `App` now mounts `Generate` and `Content` only when the tab is active or currently busy, instead of keeping both full trees mounted indefinitely.
   - `Content` now mounts only active/busy pipeline stages and unmounts hidden idle stages, reducing hidden listener/write pressure.
   - Generate instances now support `liveSyncEnabled` so hidden stages can suspend Firestore/upstream subscriptions while preserving active run continuity.
@@ -247,7 +250,16 @@
 - **Unsafe refresh warning:** the browser now shows a native unload warning if you try to refresh while a local durability write is still pending or after a local save failure that could lose the latest edits.
 - **Visible local failure reporting:** IndexedDB failures now surface through the same status/toast flow instead of silently disappearing into the console.
 - **IDB deadlock hardening:** local persistence writes now use bounded timeouts (open/read/write/delete). If an IDB operation stalls (for example cross-tab lock contention), the app marks local persistence failure instead of hanging forever on `Saving… don’t refresh`, and project/shared Firestore sync can continue.
+- **IDB queue hardening:** all IndexedDB `readwrite` mutations now run through one explicit queue before opening a transaction, so a later save no longer burns its timeout budget just waiting behind earlier writes on the shared object store. This specifically reduces false local-durability failures in Generate/Content when many shared-doc caches are writing at once.
+- **Duplicate error-toast hardening:** identical persistence errors fired back-to-back in the same tick now collapse into one toast immediately, preventing hidden Generate/Content instances from stacking a visible pile of the same `Local save failed` message.
 - **Startup migration safety:** the Firebase-project migration path no longer calls `indexedDB.deleteDatabase` during startup, preventing cross-tab blocked-delete states from stalling live persistence.
+- **Shared-project bootstrap write barrier:** legacy project chunk writes now stay blocked until the active project's storage mode is resolved, so V2/shared projects cannot briefly fall back to legacy chunk saves during startup and trip `permission-denied` rules failures.
+- **Hidden runtime gating for Generate/Content:** Generate 1/2 and Content pipeline stages stay mounted for continuity, but hidden idle instances now suspend Firestore listeners, upstream auto-sync, OpenRouter model/balance fetches, and persistence effects until that surface becomes visible or actively busy.
+- **Recovery diagnostics hardening:** shared-project recovery now distinguishes Firestore `permission-denied` / rules-state failures from generic connectivity problems, includes the failing V2 step in diagnostics, and shows a specific read-only warning when recovery itself is blocked by permissions.
+- **Auto Group hydration baseline:** Auto Group shared settings now seed their saved baseline from the hydrated cache/Firestore payload so unchanged startup settings no longer immediately re-save on mount.
+- **Refresh/data-loss hardening:** legacy project snapshot guards now block destructive effective-empty/legacy-saveId payloads unless they are server-authoritative and newer; Generate upstream sync now refuses transient empty clears when local rows still contain meaningful content (including input-only rows), dedupes repetitive upstream success notifications, and removes redundant row-level best-effort local writes that previously amplified IDB contention.
+- **Generate logs/settings bootstrap safety:** Generate logs now use a Firestore-authoritative bootstrap guard before persisted writes, and immediate model-normalization settings writes no longer hit Firestore before settings bootstrap authority is established.
+- **Status accuracy for active projects:** the top status headline now surfaces shared-doc and auxiliary failure states even with an active project open, and feedback write paths now feed shared cloud write telemetry so failures are visible in status diagnostics.
 
 ---
 

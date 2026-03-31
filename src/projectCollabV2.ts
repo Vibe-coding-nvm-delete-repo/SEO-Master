@@ -11,6 +11,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from './firebase';
+import { getPersistErrorInfo, logPersistError, tagPersistErrorStep } from './persistenceErrors';
 import {
   buildProjectDataPayloadFromChunkDocs,
   loadFromIDB,
@@ -92,6 +93,14 @@ export interface CanonicalProjectState {
   base: ProjectBaseSnapshot | null;
   entities: ProjectCollabEntityState;
   resolved: ProjectDataPayload | null;
+  diagnostics?: {
+    recovery?: {
+      attempted: boolean;
+      outcome: 'skipped' | 'repaired' | 'unchanged' | 'failed';
+      code?: string;
+      step?: string;
+    };
+  };
 }
 
 export interface RevisionedDocChange<T extends object> {
@@ -677,7 +686,8 @@ async function loadCollectionDocs<T>(
         ...data,
       } as T;
     });
-  } catch {
+  } catch (error) {
+    logPersistError(`load collab collection (${projectId}/${subcollection})`, tagPersistErrorStep(error, 'load collab collection'));
     return [];
   }
 }
@@ -1204,7 +1214,8 @@ export async function loadCollabMeta(projectId: string): Promise<ProjectCollabMe
     if (!snapshot.exists()) return null;
     const data = snapshot.data();
     return isMetaDocV2(data) ? data : null;
-  } catch {
+  } catch (error) {
+    logPersistError(`load collab meta (${projectId})`, tagPersistErrorStep(error, 'load collab meta'));
     return null;
   }
 }
@@ -1414,21 +1425,34 @@ export async function commitCanonicalProjectState(
   const baseCommitId = createBaseCommitId(nextEpoch, actorId);
   const entities = buildEntityStateFromResolvedPayload(payload, actorId, nextEpoch);
 
-  await saveBaseCommitToFirestore(projectId, base, {
-    commitId: baseCommitId,
-    saveId: nextEpoch,
-    clientId: actorId,
-  });
-  await saveCollabEntityDocs(projectId, entities, actorId, nextEpoch);
+  try {
+    await saveBaseCommitToFirestore(projectId, base, {
+      commitId: baseCommitId,
+      saveId: nextEpoch,
+      clientId: actorId,
+    });
+  } catch (error) {
+    throw tagPersistErrorStep(error, 'save base commit');
+  }
+  try {
+    await saveCollabEntityDocs(projectId, entities, actorId, nextEpoch);
+  } catch (error) {
+    throw tagPersistErrorStep(error, 'save collab entities');
+  }
 
-  const meta = await flipProjectMetaToCommit(
-    projectId,
-    actorId,
-    options.expectedMetaRevision,
-    options.expectedDatasetEpoch,
-    nextEpoch,
-    baseCommitId,
-  );
+  let meta: ProjectCollabMetaDoc;
+  try {
+    meta = await flipProjectMetaToCommit(
+      projectId,
+      actorId,
+      options.expectedMetaRevision,
+      options.expectedDatasetEpoch,
+      nextEpoch,
+      baseCommitId,
+    );
+  } catch (error) {
+    throw tagPersistErrorStep(error, 'activate collab meta');
+  }
   void pruneHistoricalV2Artifacts(projectId, nextEpoch, baseCommitId);
 
   return {
@@ -1633,24 +1657,66 @@ async function recoverStuckV2Meta(
   projectId: string,
   meta: ProjectCollabMetaDoc,
   actorId: string,
-): Promise<ProjectCollabMetaDoc> {
-  if (meta.readMode !== 'v2') return meta;
-  if (meta.commitState === 'ready' && meta.migrationState === 'complete') return meta;
+): Promise<NonNullable<CanonicalProjectState['diagnostics']>> {
+  if (meta.readMode !== 'v2') {
+    return {
+      recovery: {
+        attempted: false,
+        outcome: 'skipped',
+      },
+    };
+  }
+  if (meta.commitState === 'ready' && meta.migrationState === 'complete') {
+    return {
+      recovery: {
+        attempted: false,
+        outcome: 'skipped',
+      },
+    };
+  }
 
   try {
-    return await runTransaction(db, async (tx): Promise<ProjectCollabMetaDoc> => {
+    return await runTransaction(db, async (tx): Promise<NonNullable<CanonicalProjectState['diagnostics']>> => {
       const metaRef = collabMetaDoc(projectId);
       const lockRef = operationLockDoc(projectId);
       const metaSnap = await tx.get(metaRef);
-      if (!metaSnap.exists()) return meta;
+      if (!metaSnap.exists()) {
+        return {
+          recovery: {
+            attempted: true,
+            outcome: 'unchanged',
+          },
+        };
+      }
       const current = metaSnap.data() as ProjectCollabMetaDoc;
-      if (!isMetaDocV2(current) || current.readMode !== 'v2') return current;
-      if (current.commitState === 'ready' && current.migrationState === 'complete') return current;
+      if (!isMetaDocV2(current) || current.readMode !== 'v2') {
+        return {
+          recovery: {
+            attempted: true,
+            outcome: 'unchanged',
+          },
+        };
+      }
+      if (current.commitState === 'ready' && current.migrationState === 'complete') {
+        return {
+          recovery: {
+            attempted: true,
+            outcome: 'unchanged',
+          },
+        };
+      }
 
       const lockSnap = await tx.get(lockRef);
       const currentLock = lockSnap.exists() ? (lockSnap.data() as ProjectOperationLockDoc) : null;
       const lockActive = lockIsActive(currentLock, actorId);
-      if (lockActive) return current;
+      if (lockActive) {
+        return {
+          recovery: {
+            attempted: true,
+            outcome: 'unchanged',
+          },
+        };
+      }
 
       let canFinalize = false;
       if (current.baseCommitId) {
@@ -1666,7 +1732,12 @@ async function recoverStuckV2Meta(
       }
 
       if (!canFinalize && current.migrationState === 'failed') {
-        return current;
+        return {
+          recovery: {
+            attempted: true,
+            outcome: 'unchanged',
+          },
+        };
       }
 
       const now = nowIso();
@@ -1700,10 +1771,25 @@ async function recoverStuckV2Meta(
         };
 
       tx.set(metaRef, sanitizeJsonForFirestore(nextMeta));
-      return nextMeta;
+      return {
+        recovery: {
+          attempted: true,
+          outcome: 'repaired',
+        },
+      };
     });
-  } catch {
-    return meta;
+  } catch (error) {
+    const taggedError = tagPersistErrorStep(error, 'repair collab meta');
+    logPersistError(`recover stuck collab meta (${projectId})`, taggedError);
+    const errorInfo = getPersistErrorInfo(taggedError);
+    return {
+      recovery: {
+        attempted: true,
+        outcome: 'failed',
+        code: errorInfo.code,
+        step: errorInfo.step,
+      },
+    };
   }
 }
 
@@ -1719,7 +1805,8 @@ export async function loadCanonicalProjectState(
       return canonical;
     }
 
-    const recoveredMeta = await recoverStuckV2Meta(projectId, meta, actorId);
+    const recoveryDiagnostics = await recoverStuckV2Meta(projectId, meta, actorId);
+    const recoveredMeta = await loadCollabMeta(projectId) ?? meta;
     if (
       recoveredMeta.revision !== meta.revision ||
       recoveredMeta.migrationState !== meta.migrationState ||
@@ -1727,7 +1814,10 @@ export async function loadCanonicalProjectState(
     ) {
       canonical = await loadCanonicalEpoch(projectId, recoveredMeta);
       if (canonical) {
-        return canonical;
+        return {
+          ...canonical,
+          diagnostics: recoveryDiagnostics,
+        };
       }
     }
 
@@ -1737,6 +1827,7 @@ export async function loadCanonicalProjectState(
       base: null,
       entities: { ...entities, meta: recoveredMeta },
       resolved: null,
+      diagnostics: recoveryDiagnostics,
     };
   }
 

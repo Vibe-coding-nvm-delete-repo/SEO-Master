@@ -5628,6 +5628,8 @@ FAILURE CONDITIONS TO AVOID:
           <ErrorBoundary fallbackLabel="The Generate tab encountered an error. Your data has been saved.">
             <GenerateTab
               activeProjectId={activeProjectId}
+              isVisible={mainTab === 'generate'}
+              runtimeEffectsActive={mainTab === 'generate' || isGenerateBusy}
               starredModels={starredModels}
               onToggleStar={toggleStarModel}
               onBusyStateChange={setIsGenerateBusy}
@@ -5640,6 +5642,8 @@ FAILURE CONDITIONS TO AVOID:
           <ErrorBoundary fallbackLabel="The Content tab encountered an error. Your data has been saved.">
             <ContentTab
               activeProjectId={activeProjectId}
+              isVisible={mainTab === 'content'}
+              runtimeEffectsActive={mainTab === 'content' || isContentBusy}
               starredModels={starredModels}
               onToggleStar={toggleStarModel}
               onBusyStateChange={setIsContentBusy}
