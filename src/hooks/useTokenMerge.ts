@@ -17,8 +17,8 @@ interface UseTokenMergeParams {
   clusterSummaryRef: React.MutableRefObject<ClusterSummary[] | null>;
   tokenSummaryRef: React.MutableRefObject<TokenSummary[] | null>;
   logAndToast: (action: ActivityAction, details: string, count: number, toastMsg: string, toastType?: 'success' | 'info' | 'warning' | 'error') => void;
-  applyMergeCascade: (cascade: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; }, newRule: TokenMergeRule) => void;
-  undoMerge: (data: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; tokenMergeRules: TokenMergeRule[]; }) => void;
+  applyMergeCascade: (cascade: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; }, newRule: TokenMergeRule) => boolean;
+  undoMerge: (data: { results: ProcessedRow[] | null; clusterSummary: ClusterSummary[] | null; tokenSummary: TokenSummary[] | null; groupedClusters: GroupedCluster[]; approvedGroups: GroupedCluster[]; tokenMergeRules: TokenMergeRule[]; }) => boolean;
   setSelectedTokens: React.Dispatch<React.SetStateAction<Set<string>>>;
   setSelectedMgmtTokens: React.Dispatch<React.SetStateAction<Set<string>>>;
 }
@@ -51,10 +51,10 @@ export function useTokenMerge({
     setIsMergeModalOpen(true);
   }, [selectedMgmtTokens]);
 
-  const handleMergeTokens = useCallback((parentToken: string) => {
-    if (!results || !clusterSummary) return;
+  const handleMergeTokens = useCallback((parentToken: string): boolean => {
+    if (!results || !clusterSummary) return false;
     const childTokens = mergeModalTokens.filter(t => t !== parentToken);
-    if (childTokens.length === 0) return;
+    if (childTokens.length === 0) return false;
 
     // Run the cascade — use refs to avoid stale closures
     const cascade = executeMergeCascade(resultsRef.current, groupedClustersRef.current, approvedGroupsRef.current, parentToken, childTokens);
@@ -80,7 +80,8 @@ export function useTokenMerge({
 
     // persistence.applyMergeCascade atomically updates latest ref + state + saves.
     // No separate startTransition/setState calls needed (they would conflict).
-    applyMergeCascade(cascade, newRule);
+    const applied = applyMergeCascade(cascade, newRule);
+    if (!applied) return false;
     if (filterChanged) setSelectedTokens(newSelectedTokens);
     setSelectedMgmtTokens(new Set());
 
@@ -95,10 +96,11 @@ export function useTokenMerge({
 
     setIsMergeModalOpen(false);
     setMergeModalTokens([]);
+    return true;
   }, [results, clusterSummary, groupedClusters, approvedGroups, mergeModalTokens, selectedTokens, logAndToast]);
 
-  const handleUndoMergeChild = useCallback((ruleId: string, childToken: string) => {
-    if (!results) return;
+  const handleUndoMergeChild = useCallback((ruleId: string, childToken: string): boolean => {
+    if (!results) return false;
 
     // Update the rule
     const updatedRules = tokenMergeRules.map(r => {
@@ -153,15 +155,16 @@ export function useTokenMerge({
     const updatedApproved = updateGroupList(approvedGroups);
     const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
 
+    const applied = undoMerge({ results: restoredResults, clusterSummary: newClusters, tokenSummary: newTokenSummary, groupedClusters: updatedGroups, approvedGroups: updatedApproved, tokenMergeRules: updatedRules });
+    if (!applied) return false;
     const rule = tokenMergeRules.find(r => r.id === ruleId);
     logAndToast('unmerge', `Unmerged '${childToken}' from '${rule?.parentToken || 'parent'}'`, 1,
       `Unmerged '${childToken}'`, 'success');
-
-    undoMerge({ results: restoredResults, clusterSummary: newClusters, tokenSummary: newTokenSummary, groupedClusters: updatedGroups, approvedGroups: updatedApproved, tokenMergeRules: updatedRules });
+    return true;
   }, [results, tokenMergeRules, groupedClusters, approvedGroups, logAndToast]);
 
-  const handleUndoMergeParent = useCallback((ruleId: string) => {
-    if (!results) return;
+  const handleUndoMergeParent = useCallback((ruleId: string): boolean => {
+    if (!results) return false;
 
     const ruleToRemove = tokenMergeRules.find(r => r.id === ruleId);
     const updatedRules = tokenMergeRules.filter(r => r.id !== ruleId);
@@ -216,15 +219,7 @@ export function useTokenMerge({
     const updatedApproved = updateGroupList(approvedGroups);
     const newTokenSummary = rebuildTokenSummaryFromRows(restoredResults);
 
-    logAndToast(
-      'unmerge',
-      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
-      ruleToRemove?.childTokens.length ?? 0,
-      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
-      'success'
-    );
-
-    undoMerge({
+    const applied = undoMerge({
       results: restoredResults,
       clusterSummary: newClusters,
       tokenSummary: newTokenSummary,
@@ -232,6 +227,15 @@ export function useTokenMerge({
       approvedGroups: updatedApproved,
       tokenMergeRules: updatedRules,
     });
+    if (!applied) return false;
+    logAndToast(
+      'unmerge',
+      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
+      ruleToRemove?.childTokens.length ?? 0,
+      `Unmerged '${ruleToRemove?.parentToken || 'parent'}'`,
+      'success'
+    );
+    return true;
   }, [results, tokenMergeRules, groupedClusters, approvedGroups, logAndToast]);
 
   return {

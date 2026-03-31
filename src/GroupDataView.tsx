@@ -109,9 +109,12 @@ export default function GroupDataView(props: any) {
     isLabelSidebarOpen,
     isMergeModalOpen,
     isProcessing,
+    isCanonicalReloading,
+    isBulkSharedEditBlocked,
     isProjectBusy,
     isProjectLoading,
     isRunningFilteredAutoGroup,
+    isRoutineSharedEditBlocked,
     isSharedProjectReadOnly,
     itemsPerPage,
     kwRatingJob,
@@ -228,6 +231,7 @@ export default function GroupDataView(props: any) {
     tokenMergeRules,
     tokenMgmtMergeSearchTerms,
     tokenMgmtTotalPages,
+    writeBlockReason,
   } = props;
 
   return (
@@ -237,18 +241,18 @@ export default function GroupDataView(props: any) {
             className={`
               relative border-2 border-dashed rounded-2xl p-12 transition-all duration-200 ease-in-out
               flex flex-col items-center justify-center text-center bg-white
-              ${!activeProjectId || isProjectBusy ? 'opacity-50 cursor-not-allowed grayscale' : isDragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50/50'}
+              ${!activeProjectId || isBulkSharedEditBlocked ? 'opacity-50 cursor-not-allowed grayscale' : isDragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50/50'}
             `}
-            onDragOver={activeProjectId && !isProjectBusy ? handleDragOver : undefined}
-            onDragLeave={activeProjectId && !isProjectBusy ? handleDragLeave : undefined}
-            onDrop={activeProjectId && !isProjectBusy ? handleDrop : undefined}
+            onDragOver={activeProjectId && !isBulkSharedEditBlocked ? handleDragOver : undefined}
+            onDragLeave={activeProjectId && !isBulkSharedEditBlocked ? handleDragLeave : undefined}
+            onDrop={activeProjectId && !isBulkSharedEditBlocked ? handleDrop : undefined}
           >
-            {(!activeProjectId || isProjectBusy) && (
+            {(!activeProjectId || isBulkSharedEditBlocked) && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/40 backdrop-blur-[1px] rounded-2xl">
                 <div className="bg-white p-4 rounded-xl shadow-xl border border-zinc-200 flex flex-col items-center gap-3 max-w-xs">
                   <Lock className="w-8 h-8 text-amber-500" />
-                  {isProjectBusy ? (
-                    <p className="text-sm font-medium text-zinc-900">Another client is running a project-wide operation.</p>
+                  {isBulkSharedEditBlocked ? (
+                    <p className="text-sm font-medium text-zinc-900">Shared project writes are temporarily unavailable.</p>
                   ) : (
                     <>
                       <p className="text-sm font-medium text-zinc-900">Create or select a project first</p>
@@ -679,7 +683,7 @@ export default function GroupDataView(props: any) {
                     <button
                       type="button"
                       onClick={() => void runWithExclusiveOperation('keyword-rating', runKeywordRating)}
-                      disabled={isProjectBusy || kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating'}
+                      disabled={isBulkSharedEditBlocked || kwRatingJob.phase === 'summary' || kwRatingJob.phase === 'rating'}
                       className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                       title="Generate core-intent summary then rate every keyword (1–3)"
                     >
@@ -1221,7 +1225,7 @@ export default function GroupDataView(props: any) {
                         groupActionButton={
                           <button
                             onClick={() => handleApproveGroup(row.groupName)}
-                            disabled={isSharedProjectReadOnly}
+                  disabled={isRoutineSharedEditBlocked}
                             className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-bold shrink-0"
                             title="Approve group"
                           >
@@ -1251,7 +1255,7 @@ export default function GroupDataView(props: any) {
                         groupActionButton={
                           <button
                             onClick={() => handleUnapproveGroup(group.groupName)}
-                            disabled={isSharedProjectReadOnly}
+                  disabled={isRoutineSharedEditBlocked}
                             className="w-5 h-5 flex items-center justify-center rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-bold shrink-0"
                             title="Unapprove group"
                           >
@@ -1297,6 +1301,9 @@ export default function GroupDataView(props: any) {
                   onSuggestionsChange={persistence.updateSuggestions}
                   isProjectBusy={isProjectBusy}
                   isSharedProjectReadOnly={isSharedProjectReadOnly}
+                  isBulkSharedEditBlocked={isBulkSharedEditBlocked}
+                  isCanonicalReloading={isCanonicalReloading}
+                  writeBlockReason={writeBlockReason}
                   runWithExclusiveOperation={runWithExclusiveOperation}
                 />
               )}
@@ -1308,6 +1315,7 @@ export default function GroupDataView(props: any) {
                   recommendations={groupMergeRecommendations}
                   recommendationsAreStale={groupAutoMergeRecommendationsAreStale}
                   job={groupAutoMergeJob}
+                  isBulkSharedEditBlocked={isBulkSharedEditBlocked}
                   onRun={runGroupAutoMergeRecommendations}
                   onCancel={cancelGroupAutoMerge}
                   onDismiss={dismissGroupAutoMergeRecommendations}
@@ -1440,7 +1448,7 @@ export default function GroupDataView(props: any) {
                         onClick={() => void runWithExclusiveOperation('token-merge', async () => {
                           applyAllAutoMergeRecommendations();
                         })}
-                        disabled={isProjectBusy}
+                        disabled={isBulkSharedEditBlocked}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors whitespace-nowrap"
                       >
                         Merge All
@@ -1452,7 +1460,7 @@ export default function GroupDataView(props: any) {
                       <button
                         type="button"
                         onClick={() => void runAutoMergeRecommendations()}
-                        disabled={autoMergeJob.phase === 'running'}
+                        disabled={isBulkSharedEditBlocked || autoMergeJob.phase === 'running'}
                         className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                         title="Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations"
                       >
@@ -1461,7 +1469,7 @@ export default function GroupDataView(props: any) {
                       <button
                         type="button"
                         onClick={() => void runAutoMergeRecommendations(10)}
-                        disabled={autoMergeJob.phase === 'running'}
+                        disabled={isBulkSharedEditBlocked || autoMergeJob.phase === 'running'}
                         className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                         title="Run Auto Merge on top 10% of eligible tokens (cost-saving test mode)"
                       >
@@ -1627,7 +1635,7 @@ export default function GroupDataView(props: any) {
                                     onClick={() => void runWithExclusiveOperation('token-merge', async () => {
                                       handleUndoMergeParent(ruleRow.ruleId);
                                     })}
-                                    disabled={isProjectBusy}
+                                    disabled={isBulkSharedEditBlocked}
                                     className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
                                     title="Unmerge parent"
                                   >
@@ -1676,7 +1684,7 @@ export default function GroupDataView(props: any) {
                                         onClick={() => void runWithExclusiveOperation('token-merge', async () => {
                                           handleUndoMergeChild(ruleRow.ruleId, childToken);
                                         })}
-                                        disabled={isProjectBusy}
+                                        disabled={isBulkSharedEditBlocked}
                                         className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
                                         title="Unmerge child"
                                       >
@@ -1791,22 +1799,27 @@ export default function GroupDataView(props: any) {
                                         onClick={() => void runWithExclusiveOperation('token-merge', async () => {
                                           applyAutoMergeRecommendation(rec.id);
                                         })}
-                                        disabled={isProjectBusy}
+                                        disabled={isBulkSharedEditBlocked}
                                         className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-600 text-white hover:bg-emerald-700"
                                       >
                                         Merge
                                       </button>
                                       <button
-                                        onClick={() => declineAutoMergeRecommendation(rec.id)}
-                                        className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-zinc-300 text-zinc-600 hover:bg-zinc-50"
+                                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
+                                          declineAutoMergeRecommendation(rec.id);
+                                        })}
+                                      disabled={isBulkSharedEditBlocked}
+                                      className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-zinc-300 text-zinc-600 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
                                       >
                                         Decline
                                       </button>
                                     </>
                                   ) : (
                                     <button
-                                      onClick={() => undoAutoMergeRecommendation(rec.id)}
-                                      disabled={!mergeRule}
+                                      onClick={() => void runWithExclusiveOperation('token-merge', async () => {
+                                        undoAutoMergeRecommendation(rec.id);
+                                      })}
+                                      disabled={isBulkSharedEditBlocked || !mergeRule}
                                       className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
                                     >
                                       Undo

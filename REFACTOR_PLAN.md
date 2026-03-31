@@ -1,6 +1,15 @@
-# REFACTOR_PLAN.md — Comprehensive Audit & Priority Plan (2026-03-27)
+# REFACTOR_PLAN.md — Refactor Execution Tracker (2026-03-27)
 
-This document is the **single source of truth** for every impactful refactoring opportunity in the codebase, organized by priority and impact. It supersedes earlier versions and reflects a full line-by-line audit of all source files.
+This document is the structured execution tracker for refactor work.
+
+## How To Use This Tracker
+
+- Use [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md) for the latest repo-wide ranking and current priorities.
+- Use this file when actively executing refactor work and checking detailed extraction notes.
+- Use [`FIXES.md`](./FIXES.md) for tactical bug fixes and confirmed failure modes.
+
+The size counts and approximate line references below were captured on `2026-03-27`.
+Treat them as historical execution context, not as the latest repo metrics.
 
 ---
 
@@ -15,7 +24,7 @@ This document is the **single source of truth** for every impactful refactoring 
 
 ---
 
-## Current Baseline (Measured 2026-03-27)
+## Historical Baseline (Measured 2026-03-27)
 
 | File | Lines | Guideline | Status |
 |------|-------|-----------|--------|
@@ -455,7 +464,7 @@ This document is the **single source of truth** for every impactful refactoring 
 
 ## Metrics to Track
 
-| Metric | Current | Target (Sprint 3) | Target (Final) |
+| Metric | Baseline | Target (Sprint 3) | Target (Final) |
 |--------|---------|-------------------|----------------|
 | `App.tsx` lines | 7,457 | ≤ 1,200 | ≤ 800 |
 | `AutoGroupPanel.tsx` lines | 4,211 | 4,211 | ≤ 800 |
@@ -463,12 +472,12 @@ This document is the **single source of truth** for every impactful refactoring 
 | `AutoGroupEngine.ts` lines | 1,430 | 1,430 | ≤ 800 |
 | Files over component limit (400) | 7 | 5 | 0 |
 | Files over utility limit (800) | 5 | 3 | 0 |
-| Test count (`npm test`) | ~160+ | ~200+ | ~250+ |
 | Modules with zero test coverage | ~12 | ~6 | ~2 |
 | `eslint-disable` file-level suppressions | 3 | 2 | 0 |
 | `any` type usage in core modules | ~10+ | ~5 | 0 |
 
 ---
 
-*Last audited: 2026-03-27*
-*Audit scope: Full line-by-line analysis of all 89 `.ts` and 34 `.tsx` source files*
+*Tracker refreshed: 2026-03-31*
+*Detailed extraction baseline and line references below remain from the 2026-03-27 audit pass.*
+*Audit scope for that baseline: Full line-by-line analysis of all 89 `.ts` and 34 `.tsx` source files*

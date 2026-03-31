@@ -72,6 +72,9 @@ interface AutoGroupPanelProps {
   onSuggestionsChange?: (suggestions: AutoGroupSuggestion[]) => void;
   isProjectBusy?: boolean;
   isSharedProjectReadOnly?: boolean;
+  isBulkSharedEditBlocked?: boolean;
+  isCanonicalReloading?: boolean;
+  writeBlockReason?: string | null;
   runWithExclusiveOperation?: <T>(type: 'auto-group', task: () => Promise<T>) => Promise<T | null>;
 }
 
@@ -306,10 +309,14 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   onSuggestionsChange,
   isProjectBusy = false,
   isSharedProjectReadOnly = false,
+  isBulkSharedEditBlocked,
+  isCanonicalReloading = false,
+  writeBlockReason = null,
   runWithExclusiveOperation,
 }) => {
   const { addToast } = useToast();
-  const isGroupingReadOnly = isProjectBusy || isSharedProjectReadOnly;
+  const isGroupingReadOnly = isBulkSharedEditBlocked ?? isSharedProjectReadOnly;
+  const activeBulkIntentRef = useRef<null | 'auto-group' | 'auto-group-qa' | 'reconciliation' | 'qa'>(null);
   const [subTab, setSubTab] = useState<'auto-group' | 'cosine-test'>('auto-group');
   const [autoGroupTab, setAutoGroupTab] = useState<'ungrouped' | 'grouped'>('ungrouped');
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
@@ -360,6 +367,42 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
   const [agModels, setAgModels] = useState<Array<{ id: string; name: string; pricing: { prompt: string; completion: string } }>>([]);
   const [agModelsLoading, setAgModelsLoading] = useState(false);
   const [agModelSearch, setAgModelSearch] = useState('');
+
+  const runExclusiveBulkIntent = useCallback(
+    async (
+      intent: 'auto-group' | 'auto-group-qa' | 'reconciliation' | 'qa',
+      label: string,
+      task: () => Promise<void>,
+    ) => {
+      if (isGroupingReadOnly) {
+        addToast(
+          writeBlockReason
+            ? `${label} is unavailable: ${writeBlockReason.replace(/-/g, ' ')}`
+            : `${label} is temporarily unavailable while shared edits are blocked.`,
+          'warning',
+        );
+        return;
+      }
+      if (activeBulkIntentRef.current) {
+        addToast(`${label} is already running. Wait for the current bulk action to finish.`, 'info');
+        return;
+      }
+
+      activeBulkIntentRef.current = intent;
+      try {
+        if (runWithExclusiveOperation) {
+          await runWithExclusiveOperation('auto-group', task);
+        } else {
+          await task();
+        }
+      } finally {
+        if (activeBulkIntentRef.current === intent) {
+          activeBulkIntentRef.current = null;
+        }
+      }
+    },
+    [addToast, isGroupingReadOnly, runWithExclusiveOperation, writeBlockReason],
+  );
 
   const lastAgSavedRef = useRef('');
   const persistAgSettings = useCallback(async () => {
@@ -2382,6 +2425,22 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
     }
   }, [agApiKey, agConcurrency, agHasApiKey, agModel, agQaPrompt, agReasoning, agSelectedModelObj, agTemperature, autoGroupCycle, logAndToast, suggestions]);
 
+  const handleStartAutoGroup = useCallback(() => {
+    void runExclusiveBulkIntent('auto-group', 'Auto Group', handleRunAutoGroup);
+  }, [handleRunAutoGroup, runExclusiveBulkIntent]);
+
+  const handleStartAutoGroupQA = useCallback(() => {
+    void runExclusiveBulkIntent('auto-group-qa', 'Auto Group QA', handleRunAutoGroupQA);
+  }, [handleRunAutoGroupQA, runExclusiveBulkIntent]);
+
+  const handleStartReconciliation = useCallback(() => {
+    void runExclusiveBulkIntent('reconciliation', 'Reconciliation', handleRunReconciliation);
+  }, [handleRunReconciliation, runExclusiveBulkIntent]);
+
+  const handleStartQA = useCallback(() => {
+    void runExclusiveBulkIntent('qa', 'QA review', handleRunQA);
+  }, [handleRunQA, runExclusiveBulkIntent]);
+
   const handleRemoveMismatches = useCallback(() => {
     if (qaMismatchPages.size === 0) return;
 
@@ -2946,13 +3005,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                 </button>
               ) : (
                 <button
-                  onClick={() => {
-                    if (runWithExclusiveOperation) {
-                      void runWithExclusiveOperation('auto-group', handleRunAutoGroup);
-                      return;
-                    }
-                    void handleRunAutoGroup();
-                  }}
+                  onClick={handleStartAutoGroup}
                   disabled={isGroupingReadOnly || !agHasApiKey || ungroupedPages.length === 0}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                 >
@@ -2971,13 +3024,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                 </button>
               ) : (
                 <button
-                  onClick={() => {
-                    if (runWithExclusiveOperation) {
-                      void runWithExclusiveOperation('auto-group', handleRunAutoGroupQA);
-                      return;
-                    }
-                    void handleRunAutoGroupQA();
-                  }}
+                  onClick={handleStartAutoGroupQA}
                   disabled={isGroupingReadOnly || !agHasApiKey || multiPageSuggestions.length === 0 || isRunning}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                 >
@@ -3065,6 +3112,9 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 font-medium">QA reviewed {qaProcessedCount}/{qaTotalCount}</span>
               <span className="px-2 py-1 rounded bg-red-50 text-red-700 font-medium">Mismatch pages {totalQAMismatchPages}</span>
               <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 font-medium">QA approved {[...qaResults.values()].filter(status => status === 'approve').length}</span>
+              {isCanonicalReloading && !isGroupingReadOnly && (
+                <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 font-medium">Syncing shared state</span>
+              )}
             </div>
 
             <div className={`${compactTabRailClass} w-fit`}>
@@ -3309,13 +3359,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
           <div className="px-3 py-1.5 border-b border-zinc-100 flex items-center gap-2 min-h-[36px] overflow-hidden">
             {!isRunning ? (
               <button
-                onClick={() => {
-                  if (runWithExclusiveOperation) {
-                    void runWithExclusiveOperation('auto-group', handleRunAutoGroup);
-                    return;
-                  }
-                  void handleRunAutoGroup();
-                }}
+                onClick={handleStartAutoGroup}
                 disabled={isGroupingReadOnly || !hasApiKey || totalPages === 0}
                 className="px-3 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shrink-0"
               >
@@ -3401,13 +3445,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               <div className="flex items-center gap-1.5 shrink-0">
                 {/* Reconcile button */}
                 <button
-                  onClick={() => {
-                    if (runWithExclusiveOperation) {
-                      void runWithExclusiveOperation('auto-group', handleRunReconciliation);
-                      return;
-                    }
-                    void handleRunReconciliation();
-                  }}
+                  onClick={handleStartReconciliation}
                   disabled={isGroupingReadOnly || !hasApiKey || suggestions.length < 2}
                   className="px-2.5 py-1 text-[11px] font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                   title="Compare all groups against each other to find semantic duplicates"
@@ -3428,13 +3466,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                 {/* QA button */}
                 {qaResults.size < suggestions.length && (
                   <button
-                    onClick={() => {
-                      if (runWithExclusiveOperation) {
-                        void runWithExclusiveOperation('auto-group', handleRunQA);
-                        return;
-                      }
-                      void handleRunQA();
-                    }}
+                    onClick={handleStartQA}
                     disabled={isGroupingReadOnly || !hasApiKey}
                     className="px-2.5 py-1 text-[11px] font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
                   >
@@ -4387,5 +4419,3 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
 
 AutoGroupPanel.displayName = 'AutoGroupPanel';
 export default AutoGroupPanel;
-
-

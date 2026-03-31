@@ -3,7 +3,11 @@
     "allow": [
       "Bash(npx vite:*)",
       "Bash(npx tsc:*)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(NAPI_RS_FORCE_WASI=1 npx vite build)"
     ]
   }
 }

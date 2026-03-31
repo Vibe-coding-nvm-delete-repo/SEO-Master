@@ -6,7 +6,7 @@ import type { GroupedCluster } from '../types';
 
 interface UseGroupReviewAutoProcessorParams {
   groupedClusters: GroupedCluster[];
-  isSharedProjectReadOnly: boolean;
+  isRoutineSharedEditBlocked: boolean;
   groupReviewSettingsRef: MutableRefObject<GroupReviewSettingsRef | null>;
   persistenceUpdateGroups: (updater: (groups: GroupedCluster[]) => GroupedCluster[]) => void;
   logAndToast: (action: any, details: string, count: number, toastMsg: string, toastType: any) => void;
@@ -14,14 +14,14 @@ interface UseGroupReviewAutoProcessorParams {
 
 export function useGroupReviewAutoProcessor({
   groupedClusters,
-  isSharedProjectReadOnly,
+  isRoutineSharedEditBlocked,
   groupReviewSettingsRef,
   persistenceUpdateGroups,
   logAndToast,
 }: UseGroupReviewAutoProcessorParams) {
   const reviewAbortRef = useRef<AbortController | null>(null);
   const reviewProcessingRef = useRef(false);
-  const isSharedProjectReadOnlyRef = useRef(false);
+  const isRoutineSharedEditBlockedRef = useRef(false);
   const reReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reReviewGroupIds = useRef<Set<string>>(new Set());
 
@@ -54,7 +54,7 @@ export function useGroupReviewAutoProcessor({
 
   useEffect(() => {
     if (reviewProcessingRef.current) return;
-    if (isSharedProjectReadOnly) return;
+    if (isRoutineSharedEditBlocked) return;
     const groupsToReview = groupedClusters.filter(
       (group) => group.reviewStatus === 'pending' || (!!group.mergeAffected && group.clusters.length > 0),
     );
@@ -88,7 +88,7 @@ export function useGroupReviewAutoProcessor({
         {
           onReviewing: () => {},
           onResult: (result: ReviewResult) => {
-            if (isSharedProjectReadOnlyRef.current) return;
+            if (isRoutineSharedEditBlockedRef.current) return;
             persistenceUpdateGroups((groups) =>
               groups.map((group) =>
                 group.id === result.groupId
@@ -118,7 +118,7 @@ export function useGroupReviewAutoProcessor({
             }
           },
           onError: (error: ReviewError) => {
-            if (isSharedProjectReadOnlyRef.current) return;
+            if (isRoutineSharedEditBlockedRef.current) return;
             persistenceUpdateGroups((groups) =>
               groups.map((group) =>
                 group.id === error.groupId
@@ -143,7 +143,7 @@ export function useGroupReviewAutoProcessor({
         controller.signal,
       ).finally(() => {
         reviewAbortRef.current = null;
-        if (isSharedProjectReadOnlyRef.current) {
+        if (isRoutineSharedEditBlockedRef.current) {
           reviewProcessingRef.current = false;
           return;
         }
@@ -178,22 +178,22 @@ export function useGroupReviewAutoProcessor({
     }));
 
     runReviewBatch(queue, groupsToReview);
-  }, [groupReviewSettingsRef, groupedClusters, isSharedProjectReadOnly, logAndToast, persistenceUpdateGroups]);
+  }, [groupReviewSettingsRef, groupedClusters, isRoutineSharedEditBlocked, logAndToast, persistenceUpdateGroups]);
 
   useEffect(() => {
     if (reviewProcessingRef.current) return;
-    if (isSharedProjectReadOnly) return;
+    if (isRoutineSharedEditBlocked) return;
     if (!groupedClusters.some((group) => group.reviewStatus === 'reviewing')) return;
     persistenceUpdateGroups(healReviewingGroups);
-  }, [groupedClusters, isSharedProjectReadOnly, persistenceUpdateGroups]);
+  }, [groupedClusters, isRoutineSharedEditBlocked, persistenceUpdateGroups]);
 
   useEffect(() => {
-    isSharedProjectReadOnlyRef.current = isSharedProjectReadOnly;
-    if (!isSharedProjectReadOnly) return;
+    isRoutineSharedEditBlockedRef.current = isRoutineSharedEditBlocked;
+    if (!isRoutineSharedEditBlocked) return;
     reviewAbortRef.current?.abort();
     reviewAbortRef.current = null;
     reviewProcessingRef.current = false;
-  }, [isSharedProjectReadOnly]);
+  }, [isRoutineSharedEditBlocked]);
 
   useEffect(() => () => {
     if (reReviewTimerRef.current) clearTimeout(reReviewTimerRef.current);

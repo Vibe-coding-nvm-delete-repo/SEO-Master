@@ -13,8 +13,8 @@ describe('useTokenActions', () => {
     const setTokenMgmtSubTab = vi.fn();
     const setTokenMgmtPage = vi.fn();
     const switchTab = vi.fn();
-    const blockTokens = vi.fn();
-    const unblockTokens = vi.fn();
+    const blockTokens = vi.fn(() => true);
+    const unblockTokens = vi.fn(() => true);
 
     const { result } = renderHook(() =>
       useTokenActions({
@@ -51,7 +51,7 @@ describe('useTokenActions', () => {
         setTokenMgmtSubTab: vi.fn(),
         setTokenMgmtPage: vi.fn(),
         switchTab,
-        blockTokens: vi.fn(),
+        blockTokens: vi.fn(() => true),
         unblockTokens,
       }),
     );

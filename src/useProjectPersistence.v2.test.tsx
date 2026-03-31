@@ -422,6 +422,57 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('rejects overlapping bulk operations from the same browser before a second lock attempt starts', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    const heldTask = deferred<string>();
+    const lock: ProjectOperationLockDoc = {
+      type: 'auto-group',
+      ownerId: 'client-a',
+      ownerClientId: 'client-a',
+      ownerUserId: null,
+      startedAt: '2026-03-30T00:00:00.000Z',
+      heartbeatAt: '2026-03-30T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      status: 'running',
+    };
+    collabMocks.acquireProjectOperationLock.mockResolvedValue(lock);
+    collabMocks.heartbeatProjectOperationLock.mockResolvedValue(lock);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    const first = result.current.runWithExclusiveOperation('auto-group', () => heldTask.promise);
+    const second = result.current.runWithExclusiveOperation('auto-group', async () => 'second');
+
+    await expect(second).resolves.toBeNull();
+    expect(collabMocks.acquireProjectOperationLock).toHaveBeenCalledTimes(1);
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('already running in this browser'),
+      'warning',
+    );
+
+    await act(async () => {
+      heldTask.resolve('first');
+      await first;
+    });
+  });
+
   it('rejects merge-by-name edits before optimistic local apply when a foreign operation lock is active', async () => {
     const addToast = vi.fn();
     const cluster: ClusterSummary = {
@@ -660,6 +711,117 @@ describe('useProjectPersistence V2 hardening', () => {
 
     await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['recovered']));
     expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps routine group edits writable while a newer meta epoch is still reloading', async () => {
+    const cluster: ClusterSummary = {
+      pageName: 'Alpha',
+      pageNameLower: 'alpha',
+      pageNameLen: 5,
+      tokens: 'alpha',
+      tokenArr: ['alpha'],
+      keywordCount: 1,
+      totalVolume: 10,
+      avgKd: 20,
+      avgKwRating: 1,
+      label: '',
+      labelArr: [],
+      locationCity: null,
+      locationState: null,
+      keywords: [],
+    };
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [cluster];
+    canonical.resolved.clusterSummary = [cluster];
+    canonical.base.results = [{
+      pageName: 'Alpha',
+      pageNameLower: 'alpha',
+      pageNameLen: 5,
+      tokens: 'alpha',
+      tokenArr: ['alpha'],
+      keyword: 'alpha keyword',
+      keywordLower: 'alpha keyword',
+      searchVolume: 10,
+      kd: 20,
+      kwRating: 1,
+      label: '',
+      labelArr: [],
+      locationCity: '',
+      locationState: '',
+    }] as any;
+    canonical.resolved.results = canonical.base.results;
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+    collabMocks.commitRevisionedDocChanges.mockResolvedValue([]);
+    const epochReload = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalEpoch.mockImplementationOnce(() => epochReload.promise);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(2, 2));
+    });
+
+    await waitFor(() => expect(result.current.isCanonicalReloading).toBe(true));
+    expect(result.current.isSharedProjectReadOnly).toBe(false);
+    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
+
+    const newGroup: GroupedCluster = {
+      id: 'group-1',
+      groupName: 'Group 1',
+      clusters: [cluster],
+      totalVolume: 10,
+      keywordCount: 1,
+      avgKd: 20,
+      avgKwRating: 1,
+    };
+
+    let applied = false;
+    act(() => {
+      applied = result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
+    });
+
+    expect(applied).toBe(true);
+    expect(result.current.groupedClusters).toHaveLength(1);
+    await waitFor(() => expect(collabMocks.commitRevisionedDocChanges).toHaveBeenCalled());
+
+    await act(async () => {
+      epochReload.resolve({
+        ...makeCanonical(2),
+        entities: {
+          ...makeCanonical(2).entities,
+          meta: {
+            ...makeMeta(2, 2),
+            commitState: 'writing',
+            migrationState: 'running',
+          },
+        },
+        resolved: null,
+      });
+      await epochReload.promise;
+    });
+
+    expect(result.current.isSharedProjectReadOnly).toBe(false);
+    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
   });
 
   it('retries full canonical recovery when a meta listener epoch load throws', async () => {

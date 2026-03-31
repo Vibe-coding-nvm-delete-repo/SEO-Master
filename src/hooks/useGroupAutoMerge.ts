@@ -37,6 +37,7 @@ interface UseGroupAutoMergeParams {
     toastType?: 'success' | 'info' | 'warning' | 'error',
   ) => void;
   flushNow: () => Promise<void>;
+  runWithExclusiveOperation?: <T>(type: 'auto-group', task: () => Promise<T>) => Promise<T | null>;
 }
 
 export interface GroupAutoMergeJobState {
@@ -79,6 +80,7 @@ export function useGroupAutoMerge({
   addToast,
   logAndToast,
   flushNow,
+  runWithExclusiveOperation,
 }: UseGroupAutoMergeParams) {
   const [job, setJob] = useState<GroupAutoMergeJobState>(INITIAL_JOB);
   const abortRef = useRef<AbortController | null>(null);
@@ -132,6 +134,17 @@ export function useGroupAutoMerge({
     abortRef.current?.abort();
   }, []);
 
+  const flushWithErrorToast = useCallback(async (messagePrefix: string): Promise<boolean> => {
+    try {
+      await flushNow();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      addToast(`${messagePrefix}: ${message}`, 'error');
+      return false;
+    }
+  }, [addToast, flushNow]);
+
   const runRecommendations = useCallback(async () => {
     const settings = groupReviewSettingsRef.current?.getSettings() ?? groupReviewSettingsSnapshot;
     const grouped = groupedClustersRef.current;
@@ -154,10 +167,12 @@ export function useGroupAutoMerge({
     abortRef.current = controller;
     startedAtRef.current = performance.now();
 
-    const groupedIdSet = new Set(grouped.map((g) => g.id));
+    const groupedIdSet = new Set(grouped.map((group) => group.id));
     const groupsSnapshot = [...grouped, ...approved];
     const sourceFingerprint = buildGroupAutoMergeFingerprint(groupsSnapshot);
-    const sources = groupsSnapshot.map((g) => buildGroupAutoMergeSource(g, groupedIdSet.has(g.id) ? 'grouped' : 'approved'));
+    const sources = groupsSnapshot.map((group) =>
+      buildGroupAutoMergeSource(group, groupedIdSet.has(group.id) ? 'grouped' : 'approved'),
+    );
     const totalPairs = (sources.length * (sources.length - 1)) / 2;
 
     setJob({
@@ -228,13 +243,27 @@ export function useGroupAutoMerge({
         sourceFingerprint,
       );
 
-      groupMergeRecommendationsRef.current = nextRecommendations;
-      updateGroupMergeRecommendations(nextRecommendations);
+      const persistRecommendations = async () => {
+        groupMergeRecommendationsRef.current = nextRecommendations;
+        updateGroupMergeRecommendations(nextRecommendations);
+        return flushWithErrorToast('Auto Merge generated recommendations locally, but shared sync failed');
+      };
+      const persisted = runWithExclusiveOperation
+        ? await runWithExclusiveOperation('auto-group', persistRecommendations)
+        : await persistRecommendations();
+      if (!persisted) {
+        setJob((prev) => ({
+          ...prev,
+          phase: 'error',
+          error: 'Failed to persist shared auto-merge recommendations.',
+          elapsedMs: Math.round(performance.now() - startedAtRef.current),
+        }));
+        return;
+      }
 
       const runFinishedStale =
         buildGroupAutoMergeFingerprint([...groupedClustersRef.current, ...approvedGroupsRef.current]) !== sourceFingerprint;
 
-      // Set complete IMMEDIATELY — never let persistence block the UI
       setJob({
         phase: 'complete',
         progress: 100,
@@ -247,9 +276,6 @@ export function useGroupAutoMerge({
         elapsedMs: Math.round(performance.now() - startedAtRef.current),
         error: null,
       });
-
-      // Fire-and-forget persistence — never blocks completion
-      flushNow().catch(() => {});
 
       if (runFinishedStale) {
         addToast('Auto Merge finished, but grouped data changed during the run. Recommendations are stale; click Embed again.', 'warning');
@@ -276,9 +302,9 @@ export function useGroupAutoMerge({
       }));
       addToast(message, 'error');
     }
-  }, [addToast, flushNow, groupReviewSettingsSnapshot, resetJob, updateGroupMergeRecommendations]);
+  }, [addToast, flushWithErrorToast, groupReviewSettingsSnapshot, resetJob, runWithExclusiveOperation, updateGroupMergeRecommendations]);
 
-  const dismissRecommendations = useCallback((recommendationIds: Iterable<string>) => {
+  const dismissRecommendations = useCallback(async (recommendationIds: Iterable<string>) => {
     const reviewedAt = new Date().toISOString();
     const nextRecommendations = markGroupAutoMergeRecommendationsStatus(
       Array.isArray(groupMergeRecommendationsRef.current) ? groupMergeRecommendationsRef.current : [],
@@ -286,9 +312,16 @@ export function useGroupAutoMerge({
       'dismissed',
       reviewedAt,
     );
-    groupMergeRecommendationsRef.current = nextRecommendations;
-    updateGroupMergeRecommendations(nextRecommendations);
-  }, [updateGroupMergeRecommendations]);
+    const persistDismissal = async () => {
+      groupMergeRecommendationsRef.current = nextRecommendations;
+      updateGroupMergeRecommendations(nextRecommendations);
+      return flushWithErrorToast('Auto Merge dismissal updated locally, but shared sync failed');
+    };
+    const persisted = runWithExclusiveOperation
+      ? await runWithExclusiveOperation('auto-group', persistDismissal)
+      : await persistDismissal();
+    return Boolean(persisted);
+  }, [flushWithErrorToast, runWithExclusiveOperation, updateGroupMergeRecommendations]);
 
   const applyRecommendations = useCallback(async (recommendationIds: Iterable<string>) => {
     const currentRecommendations = Array.isArray(groupMergeRecommendationsRef.current)
@@ -321,27 +354,29 @@ export function useGroupAutoMerge({
       'accepted',
       reviewedAt,
     );
-    // Merged groups always land in the Grouped tab (reverts approved status)
     const nextGrouped = [
       ...groupedClustersRef.current.filter((group) => !resolution.removedGroupIds.has(group.id)),
       ...resolution.mergedGroups,
     ].sort((a, b) => b.totalVolume - a.totalVolume);
-    // Remove any approved groups that were consumed by the merge
     const nextApproved = approvedGroupsRef.current.filter(
       (group) => !resolution.removedApprovedGroupIds.has(group.id),
     );
 
-    // Ref-before-save: sync all refs before bulkSet
-    groupedClustersRef.current = nextGrouped;
-    approvedGroupsRef.current = nextApproved;
-    groupMergeRecommendationsRef.current = nextRecommendations;
-    bulkSet({
-      groupedClusters: nextGrouped,
-      approvedGroups: nextApproved,
-      groupMergeRecommendations: nextRecommendations,
-    });
-    // Best-effort persistence — don't block UI on Firestore/IDB
-    flushNow().catch(() => {});
+    const persistApply = async () => {
+      groupedClustersRef.current = nextGrouped;
+      approvedGroupsRef.current = nextApproved;
+      groupMergeRecommendationsRef.current = nextRecommendations;
+      bulkSet({
+        groupedClusters: nextGrouped,
+        approvedGroups: nextApproved,
+        groupMergeRecommendations: nextRecommendations,
+      });
+      return flushWithErrorToast('Auto Merge applied locally, but shared sync failed');
+    };
+    const persisted = runWithExclusiveOperation
+      ? await runWithExclusiveOperation('auto-group', persistApply)
+      : await persistApply();
+    if (!persisted) return false;
 
     const mergedNames = resolution.mergedGroups.map((group) => `'${group.groupName}'`).join(', ');
     const revertedCount = resolution.removedApprovedGroupIds.size;
@@ -356,7 +391,7 @@ export function useGroupAutoMerge({
       'success',
     );
     return true;
-  }, [addToast, bulkSet, flushNow, groupReviewSettingsSnapshot, logAndToast]);
+  }, [addToast, bulkSet, flushWithErrorToast, groupReviewSettingsSnapshot, logAndToast, runWithExclusiveOperation]);
 
   return {
     job,

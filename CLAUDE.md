@@ -213,5 +213,5 @@ node -e "require('isomorphic-git').push({fs:require('fs'),http:require('isomorph
 | `npm run dev` | Start dev server (localhost:3000) |
 | `npm run build` | Production build |
 | `npm run lint` | TypeScript + ESLint |
-| `npm test` | Run all tests (760+) |
+| `npm test` | Run the full test suite |
 | `npm run setup` | Full install + WASM patches |

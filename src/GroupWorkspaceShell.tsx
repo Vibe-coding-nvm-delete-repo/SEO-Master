@@ -40,6 +40,7 @@ export function ProjectImportBar(props: any) {
     isProcessing,
     isProjectLoading,
     isProjectBusy,
+    isBulkSharedEditBlocked,
     fileName,
     navigateGroupSub,
     handleFileInput,
@@ -69,9 +70,9 @@ export function ProjectImportBar(props: any) {
           </button>
         )}
         {activeProjectId && !results && !isProcessing && !isProjectLoading && (
-          <label className={`flex items-center gap-1.5 px-2 py-1 text-white rounded-md text-xs font-medium transition-colors ${isProjectBusy ? 'bg-zinc-400 cursor-not-allowed' : 'bg-zinc-900 cursor-pointer hover:bg-zinc-800'}`}>
+          <label className={`flex items-center gap-1.5 px-2 py-1 text-white rounded-md text-xs font-medium transition-colors ${isBulkSharedEditBlocked ? 'bg-zinc-400 cursor-not-allowed' : 'bg-zinc-900 cursor-pointer hover:bg-zinc-800'}`}>
             <UploadCloud className="w-3 h-3" /> Upload CSV
-            <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={!activeProjectId || isProjectBusy} />
+            <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={!activeProjectId || isBulkSharedEditBlocked} />
           </label>
         )}
         {results && fileName && (
@@ -115,27 +116,37 @@ export function ProjectBusyBanner({ isProjectBusy, activeProjectId, activeOperat
     <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
       <AlertCircle className="h-4 w-4 shrink-0" />
       <span>
-        Project busy: {activeOperation?.type ?? 'shared operation'} is running in another client. Bulk edit actions are temporarily read-only.
+        Project busy: {activeOperation?.type ?? 'shared operation'} is running in another client. Shared edits are temporarily blocked until that project-wide operation finishes.
       </span>
     </div>
   );
 }
 
+export function CanonicalSyncBanner({ isCanonicalReloading, isSharedProjectReadOnly }: any) {
+  if (!isCanonicalReloading || isSharedProjectReadOnly) return null;
+  return (
+    <div className="mb-3 flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+      <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+      <span>Shared project is syncing updated canonical state. Routine grouping stays available while the current shared view remains safe.</span>
+    </div>
+  );
+}
+
 export function UploadDropzone(props: any) {
-  const { activeProjectId, isProjectBusy, isDragging, handleDragOver, handleDragLeave, handleDrop, handleFileInput, navigateGroupSub } = props;
+  const { activeProjectId, isBulkSharedEditBlocked, isDragging, handleDragOver, handleDragLeave, handleDrop, handleFileInput, navigateGroupSub } = props;
   return (
     <div
-      className={`relative border-2 border-dashed rounded-2xl p-12 transition-all duration-200 ease-in-out flex flex-col items-center justify-center text-center bg-white ${!activeProjectId || isProjectBusy ? 'opacity-50 cursor-not-allowed grayscale' : isDragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50/50'}`}
-      onDragOver={activeProjectId && !isProjectBusy ? handleDragOver : undefined}
-      onDragLeave={activeProjectId && !isProjectBusy ? handleDragLeave : undefined}
-      onDrop={activeProjectId && !isProjectBusy ? handleDrop : undefined}
+      className={`relative border-2 border-dashed rounded-2xl p-12 transition-all duration-200 ease-in-out flex flex-col items-center justify-center text-center bg-white ${!activeProjectId || isBulkSharedEditBlocked ? 'opacity-50 cursor-not-allowed grayscale' : isDragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50/50'}`}
+      onDragOver={activeProjectId && !isBulkSharedEditBlocked ? handleDragOver : undefined}
+      onDragLeave={activeProjectId && !isBulkSharedEditBlocked ? handleDragLeave : undefined}
+      onDrop={activeProjectId && !isBulkSharedEditBlocked ? handleDrop : undefined}
     >
-      {(!activeProjectId || isProjectBusy) && (
+      {(!activeProjectId || isBulkSharedEditBlocked) && (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/40 backdrop-blur-[1px] rounded-2xl">
           <div className="bg-white p-4 rounded-xl shadow-xl border border-zinc-200 flex flex-col items-center gap-3 max-w-xs">
             <Lock className="w-8 h-8 text-amber-500" />
-            {isProjectBusy ? (
-              <p className="text-sm font-medium text-zinc-900">Another client is running a project-wide operation.</p>
+            {isBulkSharedEditBlocked ? (
+              <p className="text-sm font-medium text-zinc-900">Shared project writes are temporarily unavailable.</p>
             ) : (
               <>
                 <p className="text-sm font-medium text-zinc-900">Create or select a project first</p>
@@ -154,7 +165,7 @@ export function UploadDropzone(props: any) {
       <p className="text-sm text-zinc-500 mb-6">Drag and drop your file here, or click to browse</p>
       <label className={`relative cursor-pointer bg-zinc-900 hover:bg-zinc-800 text-white px-6 py-2.5 rounded-lg font-medium text-sm transition-colors shadow-sm ${!activeProjectId ? 'pointer-events-none opacity-50' : ''}`}>
         <span>Select File</span>
-        <input type="file" className="sr-only" accept=".csv,text/csv" onChange={handleFileInput} disabled={!activeProjectId} />
+        <input type="file" className="sr-only" accept=".csv,text/csv" onChange={handleFileInput} disabled={!activeProjectId || isBulkSharedEditBlocked} />
       </label>
     </div>
   );
@@ -426,6 +437,7 @@ export default function GroupWorkspaceShell(props: any) {
     <>
       <ProjectImportBar {...props} />
       <ProjectBusyBanner {...props} />
+      <CanonicalSyncBanner {...props} />
       {groupSubTab === 'data' && <GroupDataView {...props} />}
       {groupSubTab === 'projects' && <GroupProjectsView {...props} />}
       {groupSubTab === 'settings' && <GroupSettingsView {...props} />}

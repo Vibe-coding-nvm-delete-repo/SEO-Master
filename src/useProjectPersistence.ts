@@ -236,6 +236,12 @@ export interface ProjectPersistence extends PersistedState {
   storageMode: 'legacy' | 'v2';
   activeOperation: ProjectOperationLockDoc | null;
   isProjectBusy: boolean;
+  isCanonicalReloading: boolean;
+  isWriteUnsafe: boolean;
+  writeBlockReason: 'schema-too-old' | 'permission-denied' | 'canonical-unresolved' | 'canonical-invalid' | 'recovery-failed' | null;
+  lastKnownGoodWritableState: string | null;
+  isRoutineSharedEditBlocked: boolean;
+  isBulkSharedEditBlocked: boolean;
   isSharedProjectReadOnly: boolean;
   runWithExclusiveOperation: <T>(
     type: ProjectOperationLockDoc['type'],
@@ -258,15 +264,15 @@ export interface ProjectPersistence extends PersistedState {
     subKeys: Set<string>,
     recalc: RecalcFn,
   ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
-  blockTokens: (tokens: string[]) => void;
-  unblockTokens: (tokens: string[]) => void;
+  blockTokens: (tokens: string[]) => boolean;
+  unblockTokens: (tokens: string[]) => boolean;
   applyMergeCascade: (cascade: {
     results: ProcessedRow[] | null;
     clusterSummary: ClusterSummary[] | null;
     tokenSummary: TokenSummary[] | null;
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
-  }, newRule: TokenMergeRule) => void;
+  }, newRule: TokenMergeRule) => boolean;
   undoMerge: (data: {
     results: ProcessedRow[] | null;
     clusterSummary: ClusterSummary[] | null;
@@ -274,7 +280,7 @@ export interface ProjectPersistence extends PersistedState {
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
     tokenMergeRules: TokenMergeRule[];
-  }) => void;
+  }) => boolean;
   updateLabelSections: (sections: LabelSection[]) => void;
   updateSuggestions: (suggestions: AutoGroupSuggestion[]) => void;
   updateAutoMergeRecommendations: (recommendations: AutoMergeRecommendation[]) => void;
@@ -478,7 +484,10 @@ export function useProjectPersistence(options: {
   const [storageMode, setStorageModeState] = useState<'legacy' | 'v2'>('legacy');
   const [activeOperation, setActiveOperation] = useState<ProjectOperationLockDoc | null>(null);
   const [legacyWritesBlocked, setLegacyWritesBlockedState] = useState(false);
-  const [v2RecoveryMode, setV2RecoveryModeState] = useState(false);
+  const [isCanonicalReloading, setIsCanonicalReloadingState] = useState(false);
+  const [isWriteUnsafe, setIsWriteUnsafeState] = useState(false);
+  const [writeBlockReason, setWriteBlockReasonState] = useState<ProjectPersistence['writeBlockReason']>(null);
+  const [lastKnownGoodWritableState, setLastKnownGoodWritableState] = useState<string | null>(null);
   const activeProjectIdRef = useRef<string | null>(null);
   const storageModeRef = useRef<'legacy' | 'v2'>('legacy');
   const addToastRef = useRef(addToast);
@@ -500,10 +509,14 @@ export function useProjectPersistence(options: {
   const optimisticOverlayByDocKeyRef = useRef<Map<string, unknown>>(new Map());
   const lastAckedMutationByDocKeyRef = useRef<Map<string, string | null>>(new Map());
   const legacyWritesBlockedRef = useRef(false);
-  const v2RecoveryModeRef = useRef(false);
+  const isCanonicalReloadingRef = useRef(false);
+  const isWriteUnsafeRef = useRef(false);
+  const writeBlockReasonRef = useRef<ProjectPersistence['writeBlockReason']>(null);
+  const lastKnownGoodWritableStateRef = useRef<string | null>(null);
   const projectStorageModeResolvedRef = useRef(false);
   const lockHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lockHeartbeatLostRef = useRef(false);
+  const exclusiveOperationInFlightRef = useRef(false);
   const activeOperationRef = useRef<ProjectOperationLockDoc | null>(null);
   const pendingV2WriteRef = useRef<Promise<void>>(Promise.resolve());
   const pendingV2LocalRef = useRef<Promise<void>>(Promise.resolve());
@@ -522,9 +535,25 @@ export function useProjectPersistence(options: {
     legacyWritesBlockedRef.current = blocked;
     setLegacyWritesBlockedState(blocked);
   }, []);
-  const setV2RecoveryMode = useCallback((recovering: boolean) => {
-    v2RecoveryModeRef.current = recovering;
-    setV2RecoveryModeState(recovering);
+  const setCanonicalReloading = useCallback((reloading: boolean) => {
+    isCanonicalReloadingRef.current = reloading;
+    setIsCanonicalReloadingState(reloading);
+  }, []);
+  const setWriteUnsafe = useCallback((unsafe: boolean, reason: ProjectPersistence['writeBlockReason'] = null) => {
+    isWriteUnsafeRef.current = unsafe;
+    writeBlockReasonRef.current = unsafe ? reason : null;
+    setIsWriteUnsafeState(unsafe);
+    setWriteBlockReasonState(unsafe ? reason : null);
+  }, []);
+  const rememberWritableCanonical = useCallback((datasetEpoch: number | null, baseCommitId: string | null) => {
+    const identity = datasetEpoch != null && baseCommitId ? `${datasetEpoch}:${baseCommitId}` : null;
+    lastKnownGoodWritableStateRef.current = identity;
+    setLastKnownGoodWritableState(identity);
+    return identity;
+  }, []);
+  const clearWritableCanonical = useCallback(() => {
+    lastKnownGoodWritableStateRef.current = null;
+    setLastKnownGoodWritableState(null);
   }, []);
 
   // ── Consolidated "latest" ref — always in sync, never stale ──────────
@@ -603,7 +632,7 @@ export function useProjectPersistence(options: {
     if (!projectStorageModeResolvedRef.current) return 'storage-mode-unresolved';
     if (projectLoadingRef.current) return 'project-loading';
     if (legacyWritesBlockedRef.current) return 'legacy-writes-blocked';
-    if (v2RecoveryModeRef.current) return 'v2-recovery';
+    if (isWriteUnsafeRef.current) return 'v2-recovery';
     if (collabMetaRef.current?.readMode === 'v2') return 'collab-meta-v2';
     return null;
   }, []);
@@ -980,6 +1009,7 @@ export function useProjectPersistence(options: {
     datasetEpoch: number | null;
     generation: number;
     allowEpochAdvance?: boolean;
+    pendingDocKeys: Set<string>;
   }
 
   const isV2WriteContextCurrent = useCallback((context: V2WriteContext): boolean => {
@@ -1142,8 +1172,33 @@ export function useProjectPersistence(options: {
     recomposeFromCanonicalRefs();
   }, [recomposeFromCanonicalRefs, v2DocKey]);
 
+  const rollbackPendingDocKeys = useCallback((docKeys: Iterable<string>) => {
+    let hadPending = false;
+    for (const docKey of docKeys) {
+      pendingMutationByDocKeyRef.current.delete(docKey);
+      optimisticOverlayByDocKeyRef.current.delete(docKey);
+      hadPending = true;
+    }
+    if (hadPending) {
+      recomposeFromCanonicalRefs();
+    }
+  }, [recomposeFromCanonicalRefs]);
+
   const applyCanonicalState = useCallback((canonical: CanonicalProjectState) => {
     if (canonical.mode !== 'v2') return;
+    const meta = canonical.entities.meta;
+    const isReadyWritableCanonical = Boolean(
+      canonical.resolved &&
+      meta?.readMode === 'v2' &&
+      meta?.commitState === 'ready' &&
+      meta?.migrationState === 'complete'
+    );
+    const recoveryReason: ProjectPersistence['writeBlockReason'] =
+      canonical.diagnostics?.recovery?.outcome === 'failed' && canonical.diagnostics?.recovery?.code === 'permission-denied'
+        ? 'permission-denied'
+        : canonical.resolved
+          ? 'canonical-invalid'
+          : 'canonical-unresolved';
     collabMetaRef.current = canonical.entities.meta;
     setLegacyWritesBlocked(Boolean(
       canonical.entities.meta &&
@@ -1161,23 +1216,25 @@ export function useProjectPersistence(options: {
     rebuildRevisionMap(activeEpochRef.current);
     setActiveOperation(canonical.entities.activeOperation);
     activeOperationRef.current = canonical.entities.activeOperation;
-    setV2RecoveryMode(!(
-      canonical.resolved &&
-      canonical.entities.meta?.readMode === 'v2' &&
-      canonical.entities.meta?.commitState === 'ready' &&
-      canonical.entities.meta?.migrationState === 'complete'
-    ));
+    if (isReadyWritableCanonical) {
+      rememberWritableCanonical(meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null, meta?.baseCommitId ?? null);
+      setWriteUnsafe(false);
+    } else if (!lastKnownGoodWritableStateRef.current) {
+      setWriteUnsafe(true, recoveryReason);
+    }
+    setCanonicalReloading(false);
     if (!canonical.resolved) {
       return;
     }
     const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
     applyViewState(toProjectViewState(canonical.resolved, project));
     saveCounterRef.current = canonical.resolved.lastSaveId ?? saveCounterRef.current;
-  }, [applyViewState, rebuildRevisionMap, setLegacyWritesBlocked, setV2RecoveryMode]);
+  }, [applyViewState, rebuildRevisionMap, rememberWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe]);
 
   const reloadCanonicalStateFromCloud = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
     if (!projectId || storageModeRef.current !== 'v2') return;
+    setCanonicalReloading(true);
     const meta = collabMetaRef.current;
     const reloadGeneration = epochLoadGenerationRef.current;
     const reloadMetaRevision = meta?.revision ?? null;
@@ -1203,21 +1260,34 @@ export function useProjectPersistence(options: {
     ) {
       return;
     }
-    if (!canonical) return;
+    if (!canonical) {
+      setCanonicalReloading(false);
+      if (!lastKnownGoodWritableStateRef.current) {
+        setWriteUnsafe(true, 'recovery-failed');
+      }
+      return;
+    }
     clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
     applyCanonicalState(canonical);
     if (canonical.entities.meta && canonical.resolved) {
       updateCanonicalCache(canonical.resolved, canonical.entities.meta);
     }
-  }, [applyCanonicalState, clearPendingForEpoch, updateCanonicalCache]);
+  }, [applyCanonicalState, clearPendingForEpoch, setCanonicalReloading, setWriteUnsafe, updateCanonicalCache]);
 
   const hasOwnedActiveOperationLock = useCallback((): boolean => {
+    if (lockHeartbeatLostRef.current) return false;
     const lock = activeOperationRef.current;
     if (!lock) return false;
     if (lock.ownerId !== clientIdRef.current && lock.ownerClientId !== clientIdRef.current) {
       return false;
     }
     return Date.parse(lock.expiresAt || '0') > Date.now();
+  }, []);
+
+  const invalidateOwnedActiveOperationLock = useCallback(() => {
+    lockHeartbeatLostRef.current = true;
+    activeOperationRef.current = null;
+    setActiveOperation(null);
   }, []);
 
   const queueV2Write = useCallback((
@@ -1233,6 +1303,7 @@ export function useProjectPersistence(options: {
       datasetEpoch: datasetEpoch ?? activeEpochRef.current,
       generation: epochLoadGenerationRef.current,
       allowEpochAdvance: options?.allowEpochAdvance,
+      pendingDocKeys: new Set<string>(),
     };
     pendingV2WriteRef.current = pendingV2WriteRef.current.then(async () => {
       if (!isV2WriteContextCurrent(context)) {
@@ -1270,18 +1341,24 @@ export function useProjectPersistence(options: {
           return;
         }
         if (isOperationConflict) {
+          rollbackPendingDocKeys(context.pendingDocKeys);
           addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
           await reloadCanonicalStateFromCloud();
           return;
+        }
+        rollbackPendingDocKeys(context.pendingDocKeys);
+        if (errorInfo.code === 'permission-denied') {
+          setWriteUnsafe(true, 'permission-denied');
         }
         reportPersistFailure(
           addToastRef.current,
           errorInfo.step ? `${label} (${errorInfo.step})` : label,
           err,
         );
+        await reloadCanonicalStateFromCloud();
       }
     });
-  }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation]);
+  }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation, rollbackPendingDocKeys, setWriteUnsafe]);
 
   const persistCanonicalPayloadV2 = useCallback((payload: ProjectDataPayload, options?: { requireOwnedLock?: boolean }) => {
     const projectId = activeProjectIdRef.current;
@@ -1326,8 +1403,11 @@ export function useProjectPersistence(options: {
       addToastRef.current('This shared project requires a newer client version. Writes are disabled.', 'warning');
       return false;
     }
-    if (v2RecoveryModeRef.current) {
-      addToastRef.current(`Shared state is still recovering. ${actionLabel} is temporarily read-only.`, 'warning');
+    if (isWriteUnsafeRef.current) {
+      const message = writeBlockReasonRef.current === 'permission-denied'
+        ? 'Shared project recovery is blocked by Firestore permissions. Edits are temporarily read-only until the shared rules or deployment are repaired.'
+        : `Shared state is still recovering. ${actionLabel} is temporarily read-only.`;
+      addToastRef.current(message, 'warning');
       return false;
     }
     if (
@@ -1341,6 +1421,16 @@ export function useProjectPersistence(options: {
     }
     return true;
   }, []);
+
+  const ensureOwnedBulkMutationAllowed = useCallback((actionLabel: string): boolean => {
+    if (!ensureV2MutationAllowed(actionLabel)) return false;
+    if (!hasOwnedActiveOperationLock()) {
+      addToastRef.current(`This ${actionLabel.toLowerCase()} action requires an active project operation lock. Start it from the bulk action flow and try again.`, 'warning');
+      lastV2WriteErrorRef.current = new Error('operation-locked');
+      return false;
+    }
+    return true;
+  }, [ensureV2MutationAllowed, hasOwnedActiveOperationLock]);
 
   const mergeAckedDocs = useCallback(<T extends { id: string; revision?: number; lastMutationId?: string | null }>(
     currentDocs: T[],
@@ -1373,8 +1463,14 @@ export function useProjectPersistence(options: {
     if (storageModeRef.current !== 'v2') {
       return task();
     }
+    if (exclusiveOperationInFlightRef.current || hasOwnedActiveOperationLock()) {
+      addToastRef.current('A project-wide operation is already running in this browser. Wait for it to finish before starting another one.', 'warning');
+      return null;
+    }
+    exclusiveOperationInFlightRef.current = true;
     const lock = await acquireProjectOperationLock(projectId, type, clientIdRef.current);
     if (!lock) {
+      exclusiveOperationInFlightRef.current = false;
       addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
       return null;
     }
@@ -1387,13 +1483,13 @@ export function useProjectPersistence(options: {
     lockHeartbeatTimerRef.current = setInterval(() => {
       void heartbeatProjectOperationLock(projectId, clientIdRef.current).then((nextLock) => {
         if (!nextLock) {
-          lockHeartbeatLostRef.current = true;
+          invalidateOwnedActiveOperationLock();
           return;
         }
         activeOperationRef.current = nextLock;
         setActiveOperation(nextLock);
       }).catch((err) => {
-        lockHeartbeatLostRef.current = true;
+        invalidateOwnedActiveOperationLock();
         reportPersistFailure(addToastRef.current, 'project lock heartbeat', err);
       });
     }, 5_000);
@@ -1415,6 +1511,7 @@ export function useProjectPersistence(options: {
       }
       throw err;
     } finally {
+      exclusiveOperationInFlightRef.current = false;
       if (lockHeartbeatTimerRef.current) {
         clearInterval(lockHeartbeatTimerRef.current);
         lockHeartbeatTimerRef.current = null;
@@ -1424,7 +1521,7 @@ export function useProjectPersistence(options: {
       setActiveOperation(null);
       activeOperationRef.current = null;
     }
-  }, [flushNow, reloadCanonicalStateFromCloud]);
+  }, [flushNow, hasOwnedActiveOperationLock, invalidateOwnedActiveOperationLock, reloadCanonicalStateFromCloud]);
 
   // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
   useEffect(() => {
@@ -1564,6 +1661,7 @@ export function useProjectPersistence(options: {
       ).map((change) => ({ ...change, mutationId }));
       for (const change of changes) {
         const docKey = v2DocKey(base.datasetEpoch, PROJECT_GROUPS_SUBCOLLECTION, change.id);
+        context.pendingDocKeys.add(docKey);
         pendingMutationByDocKeyRef.current.set(docKey, mutationId);
         optimisticOverlayByDocKeyRef.current.set(docKey, change.kind === 'upsert' ? change.value ?? null : null);
       }
@@ -1592,6 +1690,7 @@ export function useProjectPersistence(options: {
       ).map((change) => ({ ...change, mutationId }));
       for (const change of changes) {
         const docKey = v2DocKey(base.datasetEpoch, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, change.id);
+        context.pendingDocKeys.add(docKey);
         pendingMutationByDocKeyRef.current.set(docKey, mutationId);
         optimisticOverlayByDocKeyRef.current.set(docKey, change.kind === 'upsert' ? change.value ?? null : null);
       }
@@ -1619,6 +1718,7 @@ export function useProjectPersistence(options: {
       ).map((change) => ({ ...change, mutationId }));
       for (const change of changes) {
         const docKey = v2DocKey(base.datasetEpoch, PROJECT_LABEL_SECTIONS_SUBCOLLECTION, change.id);
+        context.pendingDocKeys.add(docKey);
         pendingMutationByDocKeyRef.current.set(docKey, mutationId);
         optimisticOverlayByDocKeyRef.current.set(docKey, change.kind === 'upsert' ? change.value ?? null : null);
       }
@@ -1646,6 +1746,7 @@ export function useProjectPersistence(options: {
       ).map((change) => ({ ...change, mutationId }));
       for (const change of changes) {
         const docKey = v2DocKey(base.datasetEpoch, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, change.id);
+        context.pendingDocKeys.add(docKey);
         pendingMutationByDocKeyRef.current.set(docKey, mutationId);
         optimisticOverlayByDocKeyRef.current.set(docKey, change.kind === 'upsert' ? change.value ?? null : null);
       }
@@ -1673,6 +1774,7 @@ export function useProjectPersistence(options: {
       ).map((change) => ({ ...change, mutationId }));
       for (const change of changes) {
         const docKey = v2DocKey(base.datasetEpoch, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, change.id);
+        context.pendingDocKeys.add(docKey);
         pendingMutationByDocKeyRef.current.set(docKey, mutationId);
         optimisticOverlayByDocKeyRef.current.set(docKey, change.kind === 'upsert' ? change.value ?? null : null);
       }
@@ -1731,12 +1833,20 @@ export function useProjectPersistence(options: {
   const setActiveProjectId = useCallback((id: string | null) => {
     activeProjectIdRef.current = id;
     projectStorageModeResolvedRef.current = Boolean(id);
+    if (!id) {
+      clearWritableCanonical();
+      setCanonicalReloading(false);
+      setWriteUnsafe(false);
+    }
     setActiveProjectIdState(id);
-  }, []);
+  }, [clearWritableCanonical, setCanonicalReloading, setWriteUnsafe]);
 
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
     projectStorageModeResolvedRef.current = false;
+    clearWritableCanonical();
+    setCanonicalReloading(false);
+    setWriteUnsafe(false);
     const loadTraceId = beginRuntimeTrace('useProjectPersistence.loadProject', projectId, {
       activeProjectId: activeProjectIdRef.current,
       projectCount: projectList.length,
@@ -1802,12 +1912,16 @@ export function useProjectPersistence(options: {
       if (canonical.resolved) {
         const viewState = toProjectViewState(canonical.resolved, project);
         loadFenceRef.current = countGroupedPages(viewState);
-        setV2RecoveryMode(false);
         if (canonical.entities.meta) {
           updateCanonicalCache(canonical.resolved, canonical.entities.meta);
         }
       } else {
-        setV2RecoveryMode(true);
+        setWriteUnsafe(
+          true,
+          canonical.diagnostics?.recovery?.outcome === 'failed' && canonical.diagnostics?.recovery?.code === 'permission-denied'
+            ? 'permission-denied'
+            : 'canonical-unresolved',
+        );
         if (!idbData) {
           applyViewState(createEmptyProjectViewState());
           loadFenceRef.current = 0;
@@ -1827,7 +1941,9 @@ export function useProjectPersistence(options: {
       setStorageMode('legacy');
       storageModeRef.current = 'legacy';
       projectStorageModeResolvedRef.current = true;
-      setV2RecoveryMode(false);
+      clearWritableCanonical();
+      setCanonicalReloading(false);
+      setWriteUnsafe(false);
       const data = canonical.resolved ?? idbData;
       const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
       applyViewState(viewState);
@@ -1905,7 +2021,7 @@ export function useProjectPersistence(options: {
 
     projectLoadingRef.current = false;
     */
-  }, [applyCanonicalState, applyViewState, setLegacyWritesBlocked, setStorageMode, setV2RecoveryMode, updateCanonicalCache]);
+  }, [applyCanonicalState, applyViewState, clearWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setStorageMode, setWriteUnsafe, updateCanonicalCache]);
 
   const clearProject = useCallback(() => {
     // Cancel any pending flushes so stale mutations from the previous project
@@ -1932,9 +2048,12 @@ export function useProjectPersistence(options: {
     labelSectionDocsRef.current = [];
     activityLogDocsRef.current = [];
     setLegacyWritesBlocked(false);
-    setV2RecoveryMode(false);
+    clearWritableCanonical();
+    setCanonicalReloading(false);
+    setWriteUnsafe(false);
     projectStorageModeResolvedRef.current = false;
     lockHeartbeatLostRef.current = false;
+    exclusiveOperationInFlightRef.current = false;
     lastV2WriteErrorRef.current = null;
     lastV2LocalErrorRef.current = null;
     lastV2LocalErrorRef.current = null;
@@ -1948,7 +2067,7 @@ export function useProjectPersistence(options: {
     setActiveOperation(null);
     activeOperationRef.current = null;
     applyViewState(createEmptyProjectViewState());
-  }, [applyViewState, setLegacyWritesBlocked, setStorageMode, setV2RecoveryMode]);
+  }, [applyViewState, clearWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setStorageMode, setWriteUnsafe]);
 
   const syncFileNameLocal = useCallback((name: string | null) => {
     latest.current = { ...latest.current, fileName: name };
@@ -2302,11 +2421,12 @@ export function useProjectPersistence(options: {
           (nextMeta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
         ));
         if (!nextMeta || nextMeta.readMode !== 'v2') {
-          setV2RecoveryMode(false);
+          setCanonicalReloading(false);
+          setWriteUnsafe(false);
           return;
         }
         if (legacyWritesBlockedRef.current) {
-          setV2RecoveryMode(false);
+          setCanonicalReloading(false);
           return;
         }
         if (
@@ -2324,7 +2444,7 @@ export function useProjectPersistence(options: {
         epochLoadAbortRef.current?.abort();
         const abortController = new AbortController();
         epochLoadAbortRef.current = abortController;
-        setV2RecoveryMode(true);
+        setCanonicalReloading(true);
         void (async () => {
           const canonical = (
             await loadCanonicalEpoch(pid, nextMeta)
@@ -2340,6 +2460,12 @@ export function useProjectPersistence(options: {
             activeProjectIdRef.current !== pid ||
             !canonical
           ) {
+            if (!canonical && !abortController.signal.aborted && generation === epochLoadGenerationRef.current && activeProjectIdRef.current === pid) {
+              setCanonicalReloading(false);
+              if (!lastKnownGoodWritableStateRef.current) {
+                setWriteUnsafe(true, 'recovery-failed');
+              }
+            }
             return;
           }
           clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
@@ -2362,8 +2488,14 @@ export function useProjectPersistence(options: {
             return;
           }
           reportPersistFailure(addToastRef.current, 'project collab meta listener', err);
+          if (!lastKnownGoodWritableStateRef.current) {
+            setWriteUnsafe(true, 'recovery-failed');
+          }
           void reloadCanonicalStateFromCloud().catch((reloadErr) => {
             reportPersistFailure(addToastRef.current, 'project collab meta listener recovery reload', reloadErr);
+            if (!lastKnownGoodWritableStateRef.current) {
+              setWriteUnsafe(true, 'recovery-failed');
+            }
           });
         });
       },
@@ -2405,7 +2537,7 @@ export function useProjectPersistence(options: {
       operationUnsub();
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
-  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setLegacyWritesBlocked, setV2RecoveryMode, storageMode, updateCanonicalCache, v2DocKey]);
+  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, storageMode, updateCanonicalCache, v2DocKey]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
@@ -2671,37 +2803,39 @@ export function useProjectPersistence(options: {
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const blockTokens = useCallback((tokens: string[]) => {
-    if (tokens.length === 0) return;
+    if (tokens.length === 0) return false;
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Blocked-token edits')) return;
+      if (!ensureV2MutationAllowed('Blocked-token edits')) return false;
       const next = new Set(latest.current.blockedTokens);
       tokens.forEach(t => next.add(t));
       applyLocalChanges({ blockedTokens: next }, { checkpoint: true });
       persistBlockedTokensV2(next);
-      return;
+      return true;
     }
     mutateAndSave(s => {
       const next = new Set(s.blockedTokens);
       tokens.forEach(t => next.add(t));
       return { blockedTokens: next };
     });
+    return true;
   }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistBlockedTokensV2]);
 
   const unblockTokens = useCallback((tokens: string[]) => {
-    if (tokens.length === 0) return;
+    if (tokens.length === 0) return false;
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Blocked-token edits')) return;
+      if (!ensureV2MutationAllowed('Blocked-token edits')) return false;
       const next = new Set(latest.current.blockedTokens);
       tokens.forEach(t => next.delete(t));
       applyLocalChanges({ blockedTokens: next }, { checkpoint: true });
       persistBlockedTokensV2(next);
-      return;
+      return true;
     }
     mutateAndSave(s => {
       const next = new Set(s.blockedTokens);
       tokens.forEach(t => next.delete(t));
       return { blockedTokens: next };
     });
+    return true;
   }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistBlockedTokensV2]);
 
   const applyMergeCascade = useCallback((cascade: {
@@ -2712,7 +2846,7 @@ export function useProjectPersistence(options: {
     approvedGroups: GroupedCluster[];
   }, newRule: TokenMergeRule) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Token merge edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Token merge edits')) return false;
       const payload = buildPayload({
         results: cascade.results,
         clusterSummary: cascade.clusterSummary,
@@ -2723,7 +2857,7 @@ export function useProjectPersistence(options: {
       });
       applyViewState(toProjectViewState(payload));
       persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return;
+      return true;
     }
     mutateAndSave(s => ({
       results: cascade.results,
@@ -2733,7 +2867,8 @@ export function useProjectPersistence(options: {
       approvedGroups: cascade.approvedGroups,
       tokenMergeRules: [...s.tokenMergeRules, newRule],
     }));
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
+    return true;
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
   const undoMerge = useCallback((data: {
     results: ProcessedRow[] | null;
@@ -2744,7 +2879,7 @@ export function useProjectPersistence(options: {
     tokenMergeRules: TokenMergeRule[];
   }) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Token merge edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Token merge edits')) return false;
       const payload = buildPayload({
         results: data.results,
         clusterSummary: data.clusterSummary,
@@ -2755,7 +2890,7 @@ export function useProjectPersistence(options: {
       });
       applyViewState(toProjectViewState(payload));
       persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return;
+      return true;
     }
     mutateAndSave(() => ({
       results: data.results,
@@ -2765,7 +2900,8 @@ export function useProjectPersistence(options: {
       approvedGroups: data.approvedGroups,
       tokenMergeRules: data.tokenMergeRules,
     }));
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
+    return true;
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
   const updateLabelSections = useCallback((sections: LabelSection[]) => {
     if (storageModeRef.current === 'v2') {
@@ -2779,25 +2915,25 @@ export function useProjectPersistence(options: {
 
   const updateAutoMergeRecommendations = useCallback((recommendations: AutoMergeRecommendation[]) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
       const payload = buildPayload({ autoMergeRecommendations: recommendations });
       applyViewState(toProjectViewState(payload));
       persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
       return;
     }
     mutateAndSave(() => ({ autoMergeRecommendations: recommendations }));
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
   const updateGroupMergeRecommendations = useCallback((recommendations: GroupMergeRecommendation[]) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
       const payload = buildPayload({ groupMergeRecommendations: recommendations });
       applyViewState(toProjectViewState(payload));
       persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
       return;
     }
     mutateAndSave(() => ({ groupMergeRecommendations: recommendations }));
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
   // Debounced suggestion-only persistence — onSuggestionsChange can still fire very
   // often; main mutations now coalesce in flushPersistQueue. Suggestions alone use
@@ -2805,7 +2941,7 @@ export function useProjectPersistence(options: {
   const suggestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const updateSuggestions = useCallback((suggestions: AutoGroupSuggestion[]) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
       const payload = buildPayload({ autoGroupSuggestions: suggestions });
       applyViewState(toProjectViewState(payload));
       persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
@@ -2830,7 +2966,7 @@ export function useProjectPersistence(options: {
       suggestionTimerRef.current = null;
       enqueueSave('suggestions-debounce', traceId);
     }, 2000);
-  }, [applyViewState, buildPayload, checkpointToIDB, enqueueSave, ensureV2MutationAllowed, persistCanonicalPayloadV2]);
+  }, [applyViewState, buildPayload, checkpointToIDB, enqueueSave, ensureOwnedBulkMutationAllowed, persistCanonicalPayloadV2]);
 
   const addActivityEntry = useCallback((entry: ActivityLogEntry) => {
     if (storageModeRef.current === 'v2') {
@@ -2894,7 +3030,7 @@ export function useProjectPersistence(options: {
       }
     }
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
       const payload = buildPayload(changes);
       const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
       applyViewState(toProjectViewState(payload, project));
@@ -2902,7 +3038,7 @@ export function useProjectPersistence(options: {
       return;
     }
     mutateAndSave(() => changes);
-  }, [applyViewState, buildPayload, ensureV2MutationAllowed, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
   const isProjectBusy = Boolean(
@@ -2913,7 +3049,16 @@ export function useProjectPersistence(options: {
   );
   const isSharedProjectReadOnly = storageMode === 'v2' && (
     legacyWritesBlocked ||
-    v2RecoveryMode ||
+    isWriteUnsafe
+  );
+  const isRoutineSharedEditBlocked = storageMode === 'v2' && (
+    legacyWritesBlocked ||
+    isWriteUnsafe ||
+    isProjectBusy
+  );
+  const isBulkSharedEditBlocked = storageMode === 'v2' && (
+    legacyWritesBlocked ||
+    isWriteUnsafe ||
     isProjectBusy
   );
 
@@ -3007,6 +3152,12 @@ export function useProjectPersistence(options: {
     storageMode,
     activeOperation,
     isProjectBusy,
+    isCanonicalReloading,
+    isWriteUnsafe,
+    writeBlockReason,
+    lastKnownGoodWritableState,
+    isRoutineSharedEditBlocked,
+    isBulkSharedEditBlocked,
     isSharedProjectReadOnly,
     runWithExclusiveOperation,
 

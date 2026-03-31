@@ -284,6 +284,16 @@ useEffect(() => {
 
 ## Execution Notes
 
+- [x] (2026-03-31) Fixed sticky shared V2 read-only gating in `src/useProjectPersistence.ts`, `src/App.tsx`, `src/GroupDataView.tsx`, `src/hooks/useFilteredAutoGroupFlow.ts`, and `src/hooks/useGroupReviewAutoProcessor.ts`.
+  Root cause: the persistence boundary used one broad recovery flag for both background canonical reloads and true unsafe write states, and the Group UI consumed that same signal as blanket `isSharedProjectReadOnly`. A benign `collab/meta` / epoch reload could therefore freeze routine grouping, filtered auto-group orchestration, and review processing even when the last known canonical shared state was still safe.
+  Instances fixed: persistence write gating, routine-vs-bulk editability derivation, grouped/approved row disablement, filtered Auto Group read-only gating, and Group Review auto-processor abort behavior.
+  Prevention rule: background canonical reload must not be treated as blanket read-only when a last-known-good writable canonical state still exists; only true unsafe shared states remain fail-closed.
+
+- [x] (2026-03-31) Hardened spam-heavy Group bulk flows and V2 write-failure recovery in `src/useProjectPersistence.ts`, `src/AutoGroupPanel.tsx`, `src/GroupDataView.tsx`, `src/GroupWorkspaceShell.tsx`, `src/hooks/useFilteredAutoGroupFlow.ts`, `src/filteredAutoGroupQueue.ts`, and new regression tests.
+  Root cause: the app still had residual paths where expensive bulk actions could start in unsafe shared states, queued filtered Auto Group runs could stack stale intents, and failed optimistic V2 writes could leave local overlays behind until a later reload corrected them.
+  Instances fixed: same-client Auto Group bulk-intent dedupe, latest-only filtered Auto Group queueing, canonical-sync banner separation, import and keyword-rating/token-merge/auto-merge entry-point gating, pending V2 overlay rollback on non-conflict failures, and immediate owned-lock invalidation on heartbeat loss.
+  Prevention rule: expensive Group actions must fail fast before spending cost or mutating local state when shared writes are unsafe, and any optimistic V2 overlay touched by a failed write must be rolled back or recomposed immediately.
+
 - [x] (2026-03-31) Fixed local group/open regression in `src/App.tsx`, `src/projectCollabV2.ts`, `src/projectCollabV2.storage.test.ts`, `src/ClusterRow.test.tsx`, and `src/GroupedClusterRow.test.tsx`.
   Root cause: `App.tsx` was still rendering stale inline row components whose checkbox callbacks no longer matched `handleClusterSelect` / `handleGroupSelect`, so page and group selection silently failed. In parallel, `loadCanonicalProjectState()` could still turn ordinary local project open into a V2 recovery write path when stale collab meta had no usable base commit, which caused startup `permission-denied` writes on `project_operations/current` and `collab/meta`.
   Instances fixed: pages table selection, grouped table selection, approved table selection, legacy bootstrap with no collab meta, legacy bootstrap with explicit legacy meta, and stale V2 bootstrap with missing `baseCommitId`.
