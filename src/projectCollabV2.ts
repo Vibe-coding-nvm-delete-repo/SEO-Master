@@ -1658,6 +1658,8 @@ async function recoverStuckV2Meta(
   projectId: string,
   meta: ProjectCollabMetaDoc,
   actorId: string,
+  /** When true, treat even 'ready'/'complete' meta as stuck (loadCanonicalEpoch already failed). */
+  canonicalLoadFailed = false,
 ): Promise<NonNullable<CanonicalProjectState['diagnostics']>> {
   if (meta.readMode !== 'v2') {
     return {
@@ -1667,7 +1669,8 @@ async function recoverStuckV2Meta(
       },
     };
   }
-  if (meta.commitState === 'ready' && meta.migrationState === 'complete') {
+  // Skip recovery only when canonical load succeeded (i.e. caller hasn't flagged a failure).
+  if (meta.commitState === 'ready' && meta.migrationState === 'complete' && !canonicalLoadFailed) {
     return {
       recovery: {
         attempted: false,
@@ -1747,6 +1750,29 @@ async function recoverStuckV2Meta(
       }
 
       if (!canFinalize && current.migrationState === 'failed') {
+        // Even though migrationState is already 'failed', readMode may still
+        // be 'v2' (e.g. the original migration set migrationState:'failed'
+        // without resetting readMode). Fix that here so the next load skips
+        // the V2 branch entirely and stops showing the recovery warning.
+        if (current.readMode === 'v2') {
+          const now = nowIso();
+          tx.set(metaRef, sanitizeJsonForFirestore({
+            ...current,
+            readMode: 'legacy',
+            commitState: current.commitState ?? 'writing',
+            lastWriterClientId: actorId,
+            revision: current.revision + 1,
+            updatedAt: now,
+            updatedByClientId: actorId,
+            lastMutationId: createMutationId(actorId),
+          }));
+          return {
+            recovery: {
+              attempted: true,
+              outcome: 'repaired',
+            },
+          };
+        }
         return {
           recovery: {
             attempted: true,
@@ -1833,29 +1859,11 @@ export async function loadCanonicalProjectState(
       return canonical;
     }
 
-    // A V2 meta doc without a usable base commit is already unrecoverable from
-    // Firestore alone. Do not turn bootstrap into a repair-write path; fall
-    // back to the local legacy payload immediately so project open remains
-    // read-only and local-first.
-    if (meta.migrationState === 'failed' || !meta.baseCommitId) {
-      const legacyPayload = await legacyLoader();
-      if (legacyPayload) {
-        return {
-          mode: 'legacy',
-          base: null,
-          entities: { ...emptyEntities(), meta },
-          resolved: legacyPayload,
-          diagnostics: {
-            recovery: {
-              attempted: false,
-              outcome: 'skipped',
-            },
-          },
-        };
-      }
-    }
-
-    const recoveryDiagnostics = await recoverStuckV2Meta(projectId, meta, actorId);
+    // V2 meta without a usable base commit — attempt recovery so that
+    // recoverStuckV2Meta can reset readMode back to 'legacy' in Firestore.
+    // Without this, the meta stays stuck at readMode:'v2' forever and every
+    // load shows the "canonical state is incomplete" warning.
+    const recoveryDiagnostics = await recoverStuckV2Meta(projectId, meta, actorId, /* canonicalLoadFailed */ true);
     const recoveredMeta = await loadCollabMeta(projectId) ?? meta;
     if (
       recoveredMeta.revision !== meta.revision ||
