@@ -236,27 +236,28 @@ export interface ProjectPersistence extends PersistedState {
   storageMode: 'legacy' | 'v2';
   activeOperation: ProjectOperationLockDoc | null;
   isProjectBusy: boolean;
+  isSharedProjectReadOnly: boolean;
   runWithExclusiveOperation: <T>(
     type: ProjectOperationLockDoc['type'],
     task: () => Promise<T>,
   ) => Promise<T | null>;
 
   // Atomic mutations
-  addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => void;
-  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => void;
+  addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => boolean;
+  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => boolean;
   updateGroups: (updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => void;
-  approveGroup: (groupName: string) => GroupedCluster | null;
-  unapproveGroup: (groupName: string) => GroupedCluster | null;
+  approveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
+  unapproveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
   removeFromApproved: (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => { clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] };
+  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] };
   ungroupPages: (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => { clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
+  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
   blockTokens: (tokens: string[]) => void;
   unblockTokens: (tokens: string[]) => void;
   applyMergeCascade: (cascade: {
@@ -476,6 +477,8 @@ export function useProjectPersistence(options: {
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
   const [storageMode, setStorageModeState] = useState<'legacy' | 'v2'>('legacy');
   const [activeOperation, setActiveOperation] = useState<ProjectOperationLockDoc | null>(null);
+  const [legacyWritesBlocked, setLegacyWritesBlockedState] = useState(false);
+  const [v2RecoveryMode, setV2RecoveryModeState] = useState(false);
   const activeProjectIdRef = useRef<string | null>(null);
   const storageModeRef = useRef<'legacy' | 'v2'>('legacy');
   const addToastRef = useRef(addToast);
@@ -514,6 +517,14 @@ export function useProjectPersistence(options: {
   const setStorageMode = useCallback((mode: 'legacy' | 'v2') => {
     storageModeRef.current = mode;
     setStorageModeState(mode);
+  }, []);
+  const setLegacyWritesBlocked = useCallback((blocked: boolean) => {
+    legacyWritesBlockedRef.current = blocked;
+    setLegacyWritesBlockedState(blocked);
+  }, []);
+  const setV2RecoveryMode = useCallback((recovering: boolean) => {
+    v2RecoveryModeRef.current = recovering;
+    setV2RecoveryModeState(recovering);
   }, []);
 
   // ── Consolidated "latest" ref — always in sync, never stale ──────────
@@ -1134,11 +1145,11 @@ export function useProjectPersistence(options: {
   const applyCanonicalState = useCallback((canonical: CanonicalProjectState) => {
     if (canonical.mode !== 'v2') return;
     collabMetaRef.current = canonical.entities.meta;
-    legacyWritesBlockedRef.current = Boolean(
+    setLegacyWritesBlocked(Boolean(
       canonical.entities.meta &&
       canonical.entities.meta.readMode === 'v2' &&
       (canonical.entities.meta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
-    );
+    ));
     baseSnapshotRef.current = canonical.base;
     groupDocsRef.current = canonical.entities.groups;
     blockedTokenDocsRef.current = canonical.entities.blockedTokens;
@@ -1150,19 +1161,19 @@ export function useProjectPersistence(options: {
     rebuildRevisionMap(activeEpochRef.current);
     setActiveOperation(canonical.entities.activeOperation);
     activeOperationRef.current = canonical.entities.activeOperation;
-    v2RecoveryModeRef.current = !(
+    setV2RecoveryMode(!(
       canonical.resolved &&
       canonical.entities.meta?.readMode === 'v2' &&
       canonical.entities.meta?.commitState === 'ready' &&
       canonical.entities.meta?.migrationState === 'complete'
-    );
+    ));
     if (!canonical.resolved) {
       return;
     }
     const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
     applyViewState(toProjectViewState(canonical.resolved, project));
     saveCounterRef.current = canonical.resolved.lastSaveId ?? saveCounterRef.current;
-  }, [applyViewState, rebuildRevisionMap]);
+  }, [applyViewState, rebuildRevisionMap, setLegacyWritesBlocked, setV2RecoveryMode]);
 
   const reloadCanonicalStateFromCloud = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
@@ -1541,7 +1552,7 @@ export function useProjectPersistence(options: {
   const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]) => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Group edits')) return;
+    if (!projectId || !base || !ensureV2MutationAllowed('Group edits')) return false;
     queueV2Write('project groups save', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       const changes = buildGroupDocChanges(
@@ -1564,6 +1575,7 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
+    return true;
   }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
   const persistBlockedTokensV2 = useCallback((nextTokens: Set<string>) => {
@@ -1790,12 +1802,12 @@ export function useProjectPersistence(options: {
       if (canonical.resolved) {
         const viewState = toProjectViewState(canonical.resolved, project);
         loadFenceRef.current = countGroupedPages(viewState);
-        v2RecoveryModeRef.current = false;
+        setV2RecoveryMode(false);
         if (canonical.entities.meta) {
           updateCanonicalCache(canonical.resolved, canonical.entities.meta);
         }
       } else {
-        v2RecoveryModeRef.current = true;
+        setV2RecoveryMode(true);
         if (!idbData) {
           applyViewState(createEmptyProjectViewState());
           loadFenceRef.current = 0;
@@ -1811,11 +1823,11 @@ export function useProjectPersistence(options: {
       }
     } else {
       collabMetaRef.current = null;
-      legacyWritesBlockedRef.current = false;
+      setLegacyWritesBlocked(false);
       setStorageMode('legacy');
       storageModeRef.current = 'legacy';
       projectStorageModeResolvedRef.current = true;
-      v2RecoveryModeRef.current = false;
+      setV2RecoveryMode(false);
       const data = canonical.resolved ?? idbData;
       const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
       applyViewState(viewState);
@@ -1893,7 +1905,7 @@ export function useProjectPersistence(options: {
 
     projectLoadingRef.current = false;
     */
-  }, [applyCanonicalState, applyViewState, updateCanonicalCache]);
+  }, [applyCanonicalState, applyViewState, setLegacyWritesBlocked, setStorageMode, setV2RecoveryMode, updateCanonicalCache]);
 
   const clearProject = useCallback(() => {
     // Cancel any pending flushes so stale mutations from the previous project
@@ -1919,8 +1931,8 @@ export function useProjectPersistence(options: {
     tokenMergeRuleDocsRef.current = [];
     labelSectionDocsRef.current = [];
     activityLogDocsRef.current = [];
-    legacyWritesBlockedRef.current = false;
-    v2RecoveryModeRef.current = false;
+    setLegacyWritesBlocked(false);
+    setV2RecoveryMode(false);
     projectStorageModeResolvedRef.current = false;
     lockHeartbeatLostRef.current = false;
     lastV2WriteErrorRef.current = null;
@@ -1936,7 +1948,7 @@ export function useProjectPersistence(options: {
     setActiveOperation(null);
     activeOperationRef.current = null;
     applyViewState(createEmptyProjectViewState());
-  }, [applyViewState]);
+  }, [applyViewState, setLegacyWritesBlocked, setStorageMode, setV2RecoveryMode]);
 
   const syncFileNameLocal = useCallback((name: string | null) => {
     latest.current = { ...latest.current, fileName: name };
@@ -2284,17 +2296,17 @@ export function useProjectPersistence(options: {
         const nextMeta = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
         const previousMeta = collabMetaRef.current;
         collabMetaRef.current = nextMeta;
-        legacyWritesBlockedRef.current = Boolean(
+        setLegacyWritesBlocked(Boolean(
           nextMeta &&
           nextMeta.readMode === 'v2' &&
           (nextMeta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
-        );
+        ));
         if (!nextMeta || nextMeta.readMode !== 'v2') {
-          v2RecoveryModeRef.current = false;
+          setV2RecoveryMode(false);
           return;
         }
         if (legacyWritesBlockedRef.current) {
-          v2RecoveryModeRef.current = false;
+          setV2RecoveryMode(false);
           return;
         }
         if (
@@ -2312,28 +2324,47 @@ export function useProjectPersistence(options: {
         epochLoadAbortRef.current?.abort();
         const abortController = new AbortController();
         epochLoadAbortRef.current = abortController;
-        v2RecoveryModeRef.current = true;
-        void loadCanonicalEpoch(pid, nextMeta).then((canonical) => {
+        setV2RecoveryMode(true);
+        void (async () => {
+          const canonical = (
+            await loadCanonicalEpoch(pid, nextMeta)
+          ) ?? await loadCanonicalProjectState(
+            pid,
+            clientIdRef.current,
+            () => loadProjectDataForView(pid),
+          );
           if (
             cancelled ||
             abortController.signal.aborted ||
             generation !== epochLoadGenerationRef.current ||
             activeProjectIdRef.current !== pid ||
-            !canonical ||
-            !canonical.resolved
+            !canonical
           ) {
             return;
           }
+          clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
           applyCanonicalState(canonical);
           if (canonical.entities.meta && canonical.resolved) {
             updateCanonicalCache(canonical.resolved, canonical.entities.meta);
           }
-          attachEpochListeners(nextMeta.datasetEpoch, nextMeta);
-        }).catch((err) => {
+          const resolvedMeta = canonical.entities.meta;
+          if (
+            resolvedMeta &&
+            canonical.resolved &&
+            resolvedMeta.readMode === 'v2' &&
+            resolvedMeta.commitState === 'ready' &&
+            resolvedMeta.migrationState === 'complete'
+          ) {
+            attachEpochListeners(resolvedMeta.datasetEpoch, resolvedMeta);
+          }
+        })().catch((err) => {
           if (abortController.signal.aborted) {
             return;
           }
           reportPersistFailure(addToastRef.current, 'project collab meta listener', err);
+          void reloadCanonicalStateFromCloud().catch((reloadErr) => {
+            reportPersistFailure(addToastRef.current, 'project collab meta listener recovery reload', reloadErr);
+          });
         });
       },
       (err) => {
@@ -2374,24 +2405,23 @@ export function useProjectPersistence(options: {
       operationUnsub();
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
-  }, [activeProjectId, applyCanonicalState, recomposeFromCanonicalRefs, storageMode, updateCanonicalCache, v2DocKey]);
+  }, [activeProjectId, applyCanonicalState, clearPendingForEpoch, recomposeFromCanonicalRefs, reloadCanonicalStateFromCloud, setLegacyWritesBlocked, setV2RecoveryMode, storageMode, updateCanonicalCache, v2DocKey]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
   const addGroupsAndRemovePages = useCallback((newGroups: GroupedCluster[], removedTokens: Set<string>) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return;
       const s = latest.current;
       const nextGrouped = [...s.groupedClusters, ...newGroups];
       const nextClusters = s.clusterSummary?.filter(c => !removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
+      if (!persistGroupsV2(nextGrouped, s.approvedGroups)) return false;
       applyLocalChanges({
         groupedClusters: nextGrouped,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, s.approvedGroups);
-      return;
+      return true;
     }
     mutateAndSave(s => {
       const nextGrouped = [...s.groupedClusters, ...newGroups];
@@ -2399,22 +2429,22 @@ export function useProjectPersistence(options: {
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
       return { groupedClusters: nextGrouped, clusterSummary: nextClusters, results: nextResults };
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return true;
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const mergeGroupsByName = useCallback((opts: MergeGroupsByNameOpts) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return;
       const s = latest.current;
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
       const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
+      if (!persistGroupsV2(merged, s.approvedGroups)) return false;
       applyLocalChanges({
         groupedClusters: merged,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(merged, s.approvedGroups);
-      return;
+      return true;
     }
     mutateAndSave(s => {
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
@@ -2422,21 +2452,21 @@ export function useProjectPersistence(options: {
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
       return { groupedClusters: merged, clusterSummary: nextClusters, results: nextResults };
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return true;
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const updateGroups = useCallback((updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return;
       const s = latest.current;
       const nextGrouped = typeof updaterOrValue === 'function'
         ? updaterOrValue(s.groupedClusters)
         : updaterOrValue;
       const nextApproved = approvedOverride !== undefined ? approvedOverride : s.approvedGroups;
+      if (!persistGroupsV2(nextGrouped, nextApproved)) return;
       applyLocalChanges({
         groupedClusters: nextGrouped,
         approvedGroups: nextApproved,
       }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, nextApproved);
       return;
     }
     mutateAndSave(s => {
@@ -2447,39 +2477,37 @@ export function useProjectPersistence(options: {
       if (approvedOverride !== undefined) changes.approvedGroups = approvedOverride;
       return changes;
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const approveGroup = useCallback((groupName: string): GroupedCluster | null => {
+  const approveGroup = useCallback((groupName: string): { applied: boolean; group: GroupedCluster | null } => {
     const s = latest.current;
     const group = s.groupedClusters.find(g => g.groupName === groupName);
-    if (!group) return null;
+    if (!group) return { applied: false, group: null };
     const nextGrouped = s.groupedClusters.filter(g => g.groupName !== groupName);
     const nextApproved = [...s.approvedGroups, group];
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return group;
+      if (!persistGroupsV2(nextGrouped, nextApproved)) return { applied: false, group };
       applyLocalChanges({ groupedClusters: nextGrouped, approvedGroups: nextApproved }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, nextApproved);
-      return group;
+      return { applied: true, group };
     }
     mutateAndSave(() => ({ groupedClusters: nextGrouped, approvedGroups: nextApproved }));
-    return group;
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, group };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const unapproveGroup = useCallback((groupName: string): GroupedCluster | null => {
+  const unapproveGroup = useCallback((groupName: string): { applied: boolean; group: GroupedCluster | null } => {
     const s = latest.current;
     const group = s.approvedGroups.find(g => g.groupName === groupName);
-    if (!group) return null;
+    if (!group) return { applied: false, group: null };
     const nextApproved = s.approvedGroups.filter(g => g.groupName !== groupName);
     const nextGrouped = [...s.groupedClusters, group];
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) return group;
+      if (!persistGroupsV2(nextGrouped, nextApproved)) return { applied: false, group };
       applyLocalChanges({ approvedGroups: nextApproved, groupedClusters: nextGrouped }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, nextApproved);
-      return group;
+      return { applied: true, group };
     }
     mutateAndSave(() => ({ approvedGroups: nextApproved, groupedClusters: nextGrouped }));
-    return group;
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, group };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const removeFromApproved = useCallback((
     groupIds: Set<string>,
@@ -2543,8 +2571,8 @@ export function useProjectPersistence(options: {
     }
 
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) {
-        return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+      if (!persistGroupsV2(nextGrouped, newApproved)) {
+        return { applied: false, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
       }
       applyLocalChanges({
         approvedGroups: newApproved,
@@ -2552,8 +2580,7 @@ export function useProjectPersistence(options: {
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(nextGrouped, newApproved);
-      return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+      return { applied: true, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
     }
 
     mutateAndSave(() => ({
@@ -2563,8 +2590,8 @@ export function useProjectPersistence(options: {
       results: nextResults,
     }));
 
-    return { clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const ungroupPages = useCallback((
     groupIds: Set<string>,
@@ -2623,16 +2650,15 @@ export function useProjectPersistence(options: {
     }
 
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Group edits')) {
-        return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+      if (!persistGroupsV2(newGrouped, s.approvedGroups)) {
+        return { applied: false, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
       }
       applyLocalChanges({
         groupedClusters: newGrouped,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      persistGroupsV2(newGrouped, s.approvedGroups);
-      return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+      return { applied: true, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
     }
 
     mutateAndSave(() => ({
@@ -2641,8 +2667,8 @@ export function useProjectPersistence(options: {
       results: nextResults,
     }));
 
-    return { clustersReturned: clustersToReturn, groupsWithPartialRemoval };
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistGroupsV2]);
+    return { applied: true, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+  }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
   const blockTokens = useCallback((tokens: string[]) => {
     if (tokens.length === 0) return;
@@ -2885,6 +2911,11 @@ export function useProjectPersistence(options: {
     activeOperation.ownerClientId !== clientIdRef.current &&
     Date.parse(activeOperation.expiresAt || '0') > Date.now(),
   );
+  const isSharedProjectReadOnly = storageMode === 'v2' && (
+    legacyWritesBlocked ||
+    v2RecoveryMode ||
+    isProjectBusy
+  );
 
   const canUseExternalSetter = useCallback((label: string): boolean => {
     if (storageModeRef.current !== 'v2') return true;
@@ -2976,6 +3007,7 @@ export function useProjectPersistence(options: {
     storageMode,
     activeOperation,
     isProjectBusy,
+    isSharedProjectReadOnly,
     runWithExclusiveOperation,
 
     // Atomic mutations

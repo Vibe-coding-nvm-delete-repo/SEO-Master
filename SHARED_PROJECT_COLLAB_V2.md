@@ -179,6 +179,12 @@ When a V2 project cannot load a ready canonical epoch:
 - treat `commitState: 'writing'`, a missing commit, or a mismatched epoch as unsafe to write
 - rely on the meta/epoch listeners to retry when the canonical state becomes valid again
 
+Guardrails for the live meta listener:
+- meta-driven reloads must use the same recovery-capable canonical path as bootstrap/conflict reloads when a lightweight epoch load is null or unresolved; do not rely on `loadCanonicalEpoch` alone for listener-driven recovery
+- when a listener sees a newer `collab/meta` revision, only attach new epoch listeners from the final authoritative resolved meta state for that epoch
+- if the canonical state is still unresolved after recovery, remain fail-closed/read-only rather than forcing shared writes through
+- UI success messaging for grouping/approve/unapprove/ungroup flows must only run after the mutation is actually accepted by the persistence boundary; blocked shared writes must preserve user selection/input and surface only the read-only warning
+
 ### 9a. Startup bootstrap must not mix legacy and V2 writes
 
 Root cause of the March 2026 startup sync incident:

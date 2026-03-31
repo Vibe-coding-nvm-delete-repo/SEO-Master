@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import type { ClusterSummary, GroupedCluster } from '../types';
+import { parseSubClusterKey } from '../subClusterKeys';
 
 export interface UseGroupingActionsInput {
   selectedClusters: Set<string>;
@@ -17,19 +18,19 @@ export interface UseGroupingActionsInput {
   recordGroupingEvent: (pagesInBatch: number) => void;
   scheduleReReview: (groupIds: string[]) => void;
   hasReviewApi: () => boolean;
-  addGroupsAndRemovePages: (groups: GroupedCluster[], removedTokens: Set<string>) => void;
-  approveGroup: (groupName: string) => GroupedCluster | null;
-  unapproveGroup: (groupName: string) => GroupedCluster | null;
+  addGroupsAndRemovePages: (groups: GroupedCluster[], removedTokens: Set<string>) => boolean;
+  approveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
+  unapproveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
   removeFromApproved: (
     selectedGroupIds: Set<string>,
     selectedSubClusterKeys: Set<string>,
     recalc: (group: GroupedCluster, remainingClusters: ClusterSummary[]) => GroupedCluster,
-  ) => { clustersReturned: ClusterSummary[] };
+  ) => { applied: boolean; clustersReturned: ClusterSummary[] };
   ungroupPages: (
     selectedGroupIds: Set<string>,
     selectedSubClusterKeys: Set<string>,
     recalc: (group: GroupedCluster, remainingClusters: ClusterSummary[]) => GroupedCluster,
-  ) => { clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
+  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
 }
 
 export function useGroupingActions(input: UseGroupingActionsInput) {
@@ -84,17 +85,21 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
   }, []);
 
   const handleApproveGroup = useCallback((groupName: string) => {
-    const group = approveGroup(groupName);
-    if (group) {
-      logAndToast('approve', `Approved '${groupName}'`, group.clusters.length, `Approved '${groupName}' (${group.clusters.length} pages)`, 'success');
+    const result = approveGroup(groupName);
+    if (result.applied && result.group) {
+      logAndToast('approve', `Approved '${groupName}'`, result.group.clusters.length, `Approved '${groupName}' (${result.group.clusters.length} pages)`, 'success');
+      return true;
     }
+    return false;
   }, [approveGroup, logAndToast]);
 
   const handleUnapproveGroup = useCallback((groupName: string) => {
-    const group = unapproveGroup(groupName);
-    if (group) {
-      logAndToast('unapprove', `Unapproved '${groupName}'`, group.clusters.length, `Unapproved '${groupName}'`, 'warning');
+    const result = unapproveGroup(groupName);
+    if (result.applied && result.group) {
+      logAndToast('unapprove', `Unapproved '${groupName}'`, result.group.clusters.length, `Unapproved '${groupName}'`, 'warning');
+      return true;
     }
+    return false;
   }, [logAndToast, unapproveGroup]);
 
   const handleRemoveFromApproved = useCallback(() => {
@@ -102,12 +107,14 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     if (!clusterSummary) return;
 
     const wholeGroupCount = selectedGroups.size;
-    const { clustersReturned } = removeFromApproved(selectedGroups, selectedSubClusters, recalcGroupStats);
+    const { applied, clustersReturned } = removeFromApproved(selectedGroups, selectedSubClusters, recalcGroupStats);
+    if (!applied) return false;
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
 
     const totalRemoved = wholeGroupCount + clustersReturned.length;
     logAndToast('remove-approved', `Removed ${totalRemoved} items from approved`, totalRemoved, `Removed ${totalRemoved} items from approved`, 'warning');
+    return true;
   }, [clusterSummary, logAndToast, recalcGroupStats, removeFromApproved, selectedGroups, selectedSubClusters, setSelectedGroups, setSelectedSubClusters]);
 
   const handleGroupClusters = useCallback(() => {
@@ -145,13 +152,15 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     };
 
     const removedTokens = new Set(clustersToGroup.map(c => c.tokens));
-    addGroupsAndRemovePages([newGroup], removedTokens);
+    const applied = addGroupsAndRemovePages([newGroup], removedTokens);
+    if (!applied) return false;
     setSelectedClusters(new Set());
     setGroupNameInput('');
     setCurrentPage(1);
 
     recordGroupingEvent(clustersToGroup.length);
     logAndToast('group', `Grouped into '${groupLabel}'`, clustersToGroup.length, `Grouped ${clustersToGroup.length} pages into '${groupLabel}'`, 'info');
+    return true;
   }, [addGroupsAndRemovePages, clusterSummary, groupNameInput, hasReviewApi, logAndToast, recordGroupingEvent, selectedClusters, setCurrentPage, setGroupNameInput, setSelectedClusters]);
 
   const handleAutoGroupApprove = useCallback((newGroups: GroupedCluster[]) => {
@@ -159,14 +168,15 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     for (const g of newGroups) {
       for (const c of g.clusters) removedTokens.add(c.tokens);
     }
-    addGroupsAndRemovePages(newGroups, removedTokens);
+    return addGroupsAndRemovePages(newGroups, removedTokens);
   }, [addGroupsAndRemovePages]);
 
   const handleUngroupClusters = useCallback(() => {
     if (selectedGroups.size === 0 && selectedSubClusters.size === 0) return;
     if (!clusterSummary) return;
 
-    const { clustersReturned, groupsWithPartialRemoval } = ungroupPages(selectedGroups, selectedSubClusters, recalcGroupStats);
+    const { applied, clustersReturned, groupsWithPartialRemoval } = ungroupPages(selectedGroups, selectedSubClusters, recalcGroupStats);
+    if (!applied) return false;
     setSelectedGroups(new Set());
     setSelectedSubClusters(new Set());
 
@@ -175,6 +185,7 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
     if (groupsWithPartialRemoval.length > 0) {
       scheduleReReview(groupsWithPartialRemoval);
     }
+    return true;
   }, [clusterSummary, logAndToast, recalcGroupStats, scheduleReReview, selectedGroups, selectedSubClusters, setSelectedGroups, setSelectedSubClusters, ungroupPages]);
 
   const clearApprovedSelections = useCallback(() => {
@@ -184,9 +195,22 @@ export function useGroupingActions(input: UseGroupingActionsInput) {
 
   const approveSelectedGrouped = useCallback(() => {
     const groupsToApprove = groupedClusters.filter(g => selectedGroups.has(g.id));
-    groupsToApprove.forEach(g => handleApproveGroup(g.groupName));
-    clearApprovedSelections();
-  }, [clearApprovedSelections, groupedClusters, handleApproveGroup, selectedGroups]);
+    const approvedIds = new Set<string>();
+    for (const group of groupsToApprove) {
+      if (handleApproveGroup(group.groupName)) {
+        approvedIds.add(group.id);
+      }
+    }
+    if (approvedIds.size === 0) return false;
+    setSelectedGroups(new Set(Array.from(selectedGroups).filter((id) => !approvedIds.has(id))));
+    setSelectedSubClusters(new Set(
+      Array.from(selectedSubClusters).filter((key) => {
+        const parsed = parseSubClusterKey(key);
+        return !parsed || !approvedIds.has(parsed.groupId);
+      }),
+    ));
+    return true;
+  }, [groupedClusters, handleApproveGroup, selectedGroups, selectedSubClusters, setSelectedGroups, setSelectedSubClusters]);
 
   return {
     recalcGroupStats,

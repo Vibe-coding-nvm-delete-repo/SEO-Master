@@ -27,10 +27,12 @@
 - V2 entity docs carry per-entity `revision`, `datasetEpoch`, `lastMutationId`, and writer metadata so cross-user manual edits can use compare-and-set updates instead of browser-local last-write-wins.
 - V2 base snapshots write as immutable commit sets under `base_commits/{commitId}` with a ready manifest, and the shared `collab/meta` doc is the activation barrier for switching epochs. Clients do not treat in-progress `base_chunks` writes as live shared truth.
 - Shared-project hydration follows a meta-driven epoch load: the client keeps the previous committed epoch visible, fetches one exact `baseCommitId`, waits for the current-epoch entity listeners to reach their initial snapshot, and swaps to the new canonical view only after that epoch is fully ready.
+- Meta-listener recovery now uses the same recovery-capable canonical reload path as bootstrap/conflict reloads whenever a lightweight epoch load is null or unresolved, so transient/stuck `collab/meta` or base-commit states do not leave the client stranded in read-only without re-running recovery.
 - IndexedDB caches only server-acknowledged V2 canonical state and tags that cache with `schemaVersion`, `datasetEpoch`, and `baseCommitId`, so refreshes cannot reopen on optimistic shared edits that Firestore never accepted.
 - V2 mutation handling is epoch-scoped and centralized: revision-sensitive shared edits go through one compare-and-set path, reuse canonical doc-id helpers, update local acked revisions immediately on success, and reload canonical state on conflicts instead of leaving optimistic drift behind.
 - Legacy projects lazily migrate to the V2 collaboration model on open, V2 readers prefer entity overlays over legacy blob fields, and permanent delete clears both legacy chunk docs and V2 collaboration docs.
 - Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
+- Grouping and related group actions now only clear selection/input and show success toasts after the persistence boundary actually accepts the mutation; if shared state is read-only/recovering, the action preserves the current selection and surfaces only the blocking warning.
 
 ---
 
@@ -355,6 +357,7 @@
 - Select multiple clusters via checkboxes
 - Enter a group name (auto-populated from highest-volume selected cluster)
 - Click "Group" to create a group
+- Manual grouping no longer reports a completed group action when shared-project V2 writes are blocked by recovery/schema/operation-lock safeguards.
 - "Grouping Progress" now shows a real-time ETA (and measured pages/sec) next to the percent while you’re grouping
 - Groups appear in the Grouped tab
 - Ungrouping: select groups/sub-clusters and ungroup them back to Pages
@@ -645,6 +648,7 @@
 
 | Date | Change |
 |------|--------|
+| 2026-03-31 | Shared-project V2 recovery + grouping truthfulness: meta-listener reloads now use the same recovery-capable canonical path as bootstrap, and blocked group actions no longer clear selection or claim success when the persistence boundary rejected the mutation |
 | 2026-03-30 | Notifications tab: shared alert history with filters, search, timestamps, and copy-full-message actions |
 | 2026-03-27 | Ungrouped duplicate guard: restoring pages from Grouped/Approved now skips already-present token signatures so duplicate pages and duplicate keyword rows cannot be appended back into Ungrouped |
 | 2026-03-27 | Token signatures: removed `no`, `not`, `without`, `with` from stop-word stripping; added `vancouver` to stop words (still in foreign cities for detection) |
@@ -923,7 +927,7 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 
 ---
 
-*Last updated: 2026-03-30*
+*Last updated: 2026-03-31*
 
 ### 2026-03-28: HTML Prompt / Validator Alignment
 

@@ -28,6 +28,7 @@ import {
 } from './cloudSyncStatus';
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
 import { getFilteredAutoGroupSettingsStatus } from './filteredAutoGroupSettingsStatus';
+import { healReviewingGroups } from './groupReviewState';
 import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
 import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, GroupMergeRecommendation, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion, AutoMergeRecommendation } from './types';
 import { computeMergeImpact, applyMergeRulesToTokenArr, computeSignature, mergeTokenArr } from './tokenMerge';
@@ -867,7 +868,7 @@ export default function App() {
     blockedTokens, labelSections, fileName,
     activeProjectId, setActiveProjectId,
     loadProject, clearProject, syncFileNameLocal, flushNow,
-    storageMode, activeOperation, isProjectBusy, runWithExclusiveOperation,
+    storageMode, activeOperation, isProjectBusy, isSharedProjectReadOnly, runWithExclusiveOperation,
     removeFromApproved, ungroupPages,
     addActivityEntry,
     updateGroupMergeRecommendations,
@@ -926,6 +927,7 @@ export default function App() {
   const [groupReviewSettingsHydrated, setGroupReviewSettingsHydrated] = useState(false);
   const reviewAbortRef = useRef<AbortController | null>(null);
   const reviewProcessingRef = useRef(false);
+  const isSharedProjectReadOnlyRef = useRef(false);
   const filteredAutoGroupAbortRef = useRef<AbortController | null>(null);
   const [autoMergeSortConfig, setAutoMergeSortConfig] = useState<{
     key: 'canonical' | 'mergeTokens' | 'impact' | 'confidence' | 'status';
@@ -2598,6 +2600,7 @@ export default function App() {
   // AI Group Review â€" process pending groups automatically
   useEffect(() => {
     if (reviewProcessingRef.current) return;
+    if (isSharedProjectReadOnly) return;
     const groupsToReview = groupedClusters.filter(g =>
       g.reviewStatus === 'pending' || (!!g.mergeAffected && g.clusters.length > 0)
     );
@@ -2642,6 +2645,7 @@ export default function App() {
         {
           onReviewing: () => {},
           onResult: (result: ReviewResult) => {
+            if (isSharedProjectReadOnlyRef.current) return;
             persistence.updateGroups(groups =>
               groups.map(g =>
                 g.id === result.groupId ? {
@@ -2663,6 +2667,7 @@ export default function App() {
             }
           },
           onError: (error: ReviewError) => {
+            if (isSharedProjectReadOnlyRef.current) return;
             persistence.updateGroups(groups =>
               groups.map(g =>
                 g.id === error.groupId ? {
@@ -2687,15 +2692,15 @@ export default function App() {
         controller.signal
       ).finally(() => {
         reviewAbortRef.current = null;
+        if (isSharedProjectReadOnlyRef.current) {
+          reviewProcessingRef.current = false;
+          return;
+        }
         // Workers are done — any row still 'reviewing' is orphaned (stale ref / lost callback).
         // Snap those back to 'pending', then pick up all pending (including new groups from fast grouping).
         let remaining: GroupedCluster[] = [];
         persistence.updateGroups(groups => {
-          const healed = groups.map(g =>
-            g.reviewStatus === 'reviewing'
-              ? { ...g, reviewStatus: 'pending' as const }
-              : g
-          );
+          const healed = healReviewingGroups(groups);
           remaining = healed.filter(g => g.reviewStatus === 'pending');
           if (remaining.length > 0) {
             return healed.map(g =>
@@ -2718,17 +2723,15 @@ export default function App() {
     };
 
     runReviewBatch(queue, groupsToReview);
-  }, [groupedClusters, logAndToast, persistence.updateGroups]);
+  }, [groupedClusters, isSharedProjectReadOnly, logAndToast, persistence.updateGroups]);
 
-  // One-time heal after load: reset stuck 'reviewing' to 'pending' (uses latest state in updater)
+  // Heal orphaned 'reviewing' groups whenever the review worker is idle and writes are allowed.
   useEffect(() => {
-    persistence.updateGroups(groups => {
-      if (!groups.some(g => g.reviewStatus === 'reviewing')) return groups;
-      return groups.map(g =>
-        g.reviewStatus === 'reviewing' ? { ...g, reviewStatus: 'pending' as const } : g
-      );
-    });
-  }, []);
+    if (reviewProcessingRef.current) return;
+    if (isSharedProjectReadOnly) return;
+    if (!groupedClusters.some(g => g.reviewStatus === 'reviewing')) return;
+    persistence.updateGroups(healReviewingGroups);
+  }, [groupedClusters, isSharedProjectReadOnly, persistence.updateGroups]);
 
   // Grouping rate tracker â€" estimates remaining time to group all ungrouped pages
   const groupingTimestamps = useRef<{ time: number; pagesGrouped: number }[]>([]);
@@ -2773,14 +2776,26 @@ export default function App() {
     removeFromApproved,
     ungroupPages,
   });
+  const canRunManualGroup = !isSharedProjectReadOnly && selectedClusters.size > 0 && groupNameInput.trim().length > 0;
+  const canApproveGrouped = !isSharedProjectReadOnly && selectedGroups.size > 0;
+  const canUngroupGrouped = !isSharedProjectReadOnly && (selectedGroups.size > 0 || selectedSubClusters.size > 0);
+  const canUnapproveApproved = !isSharedProjectReadOnly && (selectedGroups.size > 0 || selectedSubClusters.size > 0);
+
+  useEffect(() => {
+    isSharedProjectReadOnlyRef.current = isSharedProjectReadOnly;
+    if (!isSharedProjectReadOnly) return;
+    reviewAbortRef.current?.abort();
+    reviewAbortRef.current = null;
+    reviewProcessingRef.current = false;
+  }, [isSharedProjectReadOnly]);
 
   // Stable callback: middle-click on a ClusterRow to quick-group
   const handleClusterMiddleClick = useCallback((e: React.MouseEvent) => {
-    if (e.button === 1) {
+    if (e.button === 1 && canRunManualGroup) {
       e.preventDefault();
       handleGroupClusters();
     }
-  }, [handleGroupClusters]);
+  }, [canRunManualGroup, handleGroupClusters]);
 
   // Update ETA every 10 seconds based on rolling average
   useEffect(() => {
@@ -2844,6 +2859,7 @@ export default function App() {
 
   const isFilteredAutoGroupFilterActive =
     filteredAutoGroupFilterSummary !== 'No additional filters active';
+  const canRunFilteredAutoGroup = !isSharedProjectReadOnly && isFilteredAutoGroupFilterActive && filteredClusters.length >= 1;
 
   const filteredAutoGroupSettingsStatus = useMemo(
     () =>
@@ -2997,8 +3013,11 @@ FAILURE CONDITIONS TO AVOID:
         ? (promptTokens * parseFloat(job.modelPricing.prompt || '0')) + (completionTokens * parseFloat(job.modelPricing.completion || '0'))
         : 0;
 
-      if (generatedGroups.length > 0) {
-        persistence.mergeGroupsByName({ incoming: generatedGroups, removedTokens: groupedTokens, hasReviewApi, mergeFn: mergeGroupedClustersByName });
+      const groupsApplied = generatedGroups.length > 0
+        ? persistence.mergeGroupsByName({ incoming: generatedGroups, removedTokens: groupedTokens, hasReviewApi, mergeFn: mergeGroupedClustersByName })
+        : false;
+
+      if (groupsApplied) {
         startTransition(() => {
           setSelectedClusters(new Set());
           setCurrentPage(1);
@@ -3015,24 +3034,32 @@ FAILURE CONDITIONS TO AVOID:
       setFilteredAutoGroupStats({
         status: 'complete',
         totalPages: pagesToReview.length,
-        groupsCreated: generatedGroups.length,
-        pagesGrouped: groupedTokens.size,
-        pagesRemaining: pagesToReview.length - groupedTokens.size,
-        totalVolumeGrouped: groupedVolume,
+        groupsCreated: groupsApplied ? generatedGroups.length : 0,
+        pagesGrouped: groupsApplied ? groupedTokens.size : 0,
+        pagesRemaining: pagesToReview.length - (groupsApplied ? groupedTokens.size : 0),
+        totalVolumeGrouped: groupsApplied ? groupedVolume : 0,
         cost,
         promptTokens,
         completionTokens,
         elapsedMs,
       });
 
-      if (groupedTokens.size > 0) recordGroupingEvent(groupedTokens.size);
-      if (groupedTokens.size > 0) {
+      if (groupsApplied && groupedTokens.size > 0) recordGroupingEvent(groupedTokens.size);
+      if (groupsApplied && groupedTokens.size > 0) {
         logAndToast(
           'auto-group',
           `Filtered Auto Group created ${generatedGroups.length} groups from ${pagesToReview.length} filtered pages`,
           groupedTokens.size,
           `Auto Group grouped ${groupedTokens.size}/${pagesToReview.length} filtered pages into ${generatedGroups.length} groups`,
           'success'
+        );
+      } else if (generatedGroups.length > 0) {
+        logAndToast(
+          'auto-group',
+          'Filtered Auto Group could not apply groups while shared edits are read-only',
+          0,
+          'Auto Group finished generating candidate groups, but shared edits are currently read-only so nothing was applied.',
+          'warning'
         );
       } else {
         logAndToast(
@@ -3085,6 +3112,16 @@ FAILURE CONDITIONS TO AVOID:
   ]);
 
   const handleRunFilteredAutoGroup = useCallback(() => {
+    if (isSharedProjectReadOnly) {
+      logAndToast(
+        'auto-group',
+        'Filtered Auto Group blocked while shared edits are read-only',
+        0,
+        'Shared state is currently read-only, so Auto Group cannot apply new groups right now.',
+        'warning'
+      );
+      return;
+    }
     if (!isFilteredAutoGroupFilterActive) {
       logAndToast(
         'auto-group',
@@ -3151,6 +3188,7 @@ FAILURE CONDITIONS TO AVOID:
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue.length,
     groupReviewSettingsHydrated,
+    isSharedProjectReadOnly,
     isRunningFilteredAutoGroup,
     logAndToast,
     runFilteredAutoGroupJob,
@@ -3182,7 +3220,7 @@ FAILURE CONDITIONS TO AVOID:
       );
 
       if (e.shiftKey && e.code === 'Digit1') {
-        if (activeTab === 'pages' && !isTypingTarget && isFilteredAutoGroupFilterActive && filteredClusters.length >= 1) {
+        if (activeTab === 'pages' && !isTypingTarget && canRunFilteredAutoGroup) {
           e.preventDefault();
           e.stopPropagation();
           handleRunFilteredAutoGroup();
@@ -3192,14 +3230,14 @@ FAILURE CONDITIONS TO AVOID:
 
       if (e.key === 'Tab' || e.key === 'Shift') {
         // Tab or Shift in Pages (Ungrouped) â†' Group selected clusters
-        if (activeTab === 'pages' && selectedClusters.size > 0 && groupNameInput.trim()) {
+        if (activeTab === 'pages' && canRunManualGroup) {
           e.preventDefault();
           e.stopPropagation();
           handleGroupClusters();
           return;
         }
         // Tab in Pages (Grouped) â†' Approve selected groups
-        if (activeTab === 'grouped' && selectedGroups.size > 0) {
+        if (activeTab === 'grouped' && canApproveGrouped) {
           e.preventDefault();
           e.stopPropagation();
           approveSelectedGrouped();
@@ -3209,7 +3247,7 @@ FAILURE CONDITIONS TO AVOID:
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [handleGroupClusters, selectedClusters.size, groupNameInput, activeTab, selectedGroups, approveSelectedGrouped, handleRunFilteredAutoGroup, filteredClusters.length, isFilteredAutoGroupFilterActive]);
+  }, [activeTab, approveSelectedGrouped, canApproveGrouped, canRunFilteredAutoGroup, canRunManualGroup, handleGroupClusters, handleRunFilteredAutoGroup]);
 
   const pendingGroupMergeRecommendationsCount = groupMergeRecommendations.filter(
     (recommendation) => recommendation.status === 'pending',
@@ -3936,7 +3974,7 @@ FAILURE CONDITIONS TO AVOID:
                     </button>
                     <button
                       onClick={() => {
-                        if (activeTab === 'pages' && selectedClusters.size > 0 && groupNameInput.trim()) {
+                        if (activeTab === 'pages' && canRunManualGroup) {
                           handleGroupClusters();
                         }
                         switchTab('grouped');
@@ -4172,14 +4210,14 @@ FAILURE CONDITIONS TO AVOID:
                       <>
                         <button
                           onClick={handleGroupClusters}
-                          disabled={selectedClusters.size === 0 || !groupNameInput.trim()}
+                          disabled={!canRunManualGroup}
                           className="px-4 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
                         >
                           Group ({selectedClusters.size})
                         </button>
                         <button
                           onClick={handleRunFilteredAutoGroup}
-                          disabled={!isFilteredAutoGroupFilterActive || filteredClusters.length < 1}
+                          disabled={!canRunFilteredAutoGroup}
                           className="px-4 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[110px]"
                           title="Review all currently filtered ungrouped pages and create strict semantic groups"
                         >
@@ -4200,22 +4238,15 @@ FAILURE CONDITIONS TO AVOID:
                     {activeTab === 'grouped' && (
                       <>
                         <button
-                          onClick={() => {
-                            const groupsToApprove = groupedClusters.filter(g => selectedGroups.has(g.id));
-                            if (groupsToApprove.length > 0) {
-                              groupsToApprove.forEach(g => handleApproveGroup(g.groupName));
-                              setSelectedGroups(new Set());
-                              setSelectedSubClusters(new Set());
-                            }
-                          }}
-                          disabled={selectedGroups.size === 0}
+                          onClick={approveSelectedGrouped}
+                          disabled={!canApproveGrouped}
                           className="px-4 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
                         >
                           Approve ({selectedGroups.size})
                         </button>
                         <button
                           onClick={handleUngroupClusters}
-                          disabled={selectedGroups.size === 0 && selectedSubClusters.size === 0}
+                          disabled={!canUngroupGrouped}
                           className="px-4 py-1.5 text-xs font-medium text-white bg-orange-500 rounded-lg hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
                         >
                           Ungroup ({selectedGroups.size + selectedSubClusters.size})
@@ -4236,7 +4267,7 @@ FAILURE CONDITIONS TO AVOID:
                       <>
                         <button
                           onClick={handleRemoveFromApproved}
-                          disabled={selectedGroups.size === 0 && selectedSubClusters.size === 0}
+                          disabled={!canUnapproveApproved}
                           className="px-4 py-1.5 text-xs font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
                         >
                           Unapprove ({selectedGroups.size + selectedSubClusters.size})
@@ -4535,7 +4566,8 @@ FAILURE CONDITIONS TO AVOID:
                         groupActionButton={
                           <button
                             onClick={() => handleApproveGroup(row.groupName)}
-                            className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 transition-colors text-[10px] font-bold shrink-0"
+                            disabled={isSharedProjectReadOnly}
+                            className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-bold shrink-0"
                             title="Approve group"
                           >
                             {'\u2713'}
@@ -4564,7 +4596,8 @@ FAILURE CONDITIONS TO AVOID:
                         groupActionButton={
                           <button
                             onClick={() => handleUnapproveGroup(group.groupName)}
-                            className="w-5 h-5 flex items-center justify-center rounded bg-amber-500 text-white hover:bg-amber-600 transition-colors text-[10px] font-bold shrink-0"
+                            disabled={isSharedProjectReadOnly}
+                            className="w-5 h-5 flex items-center justify-center rounded bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-bold shrink-0"
                             title="Unapprove group"
                           >
                             ↩
@@ -4608,6 +4641,7 @@ FAILURE CONDITIONS TO AVOID:
                   persistedSuggestions={autoGroupSuggestions}
                   onSuggestionsChange={persistence.updateSuggestions}
                   isProjectBusy={isProjectBusy}
+                  isSharedProjectReadOnly={isSharedProjectReadOnly}
                   runWithExclusiveOperation={runWithExclusiveOperation}
                 />
               )}
