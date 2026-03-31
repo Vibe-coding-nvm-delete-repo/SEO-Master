@@ -1675,24 +1675,16 @@ async function recoverStuckV2Meta(
     };
   }
 
-  // Acquire an operation lock before the recovery write.
-  // Firestore rules require an owned lock for any write that changes
-  // migrationState (classified as an epoch activation write).
-  // Without this, recovery fails with permission-denied.
+  // Try to acquire a lock for the finalize path (which is an epoch activation
+  // write requiring lock ownership). The failed-migration path writes
+  // readMode:'legacy' which bypasses the epoch activation guard, so it works
+  // without a lock. Lock acquisition may fail if an expired lock doc exists
+  // (project_operations/current cannot be deleted per Firestore rules).
   const lock = await acquireProjectOperationLock(projectId, 'bulk-update', actorId).catch(() => null);
-  if (!lock) {
-    return {
-      recovery: {
-        attempted: true,
-        outcome: 'unchanged',
-      },
-    };
-  }
 
   try {
     return await runTransaction(db, async (tx): Promise<NonNullable<CanonicalProjectState['diagnostics']>> => {
       const metaRef = collabMetaDoc(projectId);
-      const lockRef = operationLockDoc(projectId);
       const metaSnap = await tx.get(metaRef);
       if (!metaSnap.exists()) {
         return {
@@ -1720,10 +1712,12 @@ async function recoverStuckV2Meta(
         };
       }
 
-      // Verify WE own the lock (it was acquired above, but confirm it wasn't stolen)
+      // Check if another client holds an active lock (skip if so)
+      const lockRef = operationLockDoc(projectId);
       const lockSnap = await tx.get(lockRef);
       const currentLock = lockSnap.exists() ? (lockSnap.data() as ProjectOperationLockDoc) : null;
-      if (!currentLock || (currentLock.ownerId !== actorId && currentLock.ownerClientId !== actorId)) {
+      const lockActive = lockIsActive(currentLock, actorId);
+      if (lockActive) {
         return {
           recovery: {
             attempted: true,
@@ -1743,6 +1737,12 @@ async function recoverStuckV2Meta(
             manifest.datasetEpoch === current.datasetEpoch
           );
         }
+      }
+
+      // Finalize path requires a lock (epoch activation write).
+      // If we couldn't acquire one, treat as non-finalizable.
+      if (canFinalize && !lock) {
+        canFinalize = false;
       }
 
       if (!canFinalize && current.migrationState === 'failed') {
@@ -1814,7 +1814,9 @@ async function recoverStuckV2Meta(
       },
     };
   } finally {
-    await releaseProjectOperationLock(projectId, actorId).catch(() => undefined);
+    if (lock) {
+      await releaseProjectOperationLock(projectId, actorId).catch(() => undefined);
+    }
   }
 }
 
@@ -1828,6 +1830,28 @@ export async function loadCanonicalProjectState(
     let canonical = await loadCanonicalEpoch(projectId, meta);
     if (canonical) {
       return canonical;
+    }
+
+    // A V2 meta doc without a usable base commit is already unrecoverable from
+    // Firestore alone. Do not turn bootstrap into a repair-write path; fall
+    // back to the local legacy payload immediately so project open remains
+    // read-only and local-first.
+    if (meta.migrationState === 'failed' || !meta.baseCommitId) {
+      const legacyPayload = await legacyLoader();
+      if (legacyPayload) {
+        return {
+          mode: 'legacy',
+          base: null,
+          entities: emptyEntities(),
+          resolved: legacyPayload,
+          diagnostics: {
+            recovery: {
+              attempted: false,
+              outcome: 'skipped',
+            },
+          },
+        };
+      }
     }
 
     const recoveryDiagnostics = await recoverStuckV2Meta(projectId, meta, actorId);
@@ -1846,29 +1870,21 @@ export async function loadCanonicalProjectState(
       }
     }
 
-    // If migration failed and no base commit exists, the V2 state is unrecoverable
-    // from Firestore alone. Fall back to legacy data and re-attempt migration.
-    // This handles the case where the meta doc has migrationState:'complete' or 'failed'
-    // but is missing commitState/baseCommitId (e.g. incomplete original migration).
+    // Bootstrap must stay read-only for legacy data. Re-attempting migration during
+    // ordinary project open turns a local read path into a write path, which can
+    // fail under normal local/legacy permissions and block core functionality.
+    // If V2 meta is unrecoverable, surface the best available legacy payload and
+    // let the user keep working instead of retrying migration here.
     if (recoveredMeta.migrationState === 'failed' || !recoveredMeta.baseCommitId) {
       const legacyPayload = await legacyLoader();
       if (legacyPayload) {
-        try {
-          const reMigrated = await migrateLegacyProjectToV2(projectId, legacyPayload, actorId);
-          return {
-            ...reMigrated,
-            diagnostics: recoveryDiagnostics,
-          };
-        } catch {
-          // Re-migration failed — return legacy mode so user can still work
-          return {
-            mode: 'legacy',
-            base: null,
-            entities: emptyEntities(),
-            resolved: legacyPayload,
-            diagnostics: recoveryDiagnostics,
-          };
-        }
+        return {
+          mode: 'legacy',
+          base: null,
+          entities: emptyEntities(),
+          resolved: legacyPayload,
+          diagnostics: recoveryDiagnostics,
+        };
       }
     }
 
@@ -1892,24 +1908,12 @@ export async function loadCanonicalProjectState(
     };
   }
 
-  try {
-    return await migrateLegacyProjectToV2(projectId, legacyPayload, actorId);
-  } catch (error) {
-    if ((error as Error)?.message === 'migration-in-progress') {
-      return {
-        mode: 'legacy',
-        base: null,
-        entities: emptyEntities(),
-        resolved: legacyPayload,
-      };
-    }
-    return {
-      mode: 'legacy',
-      base: null,
-      entities: emptyEntities(),
-      resolved: legacyPayload,
-    };
-  }
+  return {
+    mode: 'legacy',
+    base: null,
+    entities: emptyEntities(),
+    resolved: legacyPayload,
+  };
 }
 
 export function buildGroupDocChanges(

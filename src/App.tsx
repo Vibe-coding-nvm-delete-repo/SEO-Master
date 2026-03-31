@@ -29,7 +29,7 @@ import {
 import GroupReviewSettings, { type GroupReviewSettingsRef, type GroupReviewSettingsData } from './GroupReviewSettings';
 import { getFilteredAutoGroupSettingsStatus } from './filteredAutoGroupSettingsStatus';
 import { healReviewingGroups } from './groupReviewState';
-import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
+import { processReviewQueue, type ReviewRequest, type ReviewResult, type ReviewError } from './GroupReviewEngine';
 import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, GroupedCluster, GroupMergeRecommendation, BlockedKeyword, LabelSection, Project, Stats, ActivityLogEntry, ActivityAction, TokenMergeRule, AutoGroupSuggestion, AutoMergeRecommendation } from './types';
 import { computeMergeImpact, applyMergeRulesToTokenArr, computeSignature, mergeTokenArr } from './tokenMerge';
 import MergeConfirmModal from './MergeConfirmModal';
@@ -37,6 +37,8 @@ import { useToast } from './ToastContext';
 import ActivityLog from './ActivityLog';
 import AutoGroupPanel from './AutoGroupPanel';
 import GroupAutoMergePanel from './GroupAutoMergePanel';
+import ClusterRowView from './ClusterRow';
+import GroupedClusterRowView from './GroupedClusterRow';
 import { OPENROUTER_REQUEST_TIMEOUT_MS, runWithOpenRouterTimeout } from './openRouterTimeout';
 import TopicsSubTab from './TopicsSubTab';
 import ProjectsTab from './ProjectsTab';
@@ -44,17 +46,6 @@ import InlineHelpHint from './InlineHelpHint';
 import TableHeader, { type FilterBag } from './TableHeader';
 import { PAGES_COLUMNS, GROUPED_COLUMNS, APPROVED_COLUMNS, BLOCKED_COLUMNS, KEYWORDS_COLUMNS, CELL } from './tableConstants';
 import { buildGroupedClusterFromPages, mergeGroupedClustersByName } from './groupedClusterUtils';
-import {
-  groupedTabChildCity,
-  groupedTabChildRowKey,
-  groupedTabChildState,
-  kdCellDisplay,
-  keywordLenForCell,
-  pagesTabChildCity,
-  pagesTabChildRowKey,
-  pagesTabChildState,
-  volumeCellDisplay,
-} from './clusterExpandChildRows';
 import {
   formatKeywordRatingDuration,
 } from './KeywordRatingEngine';
@@ -102,7 +93,7 @@ import { useGroupAutoMerge } from './hooks/useGroupAutoMerge';
 import { useFilteredTableData } from './hooks/useFilteredTableData';
 import { useTokenMgmtFiltering } from './hooks/useTokenMgmtFiltering';
 
-// Error boundary â€" catches any unhandled React error and shows recovery UI instead of white screen
+// Error boundary — catches any unhandled React error and shows recovery UI instead of white screen
 // Must be a class component (React requires it for error boundaries)
 const ErrorBoundary = (() => {
   type Props = { children: React.ReactNode; fallbackLabel?: string };
@@ -278,153 +269,6 @@ const KwRatingCell = React.memo(({ value }: { value: number | null | undefined }
   </td>
 ));
 
-const ClusterRow = React.memo(({
-  row,
-  isExpanded,
-  isSelected,
-  selectedTokens,
-  toggleCluster,
-  onSelect,
-  setSelectedTokens,
-  setCurrentPage,
-  onMiddleClick,
-  labelColorMap,
-  onBlockToken
-}: {
-  row: ClusterSummary;
-  isExpanded: boolean;
-  isSelected: boolean;
-  selectedTokens: Set<string>;
-  toggleCluster: (p: string) => void;
-  onSelect: (checked: boolean) => void;
-  setSelectedTokens: (s: Set<string>) => void;
-  setCurrentPage: (p: number) => void;
-  onMiddleClick: (e: React.MouseEvent) => void;
-  onBlockToken?: (token: string) => void;
-  labelColorMap: Map<string, { border: string; bg: string; text: string; sectionName: string }>;
-}) => (
-  <>
-    <tr 
-      className="hover:bg-zinc-50/50 transition-colors"
-      onAuxClick={onMiddleClick}
-    >
-      <td className="px-3 py-0.5 text-center" onClick={(e) => e.stopPropagation()}>
-        <input 
-          type="checkbox" 
-          className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-          checked={isSelected}
-          onChange={(e) => onSelect(e.target.checked)}
-        />
-      </td>
-      <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
-        <div className="flex items-center gap-1.5 group/name">
-          <button
-            onClick={(e) => { e.stopPropagation(); toggleCluster(row.pageName); }}
-            className="shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
-            title={isExpanded ? 'Collapse row' : 'Expand row'}
-          >
-            {isExpanded ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-          </button>
-          <span className="break-words">{row.pageName}</span>
-          <button
-            onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.pageName)}`, '_blank'); }}
-            className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0"
-            title="Search Google SERPs"
-          >
-            <ExternalLink className="w-3 h-3" />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(row.pageName); }}
-            className="p-0.5 text-zinc-300 hover:text-indigo-600 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0"
-            title="Copy page name"
-          >
-            <Copy className="w-3 h-3" />
-          </button>
-        </div>
-      </td>
-      <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
-        <div className="flex flex-wrap gap-1">
-          {row.tokenArr.map((token, i) => {
-            const labelColor = labelColorMap.get(token);
-            return (
-            <button
-              key={i}
-              onClick={(e) => {
-                e.stopPropagation();
-                if ((e.ctrlKey || e.metaKey) && onBlockToken) {
-                  onBlockToken(token);
-                  return;
-                }
-                const newTokens = new Set(selectedTokens);
-                if (newTokens.has(token)) newTokens.delete(token);
-                else newTokens.add(token);
-                setSelectedTokens(newTokens);
-                setCurrentPage(1);
-              }}
-              className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-              style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-              title={labelColor ? `${labelColor ? `Label: ${labelColor.sectionName} · ` : ''}Ctrl+click to block` : 'Ctrl+click to block'}
-            >
-              {token}
-            </button>
-            );
-          })}
-        </div>
-      </td>
-      <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">
-        {row.pageNameLen}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.keywordCount.toLocaleString()}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.totalVolume.toLocaleString()}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.avgKd !== null ? row.avgKd : '-'}
-      </td>
-      <KwRatingCell value={row.avgKwRating} />
-      <td className="px-3 py-0.5 text-zinc-600">
-        {row.label}
-      </td>
-      <td className="px-3 py-0.5 text-zinc-600 capitalize">
-        {row.locationCity || '-'}
-      </td>
-      <td className="px-3 py-0.5 text-zinc-600 uppercase">
-        {row.locationState || '-'}
-      </td>
-    </tr>
-    {isExpanded && row.keywords.map((kw, i) => (
-      <tr
-        key={pagesTabChildRowKey(row.pageName, i, kw.keyword)}
-        className={`border-b border-zinc-100 ${i % 2 === 0 ? 'bg-zinc-50/70' : 'bg-zinc-100/50'}`}
-      >
-        <td className="px-3 py-0.5" aria-hidden />
-        <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
-          <div className="pl-7 min-w-0">
-            <span className="text-[11px] font-medium text-zinc-600 break-words" title={kw.keyword}>
-              {kw.keyword}
-            </span>
-          </div>
-        </td>
-        <td className="px-3 py-0.5 min-w-0" aria-hidden />
-        <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">{keywordLenForCell(kw.keyword)}</td>
-        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">1</td>
-        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{volumeCellDisplay(kw.volume)}</td>
-        <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{kdCellDisplay(kw.kd)}</td>
-        <KwRatingCell value={kw.kwRating} />
-        <td className="px-3 py-0.5 text-zinc-600 text-[12px]">{row.label}</td>
-        <td className="px-3 py-0.5 text-zinc-600 capitalize text-[12px]">{pagesTabChildCity(kw, row)}</td>
-        <td className="px-3 py-0.5 text-zinc-600 uppercase text-[12px]">{pagesTabChildState(kw, row)}</td>
-      </tr>
-    ))}
-  </>
-));
-
 const TokenRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurrentPage, switchToPages }: {
   row: TokenSummary;
   selectedTokens: Set<string>;
@@ -468,313 +312,6 @@ const TokenRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurren
   </tr>
 ));
 
-const GroupedClusterRow = React.memo(({
-  row,
-  isExpanded,
-  expandedSubClusters,
-  toggleGroup,
-  toggleSubCluster,
-  selectedTokens,
-  setSelectedTokens,
-  setCurrentPage,
-  isGroupSelected,
-  selectedSubClusters,
-  onGroupSelect,
-  onSubClusterSelect,
-  labelColorMap,
-  groupActionButton,
-  onBlockToken
-}: {
-  row: GroupedCluster;
-  isExpanded: boolean;
-  expandedSubClusters: Set<string>;
-  toggleGroup: (id: string) => void;
-  toggleSubCluster: (id: string) => void;
-  selectedTokens: Set<string>;
-  onBlockToken?: (token: string) => void;
-  setSelectedTokens: (s: Set<string>) => void;
-  setCurrentPage: (p: number) => void;
-  isGroupSelected: boolean;
-  selectedSubClusters: Set<string>;
-  onGroupSelect: (checked: boolean) => void;
-  onSubClusterSelect: (subKey: string, checked: boolean) => void;
-  labelColorMap: Map<string, { border: string; bg: string; text: string; sectionName: string }>;
-  groupActionButton?: React.ReactNode;
-}) => (
-  <>
-    <tr 
-      className="hover:bg-zinc-50/50 transition-colors"
-    >
-      <td className="px-3 py-0.5" onClick={(e) => e.stopPropagation()}>
-        <input 
-          type="checkbox" 
-          className="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-          checked={isGroupSelected}
-          onChange={(e) => onGroupSelect(e.target.checked)}
-        />
-      </td>
-      <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
-        <div className="flex items-center gap-1.5 group/gname">
-          <button
-            onClick={(e) => { e.stopPropagation(); toggleGroup(row.id); }}
-            className="shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
-            title={isExpanded ? 'Collapse group' : 'Expand group'}
-          >
-            {isExpanded ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-          </button>
-          <span className="break-words">{row.groupName}</span>
-          <button
-            onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(row.groupName)}`, '_blank'); }}
-            className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/gname:opacity-100 transition-opacity shrink-0"
-            title="Search Google SERPs"
-          >
-            <ExternalLink className="w-3 h-3" />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(row.groupName); }}
-            className="p-0.5 text-zinc-300 hover:text-indigo-600 opacity-0 group-hover/gname:opacity-100 transition-opacity shrink-0"
-            title="Copy group name"
-          >
-            <Copy className="w-3 h-3" />
-          </button>
-          {groupActionButton && <span onClick={(e) => e.stopPropagation()}>{groupActionButton}</span>}
-        </div>
-      </td>
-      <td className="px-1.5 py-0.5 overflow-hidden">
-        <div className="flex flex-wrap gap-1">
-          {(() => {
-            // Tokens from the highest volume page in the group (matches the page name)
-            const topPage = row.clusters.length > 0 ? row.clusters.reduce((best, c) => c.totalVolume > best.totalVolume ? c : best, row.clusters[0]) : null;
-            const groupTokens = topPage ? topPage.tokenArr : [];
-            return groupTokens.map(token => {
-              const labelColor = labelColorMap.get(token);
-              return (
-                <button
-                  key={token}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if ((e.ctrlKey || e.metaKey) && onBlockToken) {
-                      onBlockToken(token);
-                      return;
-                    }
-                    const newTokens = new Set(selectedTokens);
-                    if (newTokens.has(token)) newTokens.delete(token);
-                    else newTokens.add(token);
-                    setSelectedTokens(newTokens);
-                    setCurrentPage(1);
-                  }}
-                  className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-                  style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                  title={labelColor ? `${labelColor.sectionName} · Ctrl+click to block` : 'Ctrl+click to block'}
-                >
-                  {token}
-                </button>
-              );
-            });
-          })()}
-        </div>
-      </td>
-      {/* Review Status */}
-      <td className="px-1.5 py-0.5 text-center">
-        {row.reviewStatus === 'pending' || row.reviewStatus === 'reviewing' ? (
-          <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400">
-            <Loader2 className="w-3 h-3 animate-spin" />
-          </span>
-        ) : row.reviewStatus === 'approve' ? (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700" title={row.reviewReason || 'All pages match'}>{'\u2713'}</span>
-        ) : row.reviewStatus === 'mismatch' ? (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 cursor-help" title={`Mismatched: ${(row.reviewMismatchedPages || []).join(', ')}\n${row.reviewReason || ''}`}>{'\u2717'}</span>
-        ) : row.reviewStatus === 'error' ? (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 cursor-help" title={row.reviewReason || 'Review error'}>!</span>
-        ) : (
-          <span className="text-zinc-300">-</span>
-        )}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">-</td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.clusters.length.toLocaleString()}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.keywordCount.toLocaleString()}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.totalVolume.toLocaleString()}
-      </td>
-      <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-        {row.avgKd !== null ? row.avgKd : '-'}
-      </td>
-      <KwRatingCell value={row.avgKwRating} />
-      <td className="px-3 py-0.5 text-zinc-600 text-xs">
-        {(() => {
-          const labels = new Set<string>();
-          row.clusters.forEach(c => c.labelArr.forEach(l => labels.add(l)));
-          return labels.size > 0 ? Array.from(labels).join(', ') : '-';
-        })()}
-      </td>
-      <td className="px-3 py-0.5 text-zinc-600 text-xs">
-        {(() => {
-          const cities = new Set<string>();
-          row.clusters.forEach(c => { if (c.locationCity) cities.add(c.locationCity); });
-          return cities.size > 0 ? Array.from(cities).join(', ') : '-';
-        })()}
-      </td>
-      <td className="px-3 py-0.5 text-zinc-600 text-xs">
-        {(() => {
-          const states = new Set<string>();
-          row.clusters.forEach(c => { if (c.locationState) states.add(c.locationState); });
-          return states.size > 0 ? Array.from(states).join(', ') : '-';
-        })()}
-      </td>
-    </tr>
-    {isExpanded && (() => {
-      const pageNames = row.clusters.map(c => c.pageName);
-      const mismatchNorm = new Set(
-        normalizeMismatchedPageNames(pageNames, row.reviewMismatchedPages || [])
-      );
-      const mismatchAmbiguous =
-        row.reviewStatus === 'mismatch' && mismatchNorm.size === 0;
-      return row.clusters.map((cluster, cIdx) => {
-      const subId = `${row.id}-${cluster.pageName}`;
-      const isSubExpanded = expandedSubClusters.has(subId);
-      return (
-        <React.Fragment key={cIdx}>
-          <tr
-            className={`hover:bg-indigo-50/70 transition-colors border-b border-zinc-100 ${cIdx % 2 === 0 ? 'bg-indigo-50/40' : 'bg-indigo-50/60'}`}
-          >
-            <td className="px-3 py-0.5" onClick={(e) => e.stopPropagation()}>
-              <input 
-                type="checkbox" 
-                className="rounded border-zinc-300 text-orange-500 focus:ring-orange-400"
-                checked={selectedSubClusters.has(`${row.id}::${cluster.tokens}`)}
-                onChange={(e) => onSubClusterSelect(`${row.id}::${cluster.tokens}`, e.target.checked)}
-              />
-            </td>
-            <td className="px-3 py-0.5 text-[12px] font-medium text-zinc-700 overflow-hidden">
-              <div className="flex items-center gap-1.5 pl-6 group/sub">
-                <button
-                  onClick={(e) => { e.stopPropagation(); toggleSubCluster(subId); }}
-                  className="shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
-                  title={isSubExpanded ? 'Collapse row' : 'Expand row'}
-                >
-                  {isSubExpanded ? (
-                    <ChevronDown className="w-3.5 h-3.5" />
-                  ) : (
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  )}
-                </button>
-                <span className="text-[12px] break-words">{cluster.pageName}</span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); window.open(`https://www.google.com/search?q=${encodeURIComponent(cluster.pageName)}`, '_blank'); }}
-                  className="p-0.5 text-zinc-300 hover:text-blue-600 opacity-0 group-hover/sub:opacity-100 transition-opacity shrink-0"
-                  title="Search Google SERPs"
-                >
-                  <ExternalLink className="w-3 h-3" />
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(cluster.pageName); }}
-                  className="p-0.5 text-zinc-300 hover:text-indigo-600 opacity-0 group-hover/sub:opacity-100 transition-opacity shrink-0"
-                  title="Copy page name"
-                >
-                  <Copy className="w-3 h-3" />
-                </button>
-              </div>
-            </td>
-            <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
-              <div className="flex flex-wrap gap-1">
-                {cluster.tokenArr.map((token, i) => {
-                  const labelColor = labelColorMap.get(token);
-                  return (
-                  <button
-                    key={i}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if ((e.ctrlKey || e.metaKey) && onBlockToken) {
-                        onBlockToken(token);
-                        return;
-                      }
-                      const newTokens = new Set(selectedTokens);
-                      if (newTokens.has(token)) newTokens.delete(token);
-                      else newTokens.add(token);
-                      setSelectedTokens(newTokens);
-                      setCurrentPage(1);
-                    }}
-                    className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-                    style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                    title={labelColor ? `${labelColor.sectionName} · Ctrl+click to block` : 'Ctrl+click to block'}
-                  >
-                    {token}
-                  </button>
-                  );
-                })}
-              </div>
-            </td>
-            {/* Sub-cluster QA: red = mismatched page; green = OK (approve group, or non-mismatch pages in a mismatch group) */}
-            <td className="px-1.5 py-0.5 text-center">
-              {mismatchNorm.has(cluster.pageName) ? (
-                <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="Flagged as mismatched" />
-              ) : row.reviewStatus === 'approve' ? (
-                <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" title="Matches group" />
-              ) : row.reviewStatus === 'mismatch' && !mismatchAmbiguous ? (
-                <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" title="Matches group theme" />
-              ) : mismatchAmbiguous ? (
-                <span className="inline-block w-2 h-2 rounded-full bg-amber-400" title="Group mismatch — page list missing or could not be matched" />
-              ) : null}
-            </td>
-            <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">
-              {cluster.pageNameLen}
-            </td>
-            <td className="px-1 py-0.5 text-zinc-400 text-right tabular-nums text-xs">-</td>
-            <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-              {cluster.keywordCount.toLocaleString()}
-            </td>
-            <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-              {cluster.totalVolume.toLocaleString()}
-            </td>
-            <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
-              {cluster.avgKd !== null ? cluster.avgKd : '-'}
-            </td>
-            <KwRatingCell value={cluster.avgKwRating} />
-            <td className="px-3 py-0.5 text-zinc-600">{cluster.label}</td>
-            <td className="px-3 py-0.5 text-zinc-600">{cluster.locationCity || '-'}</td>
-            <td className="px-3 py-0.5 text-zinc-600">{cluster.locationState || '-'}</td>
-          </tr>
-          {isSubExpanded && cluster.keywords.map((kw, i) => (
-            <tr
-              key={groupedTabChildRowKey(subId, i, kw.keyword)}
-              className={`border-b border-zinc-100 ${i % 2 === 0 ? 'bg-zinc-50/70' : 'bg-zinc-100/50'}`}
-            >
-              <td className="px-3 py-0.5" aria-hidden />
-              <td className="px-3 py-0.5 text-[12px] overflow-hidden min-w-0">
-                <div className="pl-10 min-w-0">
-                  <span className="text-[11px] font-medium text-zinc-600 break-words" title={kw.keyword}>
-                    {kw.keyword}
-                  </span>
-                </div>
-              </td>
-              <td className="px-3 py-0.5 min-w-0" aria-hidden />
-              <td className="px-1.5 py-0.5" aria-hidden />
-              <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">{keywordLenForCell(kw.keyword)}</td>
-              <td className="px-1 py-0.5 text-zinc-400 text-right tabular-nums text-xs">-</td>
-              <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">1</td>
-              <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{volumeCellDisplay(kw.volume)}</td>
-              <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">{kdCellDisplay(kw.kd)}</td>
-              <KwRatingCell value={kw.kwRating} />
-              <td className="px-3 py-0.5 text-zinc-600 text-[12px]">{cluster.label}</td>
-              <td className="px-3 py-0.5 text-zinc-600 capitalize text-[12px]">{groupedTabChildCity(kw, cluster)}</td>
-              <td className="px-3 py-0.5 text-zinc-600 uppercase text-[12px]">{groupedTabChildState(kw, cluster)}</td>
-            </tr>
-          ))}
-        </React.Fragment>
-      );
-    });
-    })()}
-  </>
-));
-
 // Auto-clear stale caches when the Firebase project changes
 const CURRENT_PROJECT_ID = 'new-final-8edfc';
 (() => {
@@ -803,7 +340,7 @@ export default function App() {
     navigateGroupSub,
     navigateSettingsSub,
   } = useNavigationState({ activeProjectIdRef: activeProjectIdNavRef, projectsRef: projectsNavRef });
-  // Starred models â€” shared across Generate tab and Group Review
+  // Starred models — shared across Generate tab and Group Review
   const [starredModels, setStarredModels] = useState<Set<string>>(new Set());
   const { addToast } = useToast();
   useEffect(() => {
@@ -1055,7 +592,7 @@ export default function App() {
     setExpandedMergeParents,
   } = useKeywordWorkspace({ setSelectedClusters });
 
-  // Universal blocked tokens â€” persists across ALL projects (global, not project-specific)
+  // Universal blocked tokens — persists across ALL projects (global, not project-specific)
   const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(new Set<string>());
   const universalBlockedHydratedRef = useRef(false);
   const lastUniversalBlockedSavedRef = useRef<string>('');
@@ -1288,7 +825,7 @@ export default function App() {
                 validCount++;
                 totalSearchVolume += volume;
 
-                // Check for foreign countries/cities â€" block these keywords
+                // Check for foreign countries/cities — block these keywords
                 const foreignEntity = detectForeignEntity(keyword.toLowerCase());
                 if (foreignEntity) {
                   blockedRows.push({ keyword, volume, kd, reason: foreignEntity });
@@ -1328,14 +865,14 @@ export default function App() {
                 const keywordLower = keyword.toLowerCase();
                 const rawTokens = keywordLower.split(/[^a-z0-9]+/);
                 
-                // Check for NYC aliases â†' city "New York City", state "New York"
+                // Check for NYC aliases → city "New York City", state "New York"
                 const isNycAlias = keywordLower.includes('nyc') || keywordLower.includes('new york city');
                 if (isNycAlias) {
                   locationCity = 'New York City';
                   locationState = 'New York';
                 }
 
-                // Check for LA alias â†' city "Los Angeles", state "California"
+                // Check for LA alias → city "Los Angeles", state "California"
                 if (!locationCity && /\bla\b/.test(keywordLower)) {
                   locationCity = 'Los Angeles';
                   locationState = 'California';
@@ -1358,7 +895,7 @@ export default function App() {
                         }
                       }
                     }
-                    // Try 1-word state (skip "la" â€" almost always means Los Angeles, not Louisiana)
+                    // Try 1-word state (skip "la" — almost always means Los Angeles, not Louisiana)
                     if (stateSet.has(token) && !stopWords.has(token) && token !== 'la') {
                       locationState = normalizeState(token);
                       break;
@@ -1615,7 +1152,7 @@ export default function App() {
                   })
                   .sort((a, b) => b.frequency - a.frequency);
 
-    // No auto-grouping â€" all pages start in Pages (Ungrouped). User groups manually.
+    // No auto-grouping — all pages start in Pages (Ungrouped). User groups manually.
     const statsObj = {
       original: originalCount,
       valid: outputData.length,
@@ -2560,7 +2097,7 @@ export default function App() {
     logAndToast('export', `Exported ${tokenSummary.length} tokens from token management`, tokenSummary.length, `Exported ${tokenSummary.length} tokens`, 'success');
   }, [tokenSummary, blockedTokens, universalBlockedTokens, logAndToast]);
 
-  // Debounced QA re-review â€" when pages are removed from groups, wait 5s then re-trigger QA
+  // Debounced QA re-review — when pages are removed from groups, wait 5s then re-trigger QA
   const scheduleReReview = useCallback((groupIds: string[]) => {
     groupIds.forEach(id => reReviewGroupIds.current.add(id));
     if (reReviewTimerRef.current) clearTimeout(reReviewTimerRef.current);
@@ -2597,7 +2134,7 @@ export default function App() {
   });
 
 
-  // AI Group Review â€" process pending groups automatically
+  // AI Group Review — process pending groups automatically
   useEffect(() => {
     if (reviewProcessingRef.current) return;
     if (isSharedProjectReadOnly) return;
@@ -2733,7 +2270,7 @@ export default function App() {
     persistence.updateGroups(healReviewingGroups);
   }, [groupedClusters, isSharedProjectReadOnly, persistence.updateGroups]);
 
-  // Grouping rate tracker â€" estimates remaining time to group all ungrouped pages
+  // Grouping rate tracker — estimates remaining time to group all ungrouped pages
   const groupingTimestamps = useRef<{ time: number; pagesGrouped: number }[]>([]);
   const [groupingEta, setGroupingEta] = useState<string | null>(null);
 
@@ -3229,14 +2766,14 @@ FAILURE CONDITIONS TO AVOID:
       }
 
       if (e.key === 'Tab' || e.key === 'Shift') {
-        // Tab or Shift in Pages (Ungrouped) â†' Group selected clusters
+        // Tab or Shift in Pages (Ungrouped) → Group selected clusters
         if (activeTab === 'pages' && canRunManualGroup) {
           e.preventDefault();
           e.stopPropagation();
           handleGroupClusters();
           return;
         }
-        // Tab in Pages (Grouped) â†' Approve selected groups
+        // Tab in Pages (Grouped) → Approve selected groups
         if (activeTab === 'grouped' && canApproveGrouped) {
           e.preventDefault();
           e.stopPropagation();
@@ -3663,7 +3200,7 @@ FAILURE CONDITIONS TO AVOID:
         {results && stats && clusterSummary && !isProcessing && (
           <div className="space-y-1.5 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
-            {/* Stats Grid â€" collapsible */}
+            {/* Stats Grid — collapsible */}
             <div>
               <button
                 onClick={() => setStatsExpanded(!statsExpanded)}
@@ -3939,7 +3476,7 @@ FAILURE CONDITIONS TO AVOID:
               <div className="px-2.5 py-1.5 border-b border-zinc-100 bg-zinc-50/30 flex flex-col shrink-0 relative z-20 gap-1">
                 <div className="flex items-center gap-1.5">
                   <h3 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5"><Hash className="w-3.5 h-3.5 text-zinc-500" />Keyword Management</h3>
-                  {/* AI Review stats â€" always visible */}
+                  {/* AI Review stats — always visible */}
                   {(() => {
                     const allGroups = [...groupedClusters, ...approvedGroups];
                     const reviewed = allGroups.filter(g => g.reviewStatus === 'approve' || g.reviewStatus === 'mismatch');
@@ -4152,13 +3689,13 @@ FAILURE CONDITIONS TO AVOID:
 
                 {/* Row 3: Results count | Selection | Search | Context-aware actions */}
                 <div className="flex items-center gap-2">
-                  {/* Active results count â€" fixed position, never shifts */}
+                  {/* Active results count — fixed position, never shifts */}
                   <span className="text-[11px] text-zinc-400 tabular-nums whitespace-nowrap shrink-0 min-w-[100px]">
                     {filteredCount.toLocaleString()} / {totalCount.toLocaleString()}{' '}
                     {activeTab === 'pages' ? 'pages' : activeTab === 'keywords' ? 'keywords' : activeTab === 'grouped' ? 'groups' : activeTab === 'group-auto-merge' ? 'recommendations' : activeTab === 'approved' ? 'groups' : activeTab === 'blocked' ? 'blocked' : 'items'}
                   </span>
 
-                  {/* Selection count â€" fixed min-width so it doesn't shift other elements */}
+                  {/* Selection count — fixed min-width so it doesn't shift other elements */}
                   <span className={`px-2 py-0.5 text-[10px] font-semibold rounded tabular-nums whitespace-nowrap shrink-0 min-w-[70px] text-center transition-colors ${
                     (() => {
                       const selCount = activeTab === 'pages' ? selectedClusters.size :
@@ -4192,9 +3729,9 @@ FAILURE CONDITIONS TO AVOID:
                   {/* Spacer */}
                   <div className="flex-1" />
 
-                  {/* Context-aware action buttons â€" change based on activeTab */}
+                  {/* Context-aware action buttons — change based on activeTab */}
                   <div className="flex items-center gap-1.5 flex-shrink min-w-0 flex-wrap justify-end">
-                    {/* Group name input â€" visible on Pages (Ungrouped) AND Pages (Grouped) for future rename feature */}
+                    {/* Group name input — visible on Pages (Ungrouped) AND Pages (Grouped) for future rename feature */}
                     {(activeTab === 'pages' || activeTab === 'grouped') && (
                       <input
                         type="text"
@@ -4262,7 +3799,7 @@ FAILURE CONDITIONS TO AVOID:
                       </>
                     )}
 
-                    {/* Pages (Approved): Unapprove â€" handles both entire groups AND individual pages */}
+                    {/* Pages (Approved): Unapprove — handles both entire groups AND individual pages */}
                     {activeTab === 'approved' && (
                       <>
                         <button
@@ -4385,7 +3922,7 @@ FAILURE CONDITIONS TO AVOID:
                 )}
               </div>
 
-              {/* AI Group Review Settings Panel â€" mounted for both Pages and Grouped because Pages Auto Group uses the same settings */}
+              {/* AI Group Review Settings Panel — mounted for both Pages and Grouped because Pages Auto Group uses the same settings */}
               <div className={activeTab === 'grouped' || activeTab === 'group-auto-merge' || activeTab === 'pages' || activeTab === 'keywords' ? 'px-4' : 'hidden'}>
                 <GroupReviewSettings
                   ref={groupReviewSettingsRef}
@@ -4402,7 +3939,7 @@ FAILURE CONDITIONS TO AVOID:
               <div className="overflow-auto flex-1 rounded-b-2xl" style={activeTab === 'auto-group' || activeTab === 'group-auto-merge' ? { display: 'none' } : undefined}>
 
                 <table className="text-left text-sm relative w-full table-fixed">
-                  {/* Shared TableHeader â€" single source of truth for all tab headers */}
+                  {/* Shared TableHeader — single source of truth for all tab headers */}
                   {activeTab === 'pages' ? (
                     <TableHeader
                       columns={PAGES_COLUMNS}
@@ -4496,7 +4033,7 @@ FAILURE CONDITIONS TO AVOID:
                   ) : null}
                   <tbody className="divide-y divide-zinc-100 [&>tr:nth-child(even)]:bg-zinc-50/60">
                     {activeTab === 'pages' && paginatedClusters.map((row) => (
-                      <ClusterRow
+                      <ClusterRowView
                         key={row.tokens}
                         row={row}
                         isExpanded={expandedClusters.has(row.pageName)}
@@ -4547,7 +4084,7 @@ FAILURE CONDITIONS TO AVOID:
                     ))}
                     
                     {activeTab === 'grouped' && paginatedGroupedClusters.map((row) => (
-                      <GroupedClusterRow
+                      <GroupedClusterRowView
                         key={row.id}
                         row={row}
                         isExpanded={expandedGroupedClusters.has(row.id)}
@@ -4577,7 +4114,7 @@ FAILURE CONDITIONS TO AVOID:
                     ))}
 
                     {activeTab === 'approved' && sortedPaginatedApproved.map((group) => (
-                      <GroupedClusterRow
+                      <GroupedClusterRowView
                         key={group.id}
                         row={group}
                         isExpanded={expandedGroupedClusters.has(group.id)}
@@ -4630,7 +4167,7 @@ FAILURE CONDITIONS TO AVOID:
                 </table>
               </div>
 
-              {/* Auto-Group Panel â€" replaces table when auto-group tab is active */}
+              {/* Auto-Group Panel — replaces table when auto-group tab is active */}
               {activeTab === 'auto-group' && (
                 <AutoGroupPanel
                   key={activeProjectId || 'no-project'}
@@ -5259,7 +4796,7 @@ FAILURE CONDITIONS TO AVOID:
                               }}
                             />
                           </td>
-                          {/* Star icon â€" add/remove from Universal Blocked list (only in blocked tab) */}
+                          {/* Star icon — add/remove from Universal Blocked list (only in blocked tab) */}
                           {tokenMgmtSubTab === 'blocked' && (
                             <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                               <button
@@ -5298,7 +4835,7 @@ FAILURE CONDITIONS TO AVOID:
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.frequency.toLocaleString()}</td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.totalVolume.toLocaleString()}</td>
                           <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{row.avgKd !== null ? row.avgKd : '-'}</td>
-                          {/* Block button â€" small red circle, only on non-blocked tabs */}
+                          {/* Block button — small red circle, only on non-blocked tabs */}
                           {tokenMgmtSubTab !== 'blocked' && (
                             <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                               <button
@@ -5399,7 +4936,7 @@ FAILURE CONDITIONS TO AVOID:
           />
         )}
 
-        {/* Settings sub-tab â€" Universal Blocked Tokens */}
+        {/* Settings sub-tab — Universal Blocked Tokens */}
         {mainTab === 'group' && groupSubTab === 'settings' && (
           <div className="bg-white rounded-2xl border border-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-4 duration-500">
             {/* Settings header with sub-tabs */}
@@ -5475,7 +5012,7 @@ FAILURE CONDITIONS TO AVOID:
                   </div>
                 ) : (
                   <div className="py-8 text-center text-xs text-zinc-400 bg-zinc-50/50 rounded-lg border border-zinc-100">
-                    No universally blocked tokens. Add tokens above or star them in Token Management â†' Blocked tab.
+                    No universally blocked tokens. Add tokens above or star them in Token Management → Blocked tab.
                   </div>
                 )}
               </div>
@@ -5489,9 +5026,9 @@ FAILURE CONDITIONS TO AVOID:
                   <h3 className="text-sm font-semibold text-zinc-900 mb-2">1. Normalization</h3>
                   <ul className="list-disc pl-5 space-y-1.5 text-xs">
                     <li><strong>Lowercase:</strong> All keywords converted to lowercase.</li>
-                    <li><strong>State Names:</strong> Full names â†' 2-letter abbreviations (e.g., "california" â†' "ca").</li>
-                    <li><strong>Synonyms:</strong> Common synonyms mapped to a base word (e.g., "cheap" â†' "affordable").</li>
-                    <li><strong>Numbers:</strong> Spelled-out numbers â†' digits (e.g., "one" â†' "1").</li>
+                    <li><strong>State Names:</strong> Full names → 2-letter abbreviations (e.g., "california" → "ca").</li>
+                    <li><strong>Synonyms:</strong> Common synonyms mapped to a base word (e.g., "cheap" → "affordable").</li>
+                    <li><strong>Numbers:</strong> Spelled-out numbers → digits (e.g., "one" → "1").</li>
                   </ul>
                 </div>
                 <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
@@ -5505,7 +5042,7 @@ FAILURE CONDITIONS TO AVOID:
                 <div className="bg-zinc-50/50 border border-zinc-100 rounded-xl p-5">
                   <h3 className="text-sm font-semibold text-zinc-900 mb-2">3. Singularization & Sorting</h3>
                   <ul className="list-disc pl-5 space-y-1.5 text-xs">
-                    <li><strong>Singularization:</strong> Plurals â†' singular ("shoes" â†' "shoe").</li>
+                    <li><strong>Singularization:</strong> Plurals → singular ("shoes" → "shoe").</li>
                     <li><strong>Sorting:</strong> Tokens sorted alphabetically so "shoe red" = "red shoe".</li>
                   </ul>
                 </div>
@@ -5685,7 +5222,7 @@ FAILURE CONDITIONS TO AVOID:
           </ErrorBoundary>
         </div>
 
-        {/* How it Works â€" now inside Settings, kept here for backward compat rendering */}
+        {/* How it Works — now inside Settings, kept here for backward compat rendering */}
 
         {/* Dictionaries content moved to Settings > Dictionaries sub-tab */}
         {mainTab === '__legacy_rules__' ? (
@@ -5902,5 +5439,4 @@ FAILURE CONDITIONS TO AVOID:
     </div>
   );
 }
-
 
