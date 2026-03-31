@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import type { GroupDataTab } from './useKeywordWorkspace';
+import { isAcceptedSharedMutation, type SharedMutationResult } from '../sharedMutation';
 
 type ToastKind = 'info' | 'warning' | 'success' | 'error';
 type LogAndToast = (action: any, details: string, affectedRows: number, toastMsg: string, toastType: ToastKind) => void;
@@ -11,8 +12,8 @@ export interface UseTokenActionsInput {
   setTokenMgmtPage: (page: number) => void;
   /** After unblock, land on Pages (Ungrouped) so tokens are visible in the right scope. */
   switchTab: (tab: GroupDataTab) => void;
-  blockTokens: (tokens: string[]) => boolean;
-  unblockTokens: (tokens: string[]) => boolean;
+  blockTokens: (tokens: string[]) => Promise<SharedMutationResult>;
+  unblockTokens: (tokens: string[]) => Promise<SharedMutationResult>;
 }
 
 export function useTokenActions(input: UseTokenActionsInput) {
@@ -26,16 +27,16 @@ export function useTokenActions(input: UseTokenActionsInput) {
     unblockTokens,
   } = input;
 
-  const handleBlockSingleToken = useCallback((token: string) => {
-    const applied = blockTokens([token]);
-    if (!applied) return;
+  const handleBlockSingleToken = useCallback(async (token: string) => {
+    const result = await blockTokens([token]);
+    if (!isAcceptedSharedMutation(result)) return;
     logAndToast('block', `Blocked: ${token}`, 1, `Blocked token: ${token}`, 'error');
   }, [blockTokens, logAndToast]);
 
-  const handleBlockTokens = useCallback((tokens: string[]) => {
+  const handleBlockTokens = useCallback(async (tokens: string[]) => {
     if (tokens.length === 0) return;
-    const applied = blockTokens(tokens);
-    if (!applied) return;
+    const result = await blockTokens(tokens);
+    if (!isAcceptedSharedMutation(result)) return;
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('blocked');
     setTokenMgmtPage(1);
@@ -48,10 +49,10 @@ export function useTokenActions(input: UseTokenActionsInput) {
     );
   }, [blockTokens, logAndToast, setSelectedMgmtTokens, setTokenMgmtPage, setTokenMgmtSubTab]);
 
-  const handleUnblockTokens = useCallback((tokens: string[]) => {
+  const handleUnblockTokens = useCallback(async (tokens: string[]) => {
     if (tokens.length === 0) return;
-    const applied = unblockTokens(tokens);
-    if (!applied) return;
+    const result = await unblockTokens(tokens);
+    if (!isAcceptedSharedMutation(result)) return;
     setSelectedMgmtTokens(new Set());
     setTokenMgmtSubTab('current');
     setTokenMgmtPage(1);

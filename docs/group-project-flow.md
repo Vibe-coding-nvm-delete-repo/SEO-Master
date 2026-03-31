@@ -212,3 +212,96 @@ Out of scope:
 
 - This document focuses on the **Group** workspace.
 - `Generate` and `Content` are downstream workflows and are intentionally not modeled here beyond the shared persistence rules they inherit.
+
+## 6. Current Gaps Vs Optimal Flow
+
+This section is intentionally blunt. The diagrams above describe the **target** collaboration contract. The app is closer to that contract now, but not fully there yet.
+
+### Overall assessment
+
+- Current implementation vs optimal flow: **7.5 / 10**
+- Biggest improvement made: the app is much less likely to enter the old sticky shared-sync/read-only trap during normal grouping work.
+- Biggest remaining gap: some flows still treat **optimistic local apply** as "done" before the shared Firestore-backed write has been fully acknowledged.
+
+### Gaps still to close
+
+1. **Foreign project-wide bulk locks still block routine shared edits**
+
+- Optimal flow:
+  - project-wide locks should mainly protect true bulk rewrites
+  - routine grouping, approving, ungrouping, and similar day-to-day edits should remain available whenever the current shared state is otherwise safe
+- Current behavior:
+  - if another client holds the active project operation lock, routine shared edits can still be blocked along with bulk edits
+- User impact:
+  - a collaborator running a bulk action can temporarily stop another user from doing normal grouping work
+- Gap to close:
+  - narrow foreign-lock blocking so routine entity-scoped edits are only blocked when they truly conflict with the active project-wide operation
+
+2. **Some flows still use optimistic local success as the completion boundary**
+
+- Optimal flow:
+  - the app should only claim success once the shared mutation has been accepted and is on the listener path to collaborators
+- Current behavior:
+  - some flows still return success after local optimistic apply and queued shared persistence, not after confirmed shared acceptance
+- Known high-risk examples:
+  - token block / unblock
+  - token merge / unmerge
+  - some filtered auto-group apply paths
+  - some group review auto-processor updates
+- User impact:
+  - one user can be told an action "worked" while another user may not see it yet, or may not see it if the shared write fails afterward
+- Gap to close:
+  - move these flows to the same acknowledged shared-write boundary now used by the hardened Group Auto Merge path
+
+3. **Routine edit truthfulness is better, but not perfectly uniform yet**
+
+- Optimal flow:
+  - every routine Group mutation should follow the same rule for success, rollback, and user messaging
+- Current behavior:
+  - some actions already preserve selection/input and avoid false success when blocked
+  - others still clear state or toast too early because their persistence helper returns after local apply
+- User impact:
+  - the user experience is more trustworthy than before, but not yet perfectly consistent across all Group actions
+- Gap to close:
+  - standardize all Group mutations on one shared "accepted vs rejected" result contract
+
+4. **Blocked-token behavior is still conceptually mixed**
+
+- Optimal flow:
+  - the UI and docs should clearly distinguish:
+    - project-blocked tokens
+    - universal blocked tokens
+- Current behavior:
+  - both concepts still influence what the user sees in Blocked token management, but they are not surfaced distinctly enough in the operator flow
+- User impact:
+  - users can still be unsure whether a token was blocked in this project or blocked globally
+- Gap to close:
+  - show source/scope clearly in the Blocked view and document the distinction more explicitly in the UI itself
+
+5. **Manual blocked-keyword exclusions are still not a clear first-class user flow**
+
+- Optimal flow:
+  - if manual blocked-keyword exclusions are part of the supported Group workflow, the user should have a clear UI entry point for them
+- Current behavior:
+  - the shared persistence model still includes `manual_blocked_keywords`, but the Group workflow does not expose that concept clearly as a normal day-to-day action
+- User impact:
+  - the persistence contract and the visible workflow are still slightly out of alignment
+- Gap to close:
+  - either expose this as a real user-facing action or remove it from operator-facing workflow language and keep it architecture-only
+
+### What is already materially improved
+
+- Background canonical/meta reload no longer has to mean blanket routine-edit freeze.
+- The persistence layer now distinguishes syncing/reloading from true write-unsafe state.
+- Failed optimistic V2 writes are handled more defensively instead of silently leaving local drift behind.
+- Same-browser bulk spam is better contained.
+- Group Auto Merge now uses a more truthful shared-write completion boundary than before.
+
+### Practical expectation for users right now
+
+- Normal shared grouping should be **substantially more stable** than before.
+- Accepted shared edits should appear to collaborators in **near real time** through Firestore listeners.
+- The remaining differences are mostly about:
+  - lock scope still being broader than ideal
+  - some flows still not using the strictest possible shared-ack completion rule
+- So the app is in a meaningfully better state, but this document should not pretend the collaboration model is already at the final ideal in every path.

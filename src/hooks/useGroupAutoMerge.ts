@@ -12,6 +12,7 @@ import {
   resolveGroupAutoMergeSelection,
 } from '../groupAutoMergeEngine';
 import type { GroupMergeRecommendation, GroupedCluster } from '../types';
+import { isAcceptedSharedMutation, type SharedMutationResult } from '../sharedMutation';
 
 interface UseGroupAutoMergeParams {
   groupedClusters: GroupedCluster[];
@@ -22,12 +23,12 @@ interface UseGroupAutoMergeParams {
   groupMergeRecommendationsRef: MutableRefObject<GroupMergeRecommendation[]>;
   groupReviewSettingsRef: RefObject<GroupReviewSettingsRef | null>;
   groupReviewSettingsSnapshot: GroupReviewSettingsData | null;
-  updateGroupMergeRecommendations: (recommendations: GroupMergeRecommendation[]) => void;
+  updateGroupMergeRecommendations: (recommendations: GroupMergeRecommendation[]) => Promise<SharedMutationResult>;
   bulkSet: (data: {
     groupedClusters?: GroupedCluster[];
     approvedGroups?: GroupedCluster[];
     groupMergeRecommendations?: GroupMergeRecommendation[];
-  }) => void;
+  }) => Promise<SharedMutationResult>;
   addToast: (msg: string, type: 'success' | 'info' | 'warning' | 'error') => void;
   logAndToast: (
     action: 'merge',
@@ -244,8 +245,9 @@ export function useGroupAutoMerge({
       );
 
       const persistRecommendations = async () => {
+        const result = await updateGroupMergeRecommendations(nextRecommendations);
+        if (!isAcceptedSharedMutation(result)) return false;
         groupMergeRecommendationsRef.current = nextRecommendations;
-        updateGroupMergeRecommendations(nextRecommendations);
         return flushWithErrorToast('Auto Merge generated recommendations locally, but shared sync failed');
       };
       const persisted = runWithExclusiveOperation
@@ -313,8 +315,9 @@ export function useGroupAutoMerge({
       reviewedAt,
     );
     const persistDismissal = async () => {
+      const result = await updateGroupMergeRecommendations(nextRecommendations);
+      if (!isAcceptedSharedMutation(result)) return false;
       groupMergeRecommendationsRef.current = nextRecommendations;
-      updateGroupMergeRecommendations(nextRecommendations);
       return flushWithErrorToast('Auto Merge dismissal updated locally, but shared sync failed');
     };
     const persisted = runWithExclusiveOperation
@@ -363,14 +366,15 @@ export function useGroupAutoMerge({
     );
 
     const persistApply = async () => {
-      groupedClustersRef.current = nextGrouped;
-      approvedGroupsRef.current = nextApproved;
-      groupMergeRecommendationsRef.current = nextRecommendations;
-      bulkSet({
+      const result = await bulkSet({
         groupedClusters: nextGrouped,
         approvedGroups: nextApproved,
         groupMergeRecommendations: nextRecommendations,
       });
+      if (!isAcceptedSharedMutation(result)) return false;
+      groupedClustersRef.current = nextGrouped;
+      approvedGroupsRef.current = nextApproved;
+      groupMergeRecommendationsRef.current = nextRecommendations;
       return flushWithErrorToast('Auto Merge applied locally, but shared sync failed');
     };
     const persisted = runWithExclusiveOperation

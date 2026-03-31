@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ClusterSummary, GroupedCluster } from '../types';
+import { blockedSharedMutation, SHARED_MUTATION_ACCEPTED } from '../sharedMutation';
 import { useGroupingActions } from './useGroupingActions';
 
 function makeCluster(tokens: string, pageName = 'Alpha'): ClusterSummary {
@@ -23,7 +24,7 @@ function makeCluster(tokens: string, pageName = 'Alpha'): ClusterSummary {
 }
 
 describe('useGroupingActions', () => {
-  it('does not clear state or toast success when grouping is rejected', () => {
+  it('does not clear state or toast success when grouping is rejected', async () => {
     const cluster = makeCluster('alpha');
     const setSelectedClusters = vi.fn();
     const setGroupNameInput = vi.fn();
@@ -48,17 +49,17 @@ describe('useGroupingActions', () => {
         recordGroupingEvent,
         scheduleReReview: vi.fn(),
         hasReviewApi: () => false,
-        addGroupsAndRemovePages: vi.fn(() => false),
-        approveGroup: vi.fn(() => ({ applied: false, group: null })),
-        unapproveGroup: vi.fn(() => ({ applied: false, group: null })),
-        removeFromApproved: vi.fn(() => ({ applied: false, clustersReturned: [] })),
-        ungroupPages: vi.fn(() => ({ applied: false, clustersReturned: [], groupsWithPartialRemoval: [] })),
+        addGroupsAndRemovePages: vi.fn(async () => blockedSharedMutation('permission-denied')),
+        approveGroup: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), group: null })),
+        unapproveGroup: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), group: null })),
+        removeFromApproved: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [] })),
+        ungroupPages: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [], groupsWithPartialRemoval: [] })),
       }),
     );
 
     let applied = true;
-    act(() => {
-      applied = result.current.handleGroupClusters();
+    await act(async () => {
+      applied = await result.current.handleGroupClusters();
     });
 
     expect(applied).toBe(false);
@@ -69,7 +70,7 @@ describe('useGroupingActions', () => {
     expect(logAndToast).not.toHaveBeenCalled();
   });
 
-  it('keeps grouped selections when approve is rejected', () => {
+  it('keeps grouped selections when approve is rejected', async () => {
     const group: GroupedCluster = {
       id: 'group-1',
       groupName: 'Alpha Group',
@@ -98,24 +99,24 @@ describe('useGroupingActions', () => {
         recordGroupingEvent: vi.fn(),
         scheduleReReview: vi.fn(),
         hasReviewApi: () => false,
-        addGroupsAndRemovePages: vi.fn(() => true),
-        approveGroup: vi.fn(() => ({ applied: false, group })),
-        unapproveGroup: vi.fn(() => ({ applied: false, group: null })),
-        removeFromApproved: vi.fn(() => ({ applied: false, clustersReturned: [] })),
-        ungroupPages: vi.fn(() => ({ applied: false, clustersReturned: [], groupsWithPartialRemoval: [] })),
+        addGroupsAndRemovePages: vi.fn(async () => SHARED_MUTATION_ACCEPTED),
+        approveGroup: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), group })),
+        unapproveGroup: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), group: null })),
+        removeFromApproved: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [] })),
+        ungroupPages: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [], groupsWithPartialRemoval: [] })),
       }),
     );
 
     let applied = true;
-    act(() => {
-      applied = result.current.approveSelectedGrouped();
+    await act(async () => {
+      applied = await result.current.approveSelectedGrouped();
     });
 
     expect(applied).toBe(false);
     expect(clearSelections).not.toHaveBeenCalled();
   });
 
-  it('approves all selected groups and clears only the successful selections', () => {
+  it('approves all selected groups and clears only the successful selections', async () => {
     const groupA: GroupedCluster = {
       id: 'group-a',
       groupName: 'Group A',
@@ -136,8 +137,8 @@ describe('useGroupingActions', () => {
     };
     const setSelectedGroups = vi.fn();
     const setSelectedSubClusters = vi.fn();
-    const approveGroup = vi.fn((groupName: string) => ({
-      applied: true,
+    const approveGroup = vi.fn(async (groupName: string) => ({
+      result: SHARED_MUTATION_ACCEPTED,
       group: groupName === 'Group A' ? groupA : groupB,
     }));
 
@@ -158,17 +159,17 @@ describe('useGroupingActions', () => {
         recordGroupingEvent: vi.fn(),
         scheduleReReview: vi.fn(),
         hasReviewApi: () => false,
-        addGroupsAndRemovePages: vi.fn(() => true),
+        addGroupsAndRemovePages: vi.fn(async () => SHARED_MUTATION_ACCEPTED),
         approveGroup,
-        unapproveGroup: vi.fn(() => ({ applied: false, group: null })),
-        removeFromApproved: vi.fn(() => ({ applied: false, clustersReturned: [] })),
-        ungroupPages: vi.fn(() => ({ applied: false, clustersReturned: [], groupsWithPartialRemoval: [] })),
+        unapproveGroup: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), group: null })),
+        removeFromApproved: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [] })),
+        ungroupPages: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [], groupsWithPartialRemoval: [] })),
       }),
     );
 
     let applied = false;
-    act(() => {
-      applied = result.current.approveSelectedGrouped();
+    await act(async () => {
+      applied = await result.current.approveSelectedGrouped();
     });
 
     expect(applied).toBe(true);
@@ -177,7 +178,7 @@ describe('useGroupingActions', () => {
     expect(setSelectedSubClusters).toHaveBeenCalledWith(new Set());
   });
 
-  it('preserves failed approvals in the grouped selection', () => {
+  it('preserves failed approvals in the grouped selection', async () => {
     const groupA: GroupedCluster = {
       id: 'group-a',
       groupName: 'Group A',
@@ -216,20 +217,20 @@ describe('useGroupingActions', () => {
         recordGroupingEvent: vi.fn(),
         scheduleReReview: vi.fn(),
         hasReviewApi: () => false,
-        addGroupsAndRemovePages: vi.fn(() => true),
-        approveGroup: vi.fn((groupName: string) => ({
-          applied: groupName === 'Group A',
+        addGroupsAndRemovePages: vi.fn(async () => SHARED_MUTATION_ACCEPTED),
+        approveGroup: vi.fn(async (groupName: string) => ({
+          result: groupName === 'Group A' ? SHARED_MUTATION_ACCEPTED : blockedSharedMutation('permission-denied'),
           group: groupName === 'Group A' ? groupA : groupB,
         })),
-        unapproveGroup: vi.fn(() => ({ applied: false, group: null })),
-        removeFromApproved: vi.fn(() => ({ applied: false, clustersReturned: [] })),
-        ungroupPages: vi.fn(() => ({ applied: false, clustersReturned: [], groupsWithPartialRemoval: [] })),
+        unapproveGroup: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), group: null })),
+        removeFromApproved: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [] })),
+        ungroupPages: vi.fn(async () => ({ result: blockedSharedMutation('permission-denied'), clustersReturned: [], groupsWithPartialRemoval: [] })),
       }),
     );
 
     let applied = false;
-    act(() => {
-      applied = result.current.approveSelectedGrouped();
+    await act(async () => {
+      applied = await result.current.approveSelectedGrouped();
     });
 
     expect(applied).toBe(true);

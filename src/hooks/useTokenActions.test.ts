@@ -1,20 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useTokenActions } from './useTokenActions';
+import { SHARED_MUTATION_ACCEPTED } from '../sharedMutation';
 
 describe('useTokenActions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('handleUnblockTokens switches to Ungrouped (pages) and Current token sub-tab', () => {
+  it('handleUnblockTokens switches to Ungrouped (pages) and Current token sub-tab', async () => {
     const logAndToast = vi.fn();
     const setSelectedMgmtTokens = vi.fn();
     const setTokenMgmtSubTab = vi.fn();
     const setTokenMgmtPage = vi.fn();
     const switchTab = vi.fn();
-    const blockTokens = vi.fn(() => true);
-    const unblockTokens = vi.fn(() => true);
+    const blockTokens = vi.fn(async () => SHARED_MUTATION_ACCEPTED);
+    const unblockTokens = vi.fn(async () => SHARED_MUTATION_ACCEPTED);
 
     const { result } = renderHook(() =>
       useTokenActions({
@@ -28,8 +29,8 @@ describe('useTokenActions', () => {
       }),
     );
 
-    act(() => {
-      result.current.handleUnblockTokens(['foo']);
+    await act(async () => {
+      await result.current.handleUnblockTokens(['foo']);
     });
 
     expect(unblockTokens).toHaveBeenCalledWith(['foo']);
@@ -40,7 +41,7 @@ describe('useTokenActions', () => {
     expect(logAndToast).toHaveBeenCalled();
   });
 
-  it('handleUnblockTokens no-ops on empty list', () => {
+  it('handleUnblockTokens no-ops on empty list', async () => {
     const switchTab = vi.fn();
     const unblockTokens = vi.fn();
 
@@ -51,13 +52,13 @@ describe('useTokenActions', () => {
         setTokenMgmtSubTab: vi.fn(),
         setTokenMgmtPage: vi.fn(),
         switchTab,
-        blockTokens: vi.fn(() => true),
+        blockTokens: vi.fn(async () => SHARED_MUTATION_ACCEPTED),
         unblockTokens,
       }),
     );
 
-    act(() => {
-      result.current.handleUnblockTokens([]);
+    await act(async () => {
+      await result.current.handleUnblockTokens([]);
     });
 
     expect(unblockTokens).not.toHaveBeenCalled();

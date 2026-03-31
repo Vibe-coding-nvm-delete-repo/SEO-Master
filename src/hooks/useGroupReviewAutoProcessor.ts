@@ -3,12 +3,13 @@ import { processReviewQueue, type ReviewError, type ReviewRequest, type ReviewRe
 import { healReviewingGroups } from '../groupReviewState';
 import type { GroupReviewSettingsRef } from '../GroupReviewSettings';
 import type { GroupedCluster } from '../types';
+import { isAcceptedSharedMutation, type SharedMutationResult } from '../sharedMutation';
 
 interface UseGroupReviewAutoProcessorParams {
   groupedClusters: GroupedCluster[];
   isRoutineSharedEditBlocked: boolean;
   groupReviewSettingsRef: MutableRefObject<GroupReviewSettingsRef | null>;
-  persistenceUpdateGroups: (updater: (groups: GroupedCluster[]) => GroupedCluster[]) => void;
+  persistenceUpdateGroups: (updater: (groups: GroupedCluster[]) => GroupedCluster[]) => Promise<SharedMutationResult>;
   logAndToast: (action: any, details: string, count: number, toastMsg: string, toastType: any) => void;
 }
 
@@ -24,6 +25,13 @@ export function useGroupReviewAutoProcessor({
   const isRoutineSharedEditBlockedRef = useRef(false);
   const reReviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reReviewGroupIds = useRef<Set<string>>(new Set());
+  const persistenceQueueRef = useRef<Promise<SharedMutationResult>>(Promise.resolve({ status: 'accepted' }));
+
+  const queuePersistenceUpdate = useCallback((updater: (groups: GroupedCluster[]) => GroupedCluster[]) => {
+    const next = persistenceQueueRef.current.then(() => persistenceUpdateGroups(updater));
+    persistenceQueueRef.current = next.catch(() => ({ status: 'failed', reason: 'unknown' as const }));
+    return next;
+  }, [persistenceUpdateGroups]);
 
   const scheduleReReview = useCallback((groupIds: string[]) => {
     groupIds.forEach((id) => reReviewGroupIds.current.add(id));
@@ -35,22 +43,24 @@ export function useGroupReviewAutoProcessor({
       if (ids.size === 0) return;
       const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
       if (!hasReviewApi) return;
-      persistenceUpdateGroups((groups) =>
+      void queuePersistenceUpdate((groups) =>
         groups.map((group) =>
           ids.has(group.id) && group.clusters.length > 0
             ? { ...group, reviewStatus: 'pending' as const, reviewMismatchedPages: undefined, reviewReason: undefined }
             : group,
         ),
-      );
-      logAndToast(
-        'qa-review',
-        `Re-reviewing ${ids.size} group${ids.size > 1 ? 's' : ''} after page removal`,
-        ids.size,
-        `QA re-review queued for ${ids.size} group${ids.size > 1 ? 's' : ''}`,
-        'info',
-      );
+      ).then((result) => {
+        if (!isAcceptedSharedMutation(result)) return;
+        logAndToast(
+          'qa-review',
+          `Re-reviewing ${ids.size} group${ids.size > 1 ? 's' : ''} after page removal`,
+          ids.size,
+          `QA re-review queued for ${ids.size} group${ids.size > 1 ? 's' : ''}`,
+          'info',
+        );
+      });
     }, 5000);
-  }, [groupReviewSettingsRef, logAndToast, persistenceUpdateGroups]);
+  }, [groupReviewSettingsRef, logAndToast, queuePersistenceUpdate]);
 
   useEffect(() => {
     if (reviewProcessingRef.current) return;
@@ -65,7 +75,7 @@ export function useGroupReviewAutoProcessor({
     if (!settingsData || !settingsData.apiKey.trim() || !settingsData.selectedModel) return;
 
     reviewProcessingRef.current = true;
-    persistenceUpdateGroups((groups) =>
+    void queuePersistenceUpdate((groups) =>
       groups.map((group) => (group.reviewStatus === 'pending' ? { ...group, reviewStatus: 'reviewing' as const } : group)),
     );
 
@@ -89,7 +99,7 @@ export function useGroupReviewAutoProcessor({
           onReviewing: () => {},
           onResult: (result: ReviewResult) => {
             if (isRoutineSharedEditBlockedRef.current) return;
-            persistenceUpdateGroups((groups) =>
+            void queuePersistenceUpdate((groups) =>
               groups.map((group) =>
                 group.id === result.groupId
                   ? {
@@ -103,23 +113,25 @@ export function useGroupReviewAutoProcessor({
                     }
                   : group,
               ),
-            );
-            const groupName = batchGroups.find((group) => group.id === result.groupId)?.groupName || result.groupId;
-            if (result.status === 'approve') {
-              logAndToast('qa-review', `QA: '${groupName}' - Approved`, 1, `QA: '${groupName}' - Approved`, 'success');
-            } else {
-              logAndToast(
-                'qa-review',
-                `QA: '${groupName}' - Mismatch (${(result.mismatchedPages || []).join(', ')})`,
-                result.mismatchedPages?.length || 1,
-                `QA: '${groupName}' - Mismatch`,
-                'error',
-              );
-            }
+            ).then((mutationResult) => {
+              if (!isAcceptedSharedMutation(mutationResult)) return;
+              const groupName = batchGroups.find((group) => group.id === result.groupId)?.groupName || result.groupId;
+              if (result.status === 'approve') {
+                logAndToast('qa-review', `QA: '${groupName}' - Approved`, 1, `QA: '${groupName}' - Approved`, 'success');
+              } else {
+                logAndToast(
+                  'qa-review',
+                  `QA: '${groupName}' - Mismatch (${(result.mismatchedPages || []).join(', ')})`,
+                  result.mismatchedPages?.length || 1,
+                  `QA: '${groupName}' - Mismatch`,
+                  'error',
+                );
+              }
+            });
           },
           onError: (error: ReviewError) => {
             if (isRoutineSharedEditBlockedRef.current) return;
-            persistenceUpdateGroups((groups) =>
+            void queuePersistenceUpdate((groups) =>
               groups.map((group) =>
                 group.id === error.groupId
                   ? {
@@ -135,9 +147,11 @@ export function useGroupReviewAutoProcessor({
                     }
                   : group,
               ),
-            );
-            const groupName = batchGroups.find((group) => group.id === error.groupId)?.groupName || error.groupId;
-            logAndToast('qa-review', `QA error: '${groupName}' - ${error.error}`, 1, `QA error: '${groupName}'`, 'error');
+            ).then((mutationResult) => {
+              if (!isAcceptedSharedMutation(mutationResult)) return;
+              const groupName = batchGroups.find((group) => group.id === error.groupId)?.groupName || error.groupId;
+              logAndToast('qa-review', `QA error: '${groupName}' - ${error.error}`, 1, `QA error: '${groupName}'`, 'error');
+            });
           },
         },
         controller.signal,
@@ -148,7 +162,7 @@ export function useGroupReviewAutoProcessor({
           return;
         }
         let remaining: GroupedCluster[] = [];
-        persistenceUpdateGroups((groups) => {
+        void queuePersistenceUpdate((groups) => {
           const healed = healReviewingGroups(groups);
           remaining = healed.filter((group) => group.reviewStatus === 'pending');
           if (remaining.length > 0) {
@@ -184,8 +198,8 @@ export function useGroupReviewAutoProcessor({
     if (reviewProcessingRef.current) return;
     if (isRoutineSharedEditBlocked) return;
     if (!groupedClusters.some((group) => group.reviewStatus === 'reviewing')) return;
-    persistenceUpdateGroups(healReviewingGroups);
-  }, [groupedClusters, isRoutineSharedEditBlocked, persistenceUpdateGroups]);
+    void queuePersistenceUpdate(healReviewingGroups);
+  }, [groupedClusters, isRoutineSharedEditBlocked, queuePersistenceUpdate]);
 
   useEffect(() => {
     isRoutineSharedEditBlockedRef.current = isRoutineSharedEditBlocked;

@@ -37,6 +37,14 @@ import {
   createEmptyProjectViewState,
   type ProjectViewState,
 } from './projectWorkspace';
+import {
+  blockedSharedMutation,
+  failedSharedMutation,
+  isAcceptedSharedMutation,
+  SHARED_MUTATION_ACCEPTED,
+  type SharedMutationReason,
+  type SharedMutationResult,
+} from './sharedMutation';
 import { getUniqueClustersToRestore } from './ungroupedRestoration';
 import type {
   ProcessedRow,
@@ -249,30 +257,33 @@ export interface ProjectPersistence extends PersistedState {
   ) => Promise<T | null>;
 
   // Atomic mutations
-  addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => boolean;
-  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => boolean;
-  updateGroups: (updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => void;
-  approveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
-  unapproveGroup: (groupName: string) => { applied: boolean; group: GroupedCluster | null };
+  addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => Promise<SharedMutationResult>;
+  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => Promise<SharedMutationResult>;
+  updateGroups: (
+    updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[],
+    approvedOverride?: GroupedCluster[],
+  ) => Promise<SharedMutationResult>;
+  approveGroup: (groupName: string) => Promise<{ result: SharedMutationResult; group: GroupedCluster | null }>;
+  unapproveGroup: (groupName: string) => Promise<{ result: SharedMutationResult; group: GroupedCluster | null }>;
   removeFromApproved: (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] };
+  ) => Promise<{ result: SharedMutationResult; clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] }>;
   ungroupPages: (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => { applied: boolean; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] };
-  blockTokens: (tokens: string[]) => boolean;
-  unblockTokens: (tokens: string[]) => boolean;
+  ) => Promise<{ result: SharedMutationResult; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] }>;
+  blockTokens: (tokens: string[]) => Promise<SharedMutationResult>;
+  unblockTokens: (tokens: string[]) => Promise<SharedMutationResult>;
   applyMergeCascade: (cascade: {
     results: ProcessedRow[] | null;
     clusterSummary: ClusterSummary[] | null;
     tokenSummary: TokenSummary[] | null;
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
-  }, newRule: TokenMergeRule) => boolean;
+  }, newRule: TokenMergeRule) => Promise<SharedMutationResult>;
   undoMerge: (data: {
     results: ProcessedRow[] | null;
     clusterSummary: ClusterSummary[] | null;
@@ -280,14 +291,14 @@ export interface ProjectPersistence extends PersistedState {
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
     tokenMergeRules: TokenMergeRule[];
-  }) => boolean;
-  updateLabelSections: (sections: LabelSection[]) => void;
-  updateSuggestions: (suggestions: AutoGroupSuggestion[]) => void;
-  updateAutoMergeRecommendations: (recommendations: AutoMergeRecommendation[]) => void;
-  updateGroupMergeRecommendations: (recommendations: GroupMergeRecommendation[]) => void;
-  addActivityEntry: (entry: ActivityLogEntry) => void;
-  clearActivityLog: () => void;
-  bulkSet: (data: Partial<ProjectViewState>) => void;
+  }) => Promise<SharedMutationResult>;
+  updateLabelSections: (sections: LabelSection[]) => Promise<SharedMutationResult>;
+  updateSuggestions: (suggestions: AutoGroupSuggestion[]) => Promise<SharedMutationResult>;
+  updateAutoMergeRecommendations: (recommendations: AutoMergeRecommendation[]) => Promise<SharedMutationResult>;
+  updateGroupMergeRecommendations: (recommendations: GroupMergeRecommendation[]) => Promise<SharedMutationResult>;
+  addActivityEntry: (entry: ActivityLogEntry) => Promise<SharedMutationResult>;
+  clearActivityLog: () => Promise<SharedMutationResult>;
+  bulkSet: (data: Partial<ProjectViewState>) => Promise<SharedMutationResult>;
 
   // Transitional setters (for code not yet migrated to atomic mutations)
   setResults: React.Dispatch<React.SetStateAction<ProcessedRow[] | null>>;
@@ -1290,14 +1301,33 @@ export function useProjectPersistence(options: {
     setActiveOperation(null);
   }, []);
 
+  const getBlockedMutationReason = useCallback((message: string, code?: string): SharedMutationReason => {
+    if (message === 'lock-conflict' || message === 'operation-locked' || message === 'lock-lost') {
+      return 'lock-conflict';
+    }
+    if (message === 'meta-conflict' || message.startsWith('conflict:')) {
+      return 'revision-conflict';
+    }
+    if (code === 'permission-denied') {
+      return 'permission-denied';
+    }
+    if (legacyWritesBlockedRef.current) {
+      return 'schema-too-old';
+    }
+    if (writeBlockReasonRef.current) {
+      return writeBlockReasonRef.current;
+    }
+    return 'unknown';
+  }, []);
+
   const queueV2Write = useCallback((
     label: string,
     task: (context: V2WriteContext) => Promise<void>,
     datasetEpoch?: number | null,
     options?: { allowEpochAdvance?: boolean },
-  ) => {
+  ): Promise<SharedMutationResult> => {
     const queuedProjectId = activeProjectIdRef.current;
-    if (!queuedProjectId) return;
+    if (!queuedProjectId) return Promise.resolve(blockedSharedMutation('unknown'));
     const context: V2WriteContext = {
       projectId: queuedProjectId,
       datasetEpoch: datasetEpoch ?? activeEpochRef.current,
@@ -1305,8 +1335,13 @@ export function useProjectPersistence(options: {
       allowEpochAdvance: options?.allowEpochAdvance,
       pendingDocKeys: new Set<string>(),
     };
+    let resolveResult: (result: SharedMutationResult) => void = () => {};
+    const resultPromise = new Promise<SharedMutationResult>((resolve) => {
+      resolveResult = resolve;
+    });
     pendingV2WriteRef.current = pendingV2WriteRef.current.then(async () => {
       if (!isV2WriteContextCurrent(context)) {
+        resolveResult(blockedSharedMutation('canonical-unresolved'));
         return;
       }
       recordProjectCloudWriteStart();
@@ -1316,6 +1351,7 @@ export function useProjectPersistence(options: {
           lastV2WriteErrorRef.current = null;
         }
         recordProjectFirestoreSaveOk();
+        resolveResult(SHARED_MUTATION_ACCEPTED);
       } catch (err) {
         const message = String((err as Error)?.message || '');
         const isConflict = message.startsWith('conflict:') || message === 'meta-conflict';
@@ -1337,12 +1373,14 @@ export function useProjectPersistence(options: {
         if (isConflict) {
           rollbackConflictedMutation(message, context.datasetEpoch);
           addToastRef.current('Another client changed this project item. The latest shared state was reloaded.', 'warning');
+          resolveResult(blockedSharedMutation('revision-conflict'));
           await reloadCanonicalStateFromCloud();
           return;
         }
         if (isOperationConflict) {
           rollbackPendingDocKeys(context.pendingDocKeys);
           addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
+          resolveResult(blockedSharedMutation('lock-conflict'));
           await reloadCanonicalStateFromCloud();
           return;
         }
@@ -1355,30 +1393,32 @@ export function useProjectPersistence(options: {
           errorInfo.step ? `${label} (${errorInfo.step})` : label,
           err,
         );
+        resolveResult(failedSharedMutation(getBlockedMutationReason(message, errorInfo.code)));
         await reloadCanonicalStateFromCloud();
       }
     });
-  }, [isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation, rollbackPendingDocKeys, setWriteUnsafe]);
+    return resultPromise;
+  }, [getBlockedMutationReason, isV2WriteContextCurrent, reloadCanonicalStateFromCloud, rollbackConflictedMutation, rollbackPendingDocKeys, setWriteUnsafe]);
 
-  const persistCanonicalPayloadV2 = useCallback((payload: ProjectDataPayload, options?: { requireOwnedLock?: boolean }) => {
+  const persistCanonicalPayloadV2 = useCallback((payload: ProjectDataPayload, options?: { requireOwnedLock?: boolean }): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
-    if (!projectId) return;
+    if (!projectId) return Promise.resolve(blockedSharedMutation('unknown'));
     if (
       activeOperationRef.current &&
       activeOperationRef.current.ownerId !== clientIdRef.current &&
       activeOperationRef.current.ownerClientId !== clientIdRef.current &&
       Date.parse(activeOperationRef.current.expiresAt || '0') > Date.now()
     ) {
-        addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
-      return;
+      addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
+      return Promise.resolve(blockedSharedMutation('lock-conflict'));
     }
     if (options?.requireOwnedLock && !hasOwnedActiveOperationLock()) {
       addToastRef.current('This action requires an active project operation lock. Try again from the operation flow.', 'warning');
       lastV2WriteErrorRef.current = new Error('operation-locked');
-      return;
+      return Promise.resolve(blockedSharedMutation('lock-conflict'));
     }
     const expectedEpoch = collabMetaRef.current?.datasetEpoch ?? activeEpochRef.current;
-    queueV2Write('project V2 save', async (context) => {
+    return queueV2Write('project V2 save', async (context) => {
       const meta = collabMetaRef.current;
       if (!meta) {
         throw new Error('meta-conflict');
@@ -1646,11 +1686,12 @@ export function useProjectPersistence(options: {
   }, [checkpointToIDB, getLegacyPersistBlockReason]);
 
   // ── applyViewState: batch-set all 14 fields from a ProjectViewState ──
-  const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]) => {
+  const persistGroupsV2 = useCallback((nextGrouped: GroupedCluster[], nextApproved: GroupedCluster[]): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Group edits')) return false;
-    queueV2Write('project groups save', async (context) => {
+    if (!projectId || !base) return Promise.resolve(blockedSharedMutation('canonical-unresolved'));
+    if (!ensureV2MutationAllowed('Group edits')) return Promise.resolve(blockedSharedMutation(getBlockedMutationReason('', undefined)));
+    return queueV2Write('project groups save', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       const changes = buildGroupDocChanges(
         groupDocsRef.current,
@@ -1673,14 +1714,14 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
-    return true;
-  }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
+  }, [ensureV2MutationAllowed, getBlockedMutationReason, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
-  const persistBlockedTokensV2 = useCallback((nextTokens: Set<string>) => {
+  const persistBlockedTokensV2 = useCallback((nextTokens: Set<string>): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Blocked-token edits')) return;
-    queueV2Write('blocked tokens save', async (context) => {
+    if (!projectId || !base) return Promise.resolve(blockedSharedMutation('canonical-unresolved'));
+    if (!ensureV2MutationAllowed('Blocked-token edits')) return Promise.resolve(blockedSharedMutation(getBlockedMutationReason('', undefined)));
+    return queueV2Write('blocked tokens save', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       const changes = buildBlockedTokenDocChanges(
         blockedTokenDocsRef.current,
@@ -1702,13 +1743,14 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
-  }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
+  }, [ensureV2MutationAllowed, getBlockedMutationReason, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
-  const persistLabelSectionsV2 = useCallback((sections: LabelSection[]) => {
+  const persistLabelSectionsV2 = useCallback((sections: LabelSection[]): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Label edits')) return;
-    queueV2Write('label sections save', async (context) => {
+    if (!projectId || !base) return Promise.resolve(blockedSharedMutation('canonical-unresolved'));
+    if (!ensureV2MutationAllowed('Label edits')) return Promise.resolve(blockedSharedMutation(getBlockedMutationReason('', undefined)));
+    return queueV2Write('label sections save', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       const changes = buildLabelSectionDocChanges(
         labelSectionDocsRef.current,
@@ -1730,13 +1772,14 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
-  }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
+  }, [ensureV2MutationAllowed, getBlockedMutationReason, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
-  const persistTokenMergeRulesV2 = useCallback((rules: TokenMergeRule[]) => {
+  const persistTokenMergeRulesV2 = useCallback((rules: TokenMergeRule[]): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Token merge edits')) return;
-    queueV2Write('token merge rules save', async (context) => {
+    if (!projectId || !base) return Promise.resolve(blockedSharedMutation('canonical-unresolved'));
+    if (!ensureV2MutationAllowed('Token merge edits')) return Promise.resolve(blockedSharedMutation(getBlockedMutationReason('', undefined)));
+    return queueV2Write('token merge rules save', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       const changes = buildTokenMergeRuleDocChanges(
         tokenMergeRuleDocsRef.current,
@@ -1758,7 +1801,7 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
-  }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
+  }, [ensureV2MutationAllowed, getBlockedMutationReason, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
   const persistManualBlockedKeywordsV2 = useCallback((keywords: BlockedKeyword[]) => {
     const projectId = activeProjectIdRef.current;
@@ -1788,11 +1831,12 @@ export function useProjectPersistence(options: {
     }, base.datasetEpoch);
   }, [ensureV2MutationAllowed, isV2WriteContextCurrent, mergeAckedDocs, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache, v2DocKey]);
 
-  const persistActivityLogEntryV2 = useCallback((entry: ActivityLogEntry) => {
+  const persistActivityLogEntryV2 = useCallback((entry: ActivityLogEntry): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Activity-log edits')) return;
-    queueV2Write('activity log append', async (context) => {
+    if (!projectId || !base) return Promise.resolve(blockedSharedMutation('canonical-unresolved'));
+    if (!ensureV2MutationAllowed('Activity-log edits')) return Promise.resolve(blockedSharedMutation(getBlockedMutationReason('', undefined)));
+    return queueV2Write('activity log append', async (context) => {
       const mutationId = createMutationId(clientIdRef.current);
       await appendActivityLogEntry(projectId, entry, clientIdRef.current, base.datasetEpoch, mutationId);
       if (!isV2WriteContextCurrent(context)) return;
@@ -1805,13 +1849,14 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
-  }, [ensureV2MutationAllowed, isV2WriteContextCurrent, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache]);
+  }, [ensureV2MutationAllowed, getBlockedMutationReason, isV2WriteContextCurrent, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache]);
 
-  const replaceActivityLogV2 = useCallback((entries: ActivityLogEntry[]) => {
+  const replaceActivityLogV2 = useCallback((entries: ActivityLogEntry[]): Promise<SharedMutationResult> => {
     const projectId = activeProjectIdRef.current;
     const base = baseSnapshotRef.current;
-    if (!projectId || !base || !ensureV2MutationAllowed('Activity-log edits')) return;
-    queueV2Write('activity log replace', async (context) => {
+    if (!projectId || !base) return Promise.resolve(blockedSharedMutation('canonical-unresolved'));
+    if (!ensureV2MutationAllowed('Activity-log edits')) return Promise.resolve(blockedSharedMutation(getBlockedMutationReason('', undefined)));
+    return queueV2Write('activity log replace', async (context) => {
       await replaceActivityLog(projectId, entries, clientIdRef.current, base.datasetEpoch);
       if (!isV2WriteContextCurrent(context)) return;
       activityLogDocsRef.current = entries.map((entry) => ({
@@ -1826,7 +1871,7 @@ export function useProjectPersistence(options: {
         updateCanonicalCache(payload, collabMetaRef.current);
       }
     }, base.datasetEpoch);
-  }, [ensureV2MutationAllowed, isV2WriteContextCurrent, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache]);
+  }, [ensureV2MutationAllowed, getBlockedMutationReason, isV2WriteContextCurrent, queueV2Write, recomposeFromCanonicalRefs, updateCanonicalCache]);
 
   // ── Project lifecycle ─────────────────────────────────────────────────
 
@@ -2541,19 +2586,20 @@ export function useProjectPersistence(options: {
 
   // ── Atomic mutation functions ─────────────────────────────────────────
 
-  const addGroupsAndRemovePages = useCallback((newGroups: GroupedCluster[], removedTokens: Set<string>) => {
+  const addGroupsAndRemovePages = useCallback(async (newGroups: GroupedCluster[], removedTokens: Set<string>): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
       const s = latest.current;
       const nextGrouped = [...s.groupedClusters, ...newGroups];
       const nextClusters = s.clusterSummary?.filter(c => !removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
-      if (!persistGroupsV2(nextGrouped, s.approvedGroups)) return false;
+      const result = await persistGroupsV2(nextGrouped, s.approvedGroups);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({
         groupedClusters: nextGrouped,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      return true;
+      return result;
     }
     mutateAndSave(s => {
       const nextGrouped = [...s.groupedClusters, ...newGroups];
@@ -2561,22 +2607,23 @@ export function useProjectPersistence(options: {
       const nextResults = s.results?.filter(r => !removedTokens.has(r.tokens)) || null;
       return { groupedClusters: nextGrouped, clusterSummary: nextClusters, results: nextResults };
     });
-    return true;
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const mergeGroupsByName = useCallback((opts: MergeGroupsByNameOpts) => {
+  const mergeGroupsByName = useCallback(async (opts: MergeGroupsByNameOpts): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
       const s = latest.current;
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
       const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
-      if (!persistGroupsV2(merged, s.approvedGroups)) return false;
+      const result = await persistGroupsV2(merged, s.approvedGroups);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({
         groupedClusters: merged,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      return true;
+      return result;
     }
     mutateAndSave(s => {
       const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
@@ -2584,22 +2631,26 @@ export function useProjectPersistence(options: {
       const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
       return { groupedClusters: merged, clusterSummary: nextClusters, results: nextResults };
     });
-    return true;
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const updateGroups = useCallback((updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[], approvedOverride?: GroupedCluster[]) => {
+  const updateGroups = useCallback(async (
+    updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[],
+    approvedOverride?: GroupedCluster[],
+  ): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
       const s = latest.current;
       const nextGrouped = typeof updaterOrValue === 'function'
         ? updaterOrValue(s.groupedClusters)
         : updaterOrValue;
       const nextApproved = approvedOverride !== undefined ? approvedOverride : s.approvedGroups;
-      if (!persistGroupsV2(nextGrouped, nextApproved)) return;
+      const result = await persistGroupsV2(nextGrouped, nextApproved);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({
         groupedClusters: nextGrouped,
         approvedGroups: nextApproved,
       }, { checkpoint: true });
-      return;
+      return result;
     }
     mutateAndSave(s => {
       const nextGrouped = typeof updaterOrValue === 'function'
@@ -2609,43 +2660,46 @@ export function useProjectPersistence(options: {
       if (approvedOverride !== undefined) changes.approvedGroups = approvedOverride;
       return changes;
     });
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const approveGroup = useCallback((groupName: string): { applied: boolean; group: GroupedCluster | null } => {
+  const approveGroup = useCallback(async (groupName: string): Promise<{ result: SharedMutationResult; group: GroupedCluster | null }> => {
     const s = latest.current;
     const group = s.groupedClusters.find(g => g.groupName === groupName);
-    if (!group) return { applied: false, group: null };
+    if (!group) return { result: blockedSharedMutation('unknown'), group: null };
     const nextGrouped = s.groupedClusters.filter(g => g.groupName !== groupName);
     const nextApproved = [...s.approvedGroups, group];
     if (storageModeRef.current === 'v2') {
-      if (!persistGroupsV2(nextGrouped, nextApproved)) return { applied: false, group };
+      const result = await persistGroupsV2(nextGrouped, nextApproved);
+      if (!isAcceptedSharedMutation(result)) return { result, group };
       applyLocalChanges({ groupedClusters: nextGrouped, approvedGroups: nextApproved }, { checkpoint: true });
-      return { applied: true, group };
+      return { result, group };
     }
     mutateAndSave(() => ({ groupedClusters: nextGrouped, approvedGroups: nextApproved }));
-    return { applied: true, group };
+    return { result: SHARED_MUTATION_ACCEPTED, group };
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const unapproveGroup = useCallback((groupName: string): { applied: boolean; group: GroupedCluster | null } => {
+  const unapproveGroup = useCallback(async (groupName: string): Promise<{ result: SharedMutationResult; group: GroupedCluster | null }> => {
     const s = latest.current;
     const group = s.approvedGroups.find(g => g.groupName === groupName);
-    if (!group) return { applied: false, group: null };
+    if (!group) return { result: blockedSharedMutation('unknown'), group: null };
     const nextApproved = s.approvedGroups.filter(g => g.groupName !== groupName);
     const nextGrouped = [...s.groupedClusters, group];
     if (storageModeRef.current === 'v2') {
-      if (!persistGroupsV2(nextGrouped, nextApproved)) return { applied: false, group };
+      const result = await persistGroupsV2(nextGrouped, nextApproved);
+      if (!isAcceptedSharedMutation(result)) return { result, group };
       applyLocalChanges({ approvedGroups: nextApproved, groupedClusters: nextGrouped }, { checkpoint: true });
-      return { applied: true, group };
+      return { result, group };
     }
     mutateAndSave(() => ({ approvedGroups: nextApproved, groupedClusters: nextGrouped }));
-    return { applied: true, group };
+    return { result: SHARED_MUTATION_ACCEPTED, group };
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const removeFromApproved = useCallback((
+  const removeFromApproved = useCallback(async (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => {
+  ): Promise<{ result: SharedMutationResult; clustersReturned: ClusterSummary[]; groupsReturned: GroupedCluster[] }> => {
     const s = latest.current;
     let newApproved = [...s.approvedGroups];
     const clustersToReturn: ClusterSummary[] = [];
@@ -2703,8 +2757,9 @@ export function useProjectPersistence(options: {
     }
 
     if (storageModeRef.current === 'v2') {
-      if (!persistGroupsV2(nextGrouped, newApproved)) {
-        return { applied: false, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+      const result = await persistGroupsV2(nextGrouped, newApproved);
+      if (!isAcceptedSharedMutation(result)) {
+        return { result, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
       }
       applyLocalChanges({
         approvedGroups: newApproved,
@@ -2712,7 +2767,7 @@ export function useProjectPersistence(options: {
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      return { applied: true, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+      return { result, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
     }
 
     mutateAndSave(() => ({
@@ -2722,14 +2777,14 @@ export function useProjectPersistence(options: {
       results: nextResults,
     }));
 
-    return { applied: true, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
+    return { result: SHARED_MUTATION_ACCEPTED, clustersReturned: clustersToReturn, groupsReturned: groupsToReturn };
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const ungroupPages = useCallback((
+  const ungroupPages = useCallback(async (
     groupIds: Set<string>,
     subKeys: Set<string>,
     recalc: RecalcFn,
-  ) => {
+  ): Promise<{ result: SharedMutationResult; clustersReturned: ClusterSummary[]; groupsWithPartialRemoval: string[] }> => {
     const s = latest.current;
     let newGrouped = [...s.groupedClusters];
     const clustersToReturn: ClusterSummary[] = [];
@@ -2782,15 +2837,16 @@ export function useProjectPersistence(options: {
     }
 
     if (storageModeRef.current === 'v2') {
-      if (!persistGroupsV2(newGrouped, s.approvedGroups)) {
-        return { applied: false, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+      const result = await persistGroupsV2(newGrouped, s.approvedGroups);
+      if (!isAcceptedSharedMutation(result)) {
+        return { result, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
       }
       applyLocalChanges({
         groupedClusters: newGrouped,
         clusterSummary: nextClusters,
         results: nextResults,
       }, { checkpoint: true });
-      return { applied: true, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+      return { result, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
     }
 
     mutateAndSave(() => ({
@@ -2799,54 +2855,56 @@ export function useProjectPersistence(options: {
       results: nextResults,
     }));
 
-    return { applied: true, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
+    return { result: SHARED_MUTATION_ACCEPTED, clustersReturned: clustersToReturn, groupsWithPartialRemoval };
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const blockTokens = useCallback((tokens: string[]) => {
-    if (tokens.length === 0) return false;
+  const blockTokens = useCallback(async (tokens: string[]): Promise<SharedMutationResult> => {
+    if (tokens.length === 0) return blockedSharedMutation('unknown');
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Blocked-token edits')) return false;
+      if (!ensureV2MutationAllowed('Blocked-token edits')) return blockedSharedMutation(getBlockedMutationReason('', undefined));
       const next = new Set(latest.current.blockedTokens);
       tokens.forEach(t => next.add(t));
+      const result = await persistBlockedTokensV2(next);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({ blockedTokens: next }, { checkpoint: true });
-      persistBlockedTokensV2(next);
-      return true;
+      return result;
     }
     mutateAndSave(s => {
       const next = new Set(s.blockedTokens);
       tokens.forEach(t => next.add(t));
       return { blockedTokens: next };
     });
-    return true;
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistBlockedTokensV2]);
+    return SHARED_MUTATION_ACCEPTED;
+  }, [applyLocalChanges, ensureV2MutationAllowed, getBlockedMutationReason, mutateAndSave, persistBlockedTokensV2]);
 
-  const unblockTokens = useCallback((tokens: string[]) => {
-    if (tokens.length === 0) return false;
+  const unblockTokens = useCallback(async (tokens: string[]): Promise<SharedMutationResult> => {
+    if (tokens.length === 0) return blockedSharedMutation('unknown');
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Blocked-token edits')) return false;
+      if (!ensureV2MutationAllowed('Blocked-token edits')) return blockedSharedMutation(getBlockedMutationReason('', undefined));
       const next = new Set(latest.current.blockedTokens);
       tokens.forEach(t => next.delete(t));
+      const result = await persistBlockedTokensV2(next);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({ blockedTokens: next }, { checkpoint: true });
-      persistBlockedTokensV2(next);
-      return true;
+      return result;
     }
     mutateAndSave(s => {
       const next = new Set(s.blockedTokens);
       tokens.forEach(t => next.delete(t));
       return { blockedTokens: next };
     });
-    return true;
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistBlockedTokensV2]);
+    return SHARED_MUTATION_ACCEPTED;
+  }, [applyLocalChanges, ensureV2MutationAllowed, getBlockedMutationReason, mutateAndSave, persistBlockedTokensV2]);
 
-  const applyMergeCascade = useCallback((cascade: {
+  const applyMergeCascade = useCallback(async (cascade: {
     results: ProcessedRow[] | null;
     clusterSummary: ClusterSummary[] | null;
     tokenSummary: TokenSummary[] | null;
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
-  }, newRule: TokenMergeRule) => {
+  }, newRule: TokenMergeRule): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureOwnedBulkMutationAllowed('Token merge edits')) return false;
+      if (!ensureOwnedBulkMutationAllowed('Token merge edits')) return blockedSharedMutation('lock-conflict');
       const payload = buildPayload({
         results: cascade.results,
         clusterSummary: cascade.clusterSummary,
@@ -2855,9 +2913,10 @@ export function useProjectPersistence(options: {
         approvedGroups: cascade.approvedGroups,
         tokenMergeRules: [...latest.current.tokenMergeRules, newRule],
       });
+      const result = await persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
+      if (!isAcceptedSharedMutation(result)) return result;
       applyViewState(toProjectViewState(payload));
-      persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return true;
+      return result;
     }
     mutateAndSave(s => ({
       results: cascade.results,
@@ -2867,19 +2926,19 @@ export function useProjectPersistence(options: {
       approvedGroups: cascade.approvedGroups,
       tokenMergeRules: [...s.tokenMergeRules, newRule],
     }));
-    return true;
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
-  const undoMerge = useCallback((data: {
+  const undoMerge = useCallback(async (data: {
     results: ProcessedRow[] | null;
     clusterSummary: ClusterSummary[] | null;
     tokenSummary: TokenSummary[] | null;
     groupedClusters: GroupedCluster[];
     approvedGroups: GroupedCluster[];
     tokenMergeRules: TokenMergeRule[];
-  }) => {
+  }): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureOwnedBulkMutationAllowed('Token merge edits')) return false;
+      if (!ensureOwnedBulkMutationAllowed('Token merge edits')) return blockedSharedMutation('lock-conflict');
       const payload = buildPayload({
         results: data.results,
         clusterSummary: data.clusterSummary,
@@ -2888,9 +2947,10 @@ export function useProjectPersistence(options: {
         approvedGroups: data.approvedGroups,
         tokenMergeRules: data.tokenMergeRules,
       });
+      const result = await persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
+      if (!isAcceptedSharedMutation(result)) return result;
       applyViewState(toProjectViewState(payload));
-      persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return true;
+      return result;
     }
     mutateAndSave(() => ({
       results: data.results,
@@ -2900,52 +2960,59 @@ export function useProjectPersistence(options: {
       approvedGroups: data.approvedGroups,
       tokenMergeRules: data.tokenMergeRules,
     }));
-    return true;
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
-  const updateLabelSections = useCallback((sections: LabelSection[]) => {
+  const updateLabelSections = useCallback(async (sections: LabelSection[]): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Label edits')) return;
+      if (!ensureV2MutationAllowed('Label edits')) return blockedSharedMutation(getBlockedMutationReason('', undefined));
+      const result = await persistLabelSectionsV2(sections);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({ labelSections: sections }, { checkpoint: true });
-      persistLabelSectionsV2(sections);
-      return;
+      return result;
     }
     mutateAndSave(() => ({ labelSections: sections }));
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistLabelSectionsV2]);
+    return SHARED_MUTATION_ACCEPTED;
+  }, [applyLocalChanges, ensureV2MutationAllowed, getBlockedMutationReason, mutateAndSave, persistLabelSectionsV2]);
 
-  const updateAutoMergeRecommendations = useCallback((recommendations: AutoMergeRecommendation[]) => {
+  const updateAutoMergeRecommendations = useCallback(async (recommendations: AutoMergeRecommendation[]): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return blockedSharedMutation('lock-conflict');
       const payload = buildPayload({ autoMergeRecommendations: recommendations });
+      const result = await persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
+      if (!isAcceptedSharedMutation(result)) return result;
       applyViewState(toProjectViewState(payload));
-      persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return;
+      return result;
     }
     mutateAndSave(() => ({ autoMergeRecommendations: recommendations }));
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
-  const updateGroupMergeRecommendations = useCallback((recommendations: GroupMergeRecommendation[]) => {
+  const updateGroupMergeRecommendations = useCallback(async (recommendations: GroupMergeRecommendation[]): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return blockedSharedMutation('lock-conflict');
       const payload = buildPayload({ groupMergeRecommendations: recommendations });
+      const result = await persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
+      if (!isAcceptedSharedMutation(result)) return result;
       applyViewState(toProjectViewState(payload));
-      persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return;
+      return result;
     }
     mutateAndSave(() => ({ groupMergeRecommendations: recommendations }));
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, mutateAndSave, persistCanonicalPayloadV2]);
 
   // Debounced suggestion-only persistence — onSuggestionsChange can still fire very
   // often; main mutations now coalesce in flushPersistQueue. Suggestions alone use
   // a 2s idle timer so we do not schedule redundant flushes on every keystroke.
   const suggestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const updateSuggestions = useCallback((suggestions: AutoGroupSuggestion[]) => {
+  const updateSuggestions = useCallback(async (suggestions: AutoGroupSuggestion[]): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return blockedSharedMutation('lock-conflict');
       const payload = buildPayload({ autoGroupSuggestions: suggestions });
+      const result = await persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
+      if (!isAcceptedSharedMutation(result)) return result;
       applyViewState(toProjectViewState(payload));
-      persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return;
+      return result;
     }
     // Update state + ref immediately (UI stays responsive)
     latest.current = { ...latest.current, autoGroupSuggestions: suggestions };
@@ -2966,33 +3033,38 @@ export function useProjectPersistence(options: {
       suggestionTimerRef.current = null;
       enqueueSave('suggestions-debounce', traceId);
     }, 2000);
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyViewState, buildPayload, checkpointToIDB, enqueueSave, ensureOwnedBulkMutationAllowed, persistCanonicalPayloadV2]);
 
-  const addActivityEntry = useCallback((entry: ActivityLogEntry) => {
+  const addActivityEntry = useCallback(async (entry: ActivityLogEntry): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Activity-log edits')) return;
+      if (!ensureV2MutationAllowed('Activity-log edits')) return blockedSharedMutation(getBlockedMutationReason('', undefined));
       const next = [entry, ...latest.current.activityLog].slice(0, 500);
+      const result = await persistActivityLogEntryV2(entry);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({ activityLog: next }, { checkpoint: true });
-      persistActivityLogEntryV2(entry);
-      return;
+      return result;
     }
     mutateAndSave(s => {
       const next = [entry, ...s.activityLog];
       return { activityLog: next.length > 500 ? next.slice(0, 500) : next };
     });
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, persistActivityLogEntryV2]);
+    return SHARED_MUTATION_ACCEPTED;
+  }, [applyLocalChanges, ensureV2MutationAllowed, getBlockedMutationReason, mutateAndSave, persistActivityLogEntryV2]);
 
-  const clearActivityLog = useCallback(() => {
+  const clearActivityLog = useCallback(async (): Promise<SharedMutationResult> => {
     if (storageModeRef.current === 'v2') {
-      if (!ensureV2MutationAllowed('Activity-log edits')) return;
+      if (!ensureV2MutationAllowed('Activity-log edits')) return blockedSharedMutation(getBlockedMutationReason('', undefined));
+      const result = await replaceActivityLogV2([]);
+      if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({ activityLog: [] }, { checkpoint: true });
-      replaceActivityLogV2([]);
-      return;
+      return result;
     }
     mutateAndSave(() => ({ activityLog: [] }));
-  }, [applyLocalChanges, ensureV2MutationAllowed, mutateAndSave, replaceActivityLogV2]);
+    return SHARED_MUTATION_ACCEPTED;
+  }, [applyLocalChanges, ensureV2MutationAllowed, getBlockedMutationReason, mutateAndSave, replaceActivityLogV2]);
 
-  const bulkSet = useCallback((data: Partial<ProjectViewState>) => {
+  const bulkSet = useCallback(async (data: Partial<ProjectViewState>): Promise<SharedMutationResult> => {
     const changes: Partial<PersistedState> = {};
     if ('results' in data) changes.results = data.results!;
     if ('clusterSummary' in data) changes.clusterSummary = data.clusterSummary!;
@@ -3030,14 +3102,16 @@ export function useProjectPersistence(options: {
       }
     }
     if (storageModeRef.current === 'v2') {
-      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return;
+      if (!ensureOwnedBulkMutationAllowed('Bulk project edits')) return blockedSharedMutation('lock-conflict');
       const payload = buildPayload(changes);
       const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
+      const result = await persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
+      if (!isAcceptedSharedMutation(result)) return result;
       applyViewState(toProjectViewState(payload, project));
-      persistCanonicalPayloadV2(payload, { requireOwnedLock: true });
-      return;
+      return result;
     }
     mutateAndSave(() => changes);
+    return SHARED_MUTATION_ACCEPTED;
   }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
