@@ -170,6 +170,20 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 - `src/hooks/useCsvImport.test.tsx` now verifies that CSV import stays in the processing state until the async shared save resolves and that blocked shared persistence does not switch the UI to the imported Pages view.
 - `src/GroupDataView.tsx` now only advertises `Shift+1` where the shortcut actually exists, so the UI no longer promises a keyboard path that the handler intentionally does not support.
 
+### [x] 1.13 Shift+1 silently no-ops from search/filter inputs
+
+**Date fixed:** 2026-04-01
+
+**Files:** `src/groupingShortcutTargets.ts`, `src/GroupDataView.tsx`, `src/TableHeader.tsx`, `src/hooks/useGlobalGroupingShortcuts.ts`, `src/hooks/useGlobalGroupingShortcuts.test.tsx`, `FEATURES.md`
+
+**Root cause:** `src/hooks/useGlobalGroupingShortcuts.ts` treated every editable target as either globally allowed or globally blocked, instead of distinguishing between dataset-defining filter/search controls and arbitrary editors. That meant `Shift+1` could silently no-op when focus stayed inside the pages/token-management filters that define the visible list, while the same hook also let `Tab` grouping shortcuts fire during input focus. The bug lived in the shared shortcut boundary, not in Auto Group itself.
+
+**Instances fixed:**
+- `src/hooks/useGlobalGroupingShortcuts.ts` now only lets `Shift+1` bypass editable-target blocking when the focused control explicitly opts into grouping shortcuts, and it blocks `Tab` grouping shortcuts while typing.
+- `src/GroupDataView.tsx` now marks the shared top-bar search input as an allowed shortcut origin because it directly defines the visible dataset for Pages and Token Management.
+- `src/TableHeader.tsx` now marks numeric/text table-filter inputs as allowed shortcut origins for the same filtered-list workflow.
+- `src/hooks/useGlobalGroupingShortcuts.test.tsx` now covers opted-in inputs, ordinary editors, token auto-merge, and `Tab` navigation regressions.
+
 ### [x] 1.12 Shared V2 reloads could still accept stale old-epoch edits after `collab/meta` advanced
 **Date fixed:** 2026-04-01
 **Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FEATURES.md`

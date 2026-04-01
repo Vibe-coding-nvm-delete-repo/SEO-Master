@@ -5,6 +5,7 @@ import GroupReviewSettings from './GroupReviewSettings';
 import MergeConfirmModal from './MergeConfirmModal';
 import AutoGroupPanel from './AutoGroupPanel';
 import GroupAutoMergePanel from './GroupAutoMergePanel';
+import { groupingShortcutTargetProps } from './groupingShortcutTargets';
 import ClusterRowView from './ClusterRow';
 import GroupedClusterRowView from './GroupedClusterRow';
 import InlineHelpHint from './InlineHelpHint';
@@ -852,6 +853,7 @@ export default function GroupDataView(props: any) {
                     <input
                       type="text"
                       placeholder="Search..."
+                      {...groupingShortcutTargetProps}
                       value={searchQuery}
                       onChange={(e) => { setSearchImmediate(e.target.value); setCurrentPage(1); }}
                       className="w-full pl-8 pr-3 py-1.5 text-xs border border-zinc-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 transition-shadow bg-white"

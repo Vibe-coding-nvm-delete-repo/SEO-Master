@@ -1,15 +1,16 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
-import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
-import type { ColumnDef } from './tableConstants';
-import { CELL } from './tableConstants';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react';
 import LabelFilterDropdown from './LabelFilterDropdown';
-import { clampColWidth, colElementStyle, sanitizeColumnWidths } from './tableColumnWidths';
-import { useToast } from './ToastContext';
 import {
   appSettingsIdbKey,
   loadCachedState,
   persistLocalCachedState,
 } from './appSettingsPersistence';
+import { groupingShortcutTargetProps } from './groupingShortcutTargets';
+import type { ColumnDef } from './tableConstants';
+import { CELL } from './tableConstants';
+import { clampColWidth, colElementStyle, sanitizeColumnWidths } from './tableColumnWidths';
+import { useToast } from './ToastContext';
 
 export interface FilterBag {
   minLen: string; setMinLen: (v: string) => void;
@@ -36,39 +37,73 @@ interface TableHeaderProps {
   onCheckAll?: (checked: boolean) => void;
   sortKey: string | null;
   sortDirection: 'asc' | 'desc';
-  sortStack?: Array<{key: string, direction: 'asc' | 'desc'}>; // Multi-sort support
+  sortStack?: Array<{ key: string; direction: 'asc' | 'desc' }>;
   onSort: (key: string, additive?: boolean) => void;
   filters: FilterBag;
   setCurrentPage: (page: number) => void;
 }
 
-/** Legacy Firestore doc id — only used as IDB key segment; widths are per-browser, not cloud-synced. */
+/** Legacy Firestore doc id - only used as IDB key segment; widths are per-browser, not cloud-synced. */
 const WIDTHS_DOC = 'table_column_widths';
 
-// Map filterKey → [getter, setter] pairs in FilterBag
-const getFilterPair = (filters: FilterBag, filterKey: string): { min: string; setMin: (v: string) => void; max: string; setMax: (v: string) => void } | null => {
+const getFilterPair = (
+  filters: FilterBag,
+  filterKey: string,
+): { min: string; setMin: (v: string) => void; max: string; setMax: (v: string) => void } | null => {
   switch (filterKey) {
-    case 'len': return { min: filters.minLen, setMin: filters.setMinLen, max: filters.maxLen, setMax: filters.setMaxLen };
-    case 'kws': case 'pages': return { min: filters.minKwInCluster, setMin: filters.setMinKwInCluster, max: filters.maxKwInCluster, setMax: filters.setMaxKwInCluster };
-    case 'vol': return { min: filters.minVolume, setMin: filters.setMinVolume, max: filters.maxVolume, setMax: filters.setMaxVolume };
-    case 'kd': return { min: filters.minKd, setMin: filters.setMinKd, max: filters.maxKd, setMax: filters.setMaxKd };
-    case 'kwRating': return { min: filters.minKwRating, setMin: filters.setMinKwRating, max: filters.maxKwRating, setMax: filters.setMaxKwRating };
-    default: return null;
+    case 'len':
+      return { min: filters.minLen, setMin: filters.setMinLen, max: filters.maxLen, setMax: filters.setMaxLen };
+    case 'kws':
+    case 'pages':
+      return {
+        min: filters.minKwInCluster,
+        setMin: filters.setMinKwInCluster,
+        max: filters.maxKwInCluster,
+        setMax: filters.setMaxKwInCluster,
+      };
+    case 'vol':
+      return { min: filters.minVolume, setMin: filters.setMinVolume, max: filters.maxVolume, setMax: filters.setMaxVolume };
+    case 'kd':
+      return { min: filters.minKd, setMin: filters.setMinKd, max: filters.maxKd, setMax: filters.setMaxKd };
+    case 'kwRating':
+      return {
+        min: filters.minKwRating,
+        setMin: filters.setMinKwRating,
+        max: filters.maxKwRating,
+        setMax: filters.setMaxKwRating,
+      };
+    default:
+      return null;
   }
 };
 
-const getTextFilter = (filters: FilterBag, filterKey: string): { value: string; setValue: (v: string) => void } | null => {
+const getTextFilter = (
+  filters: FilterBag,
+  filterKey: string,
+): { value: string; setValue: (v: string) => void } | null => {
   switch (filterKey) {
-    case 'city': return { value: filters.filterCity, setValue: filters.setFilterCity };
-    case 'state': return { value: filters.filterState, setValue: filters.setFilterState };
-    default: return null;
+    case 'city':
+      return { value: filters.filterCity, setValue: filters.setFilterCity };
+    case 'state':
+      return { value: filters.filterState, setValue: filters.setFilterState };
+    default:
+      return null;
   }
 };
 
-const SortIcon = ({ columnKey, sortKey, sortDirection, sortStack }: { columnKey: string; sortKey: string | null; sortDirection: 'asc' | 'desc'; sortStack?: Array<{key: string, direction: 'asc' | 'desc'}> }) => {
-  // Multi-sort: show priority number if in sort stack
+const SortIcon = ({
+  columnKey,
+  sortKey,
+  sortDirection,
+  sortStack,
+}: {
+  columnKey: string;
+  sortKey: string | null;
+  sortDirection: 'asc' | 'desc';
+  sortStack?: Array<{ key: string; direction: 'asc' | 'desc' }>;
+}) => {
   if (sortStack && sortStack.length > 1) {
-    const idx = sortStack.findIndex(s => s.key === columnKey);
+    const idx = sortStack.findIndex((entry) => entry.key === columnKey);
     if (idx >= 0) {
       const dir = sortStack[idx].direction;
       return (
@@ -80,15 +115,26 @@ const SortIcon = ({ columnKey, sortKey, sortDirection, sortStack }: { columnKey:
     }
     return <ArrowUpDown className="w-3.5 h-3.5 text-zinc-400" />;
   }
-  // Single sort fallback
+
   if (sortKey !== columnKey) return <ArrowUpDown className="w-3.5 h-3.5 text-zinc-400" />;
-  return sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-indigo-600" /> : <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />;
+  return sortDirection === 'asc'
+    ? <ArrowUp className="w-3.5 h-3.5 text-indigo-600" />
+    : <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />;
 };
 
-const hasFilters = (columns: ColumnDef[]) => columns.some(c => c.filterType && c.filterType !== 'none');
+const hasFilters = (columns: ColumnDef[]) => columns.some((column) => column.filterType && column.filterType !== 'none');
 
 const TableHeader = React.memo(({
-  columns, showCheckbox, allChecked, onCheckAll, sortKey, sortDirection, sortStack, onSort, filters, setCurrentPage,
+  columns,
+  showCheckbox,
+  allChecked,
+  onCheckAll,
+  sortKey,
+  sortDirection,
+  sortStack,
+  onSort,
+  filters,
+  setCurrentPage,
 }: TableHeaderProps) => {
   const { addToast } = useToast();
   const showFilterRow = hasFilters(columns);
@@ -143,11 +189,11 @@ const TableHeader = React.memo(({
     dragRef.current = { colKey, startX: e.clientX, startWidth };
 
     const applyPendingWidth = () => {
-      const p = pendingResizeRef.current;
-      if (!p) return;
-      setColWidths(prev => {
-        if (prev[p.colKey] === p.width) return prev;
-        const next = { ...prev, [p.colKey]: p.width };
+      const pending = pendingResizeRef.current;
+      if (!pending) return;
+      setColWidths((prev) => {
+        if (prev[pending.colKey] === pending.width) return prev;
+        const next = { ...prev, [pending.colKey]: pending.width };
         colWidthsRef.current = next;
         return next;
       });
@@ -157,8 +203,7 @@ const TableHeader = React.memo(({
       if (!dragRef.current) return;
       const diff = ev.clientX - dragRef.current.startX;
       const newWidth = clampColWidth(dragRef.current.startWidth + diff);
-      const colKey = dragRef.current.colKey;
-      pendingResizeRef.current = { colKey, width: newWidth };
+      pendingResizeRef.current = { colKey: dragRef.current.colKey, width: newWidth };
       if (rafResizeRef.current != null) return;
       rafResizeRef.current = requestAnimationFrame(() => {
         rafResizeRef.current = null;
@@ -199,12 +244,11 @@ const TableHeader = React.memo(({
     <>
       <colgroup>
         {showCheckbox && <col style={checkboxColStyle} />}
-        {columns.map(col => (
-          <col key={col.key} style={colElementStyle(col, colWidths)} />
+        {columns.map((column) => (
+          <col key={column.key} style={colElementStyle(column, colWidths)} />
         ))}
       </colgroup>
       <thead className="bg-zinc-50 text-zinc-500 font-medium sticky top-0 z-10 shadow-[0_1px_0_0_#e4e4e7]">
-        {/* Header row */}
         <tr>
           {showCheckbox && (
             <th className={`${CELL.headerBase} ${CELL.headerNormal} w-12 text-center`} rowSpan={showFilterRow ? 2 : 1}>
@@ -216,27 +260,33 @@ const TableHeader = React.memo(({
               />
             </th>
           )}
-          {columns.map(col => {
-            const isSortable = !!col.sortKey;
-            const isCompact = col.textSize === 'text-xs';
-            const alignCls = col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left';
+          {columns.map((column) => {
+            const isSortable = !!column.sortKey;
+            const isCompact = column.textSize === 'text-xs';
+            const alignCls = column.align === 'right' ? 'text-right' : column.align === 'center' ? 'text-center' : 'text-left';
             const padCls = isCompact ? CELL.headerCompact : CELL.headerNormal;
             const sortCls = isSortable ? CELL.headerSortable : '';
 
             return (
               <th
-                key={col.key}
-                ref={(el) => { if (el) thRefs.current.set(col.key, el); else thRefs.current.delete(col.key); }}
-                className={`${CELL.headerBase} ${padCls} ${alignCls} ${sortCls} ${col.textSize || ''} relative box-border min-w-0`}
-                onClick={isSortable ? (e) => onSort(col.sortKey!, e.shiftKey) : undefined}
+                key={column.key}
+                ref={(el) => { if (el) thRefs.current.set(column.key, el); else thRefs.current.delete(column.key); }}
+                className={`${CELL.headerBase} ${padCls} ${alignCls} ${sortCls} ${column.textSize || ''} relative box-border min-w-0`}
+                onClick={isSortable ? (e) => onSort(column.sortKey!, e.shiftKey) : undefined}
               >
-                <div className={`flex items-center min-w-0 ${col.align === 'right' ? 'justify-end' : col.align === 'center' ? 'justify-center' : ''} gap-1`}>
-                  {col.label}
-                  {isSortable && <SortIcon columnKey={col.sortKey!} sortKey={sortKey} sortDirection={sortDirection} sortStack={sortStack} />}
+                <div className={`flex items-center min-w-0 ${column.align === 'right' ? 'justify-end' : column.align === 'center' ? 'justify-center' : ''} gap-1`}>
+                  {column.label}
+                  {isSortable && (
+                    <SortIcon
+                      columnKey={column.sortKey!}
+                      sortKey={sortKey}
+                      sortDirection={sortDirection}
+                      sortStack={sortStack}
+                    />
+                  )}
                 </div>
-                {/* Resize handle — right edge of header */}
                 <div
-                  onMouseDown={(e) => onMouseDown(e, col.key)}
+                  onMouseDown={(e) => onMouseDown(e, column.key)}
                   className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-indigo-400/40 transition-colors z-20"
                   title="Drag to resize"
                 />
@@ -245,59 +295,58 @@ const TableHeader = React.memo(({
           })}
         </tr>
 
-        {/* Filter row — widths come from <colgroup>; min-w-0 keeps inputs from overlapping adjacent columns */}
         {showFilterRow && (
           <tr className="bg-zinc-100/50">
-            {columns.map(col => {
-              // Min/max number filter
-              if (col.filterType === 'minmax' && col.filterKey) {
-                const pair = getFilterPair(filters, col.filterKey);
-                if (!pair) return <td key={col.key} className="px-0.5 py-0.5 min-w-0" />;
+            {columns.map((column) => {
+              if (column.filterType === 'minmax' && column.filterKey) {
+                const pair = getFilterPair(filters, column.filterKey);
+                if (!pair) return <td key={column.key} className="px-0.5 py-0.5 min-w-0" />;
                 return (
-                  <td key={col.key} className="px-0.5 py-0.5 min-w-0 align-top">
+                  <td key={column.key} className="px-0.5 py-0.5 min-w-0 align-top">
                     <div className="flex items-center gap-0.5 min-w-0 max-w-full">
                       <input
                         type="number"
-                        placeholder="↓"
+                        {...groupingShortcutTargetProps}
+                        placeholder="min"
                         value={pair.min}
                         onChange={(e) => { pair.setMin(e.target.value); setCurrentPage(1); }}
-                        className={`${col.filterWidth || 'w-8'} min-w-0 shrink ${CELL.filterInput}`}
-                        title={`Min ${col.label}`}
+                        className={`${column.filterWidth || 'w-8'} min-w-0 shrink ${CELL.filterInput}`}
+                        title={`Min ${column.label}`}
                       />
                       <input
                         type="number"
-                        placeholder="↑"
+                        {...groupingShortcutTargetProps}
+                        placeholder="max"
                         value={pair.max}
                         onChange={(e) => { pair.setMax(e.target.value); setCurrentPage(1); }}
-                        className={`${col.filterWidth || 'w-8'} min-w-0 shrink ${CELL.filterInput}`}
-                        title={`Max ${col.label}`}
+                        className={`${column.filterWidth || 'w-8'} min-w-0 shrink ${CELL.filterInput}`}
+                        title={`Max ${column.label}`}
                       />
                     </div>
                   </td>
                 );
               }
 
-              // Text filter (city, state)
-              if (col.filterType === 'text' && col.filterKey) {
-                const tf = getTextFilter(filters, col.filterKey);
-                if (!tf) return <td key={col.key} className="px-0.5 py-0.5 min-w-0" />;
+              if (column.filterType === 'text' && column.filterKey) {
+                const tf = getTextFilter(filters, column.filterKey);
+                if (!tf) return <td key={column.key} className="px-0.5 py-0.5 min-w-0" />;
                 return (
-                  <td key={col.key} className="px-1 py-0.5 min-w-0 align-top">
+                  <td key={column.key} className="px-1 py-0.5 min-w-0 align-top">
                     <input
                       type="text"
-                      placeholder={`🔍 ${col.label.toLowerCase()}...`}
+                      {...groupingShortcutTargetProps}
+                      placeholder={`Search ${column.label.toLowerCase()}...`}
                       value={tf.value}
                       onChange={(e) => { tf.setValue(e.target.value); setCurrentPage(1); }}
-                      className={`${col.filterWidth || 'w-20'} w-full min-w-0 max-w-full px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400`}
+                      className={`${column.filterWidth || 'w-20'} w-full min-w-0 max-w-full px-1 py-0.5 text-xs border border-zinc-300 rounded bg-white focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400`}
                     />
                   </td>
                 );
               }
 
-              // Label dropdown
-              if (col.filterType === 'label-dropdown') {
+              if (column.filterType === 'label-dropdown') {
                 return (
-                  <td key={col.key} className="px-1 py-0.5 min-w-0 align-top overflow-hidden">
+                  <td key={column.key} className="px-1 py-0.5 min-w-0 align-top overflow-hidden">
                     <LabelFilterDropdown
                       isOpen={filters.isLabelDropdownOpen}
                       setIsOpen={filters.setIsLabelDropdownOpen}
@@ -310,8 +359,7 @@ const TableHeader = React.memo(({
                 );
               }
 
-              // Empty cell (no filter for this column)
-              return <td key={col.key} className="px-0.5 py-0.5 min-w-0" />;
+              return <td key={column.key} className="px-0.5 py-0.5 min-w-0" />;
             })}
           </tr>
         )}

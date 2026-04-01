@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { isEditableShortcutTarget, shouldAllowGroupingShortcutFromTarget } from '../groupingShortcutTargets';
 
 interface UseGlobalGroupingShortcutsParams {
   activeTab: string;
@@ -27,17 +28,18 @@ export function useGlobalGroupingShortcuts({
 }: UseGlobalGroupingShortcutsParams) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const isTypingTarget =
-        !!target &&
+      const target = event.target;
+      const isEditableTarget =
+        isEditableShortcutTarget(target) &&
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
           target.isContentEditable);
+      const shouldBlockShiftDigitShortcut = isEditableTarget && !shouldAllowGroupingShortcutFromTarget(target);
 
       if (event.shiftKey && event.code === 'Digit1') {
         if (
-          !isTypingTarget &&
+          !shouldBlockShiftDigitShortcut &&
           tokenMgmtSubTab === 'auto-merge' &&
           activeTab !== 'pages' &&
           activeTab !== 'group-auto-merge' &&
@@ -49,7 +51,7 @@ export function useGlobalGroupingShortcuts({
           return;
         }
 
-        if (activeTab === 'pages' && !isTypingTarget && canRunFilteredAutoGroup) {
+        if (activeTab === 'pages' && !shouldBlockShiftDigitShortcut && canRunFilteredAutoGroup) {
           event.preventDefault();
           event.stopPropagation();
           handleRunFilteredAutoGroup();
@@ -58,6 +60,7 @@ export function useGlobalGroupingShortcuts({
       }
 
       if (event.key === 'Tab') {
+        if (isEditableTarget) return;
         if (activeTab === 'pages' && canRunManualGroup) {
           event.preventDefault();
           event.stopPropagation();
