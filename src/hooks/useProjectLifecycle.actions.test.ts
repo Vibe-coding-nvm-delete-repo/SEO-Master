@@ -5,9 +5,12 @@ import type { Project } from '../types';
 import * as projectStorage from '../projectStorage';
 import * as projectWorkspace from '../projectWorkspace';
 import * as projectMetadataCollab from '../projectMetadataCollab';
+import * as collabV2WriteGuard from '../collabV2WriteGuard';
+import { projectUrlKey } from '../projectUrlKey';
 
 const softDeleteProjectMetadata = vi.spyOn(projectMetadataCollab, 'softDeleteProjectMetadata');
 const persistProjectMetadata = vi.spyOn(projectMetadataCollab, 'persistProjectMetadata');
+const advanceGenerationSpy = vi.spyOn(collabV2WriteGuard, 'advanceGeneration');
 const firestoreListeners = vi.hoisted(() => ({
   handlers: new Map<string, (projects: Project[], metadata?: { fromCache?: boolean; hasPendingWrites?: boolean }) => void>(),
 }));
@@ -33,6 +36,8 @@ describe('useProjectLifecycle project actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     firestoreListeners.handlers.clear();
+    advanceGenerationSpy.mockImplementation(() => 1);
+    window.history.replaceState({}, '', '/seo-magic/group/projects');
     softDeleteProjectMetadata.mockResolvedValue({ status: 'accepted' });
     persistProjectMetadata.mockResolvedValue({ status: 'accepted' });
     vi.spyOn(projectStorage, 'loadProjectsBootstrapState').mockResolvedValue({
@@ -119,6 +124,7 @@ describe('useProjectLifecycle project actions', () => {
     });
 
     expect(sequence).toEqual(['clear', 'load']);
+    expect(advanceGenerationSpy).toHaveBeenCalledWith('p1');
     expect(input.setActiveProjectId).toHaveBeenCalledWith('p1');
     expect(input.loadProject).toHaveBeenCalledWith('p1', input.projects);
   });
@@ -229,5 +235,95 @@ describe('useProjectLifecycle project actions', () => {
         Array.isArray(projectsArg) && projectsArg.some((project: Project) => project.name === 'Shared Project'),
       ),
     ).toBe(true);
+  });
+
+  it('does not fall back to workspace prefs when a deep-link project key is unresolved during bootstrap', async () => {
+    window.history.replaceState({}, '', '/seo-magic/group/data/test--p4105bd');
+    vi.spyOn(projectStorage, 'loadProjectsBootstrapState').mockResolvedValue({
+      projects: [],
+      source: 'local-cache',
+    });
+    vi.spyOn(projectWorkspace, 'loadSavedWorkspacePrefs').mockResolvedValue({
+      activeProjectId: 'p1',
+      savedClusters: [],
+    });
+    const input = makeInput({ projects: [] });
+
+    renderHook(() => useProjectLifecycle(input));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(input.setActiveProjectId).not.toHaveBeenCalledWith('p1');
+    expect(input.loadProject).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe('/seo-magic/group/data/test--p4105bd');
+  });
+
+  it('resolves a pending deep-link project once the live projects snapshot contains it', async () => {
+    vi.spyOn(projectStorage, 'loadProjectsBootstrapState').mockResolvedValue({
+      projects: [],
+      source: 'local-cache',
+    });
+    vi.spyOn(projectWorkspace, 'loadSavedWorkspacePrefs').mockResolvedValue({
+      activeProjectId: 'p1',
+      savedClusters: [],
+    });
+    const targetProject: Project = {
+      id: 'proj_target',
+      name: 'TEST',
+      description: '',
+      createdAt: '2020-01-02T00:00:00.000Z',
+      uid: 'u',
+      folderId: null,
+      deletedAt: null,
+    };
+    window.history.replaceState({}, '', `/seo-magic/group/data/${projectUrlKey(targetProject)}`);
+    const otherProject: Project = {
+      id: 'p1',
+      name: 'Other Project',
+      description: '',
+      createdAt: '2020-01-01T00:00:00.000Z',
+      uid: 'u',
+      folderId: null,
+      deletedAt: null,
+    };
+    const input = makeInput({ projects: [] });
+
+    renderHook(() => useProjectLifecycle(input));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      firestoreListeners.handlers.get('projects')?.([otherProject, targetProject], { fromCache: false, hasPendingWrites: false });
+      await Promise.resolve();
+    });
+
+    expect(input.setActiveProjectId).toHaveBeenCalledWith('proj_target');
+    expect(advanceGenerationSpy).toHaveBeenCalledWith('proj_target');
+    expect(input.loadProject).toHaveBeenCalledWith('proj_target', [otherProject, targetProject]);
+    expect(input.setActiveProjectId).not.toHaveBeenCalledWith('p1');
+  });
+
+  it('createProject advances generation before loading the new project', async () => {
+    const input = makeInput({
+      projects: [],
+      newProjectName: 'Shared Project',
+      newProjectDescription: 'Desc',
+    });
+    const { result } = renderHook(() => useProjectLifecycle(input));
+
+    await act(async () => {
+      await result.current.createProject();
+    });
+
+    expect(advanceGenerationSpy).toHaveBeenCalledTimes(1);
+    const advancedProjectId = advanceGenerationSpy.mock.calls[0]?.[0];
+    expect(typeof advancedProjectId).toBe('string');
+    expect(advancedProjectId).toContain('proj_');
+    expect(input.setActiveProjectId).toHaveBeenCalledWith(advancedProjectId);
+    expect(input.loadProject).toHaveBeenCalledWith(advancedProjectId, expect.any(Array));
   });
 });
