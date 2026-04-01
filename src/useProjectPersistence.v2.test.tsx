@@ -2542,4 +2542,78 @@ describe('useProjectPersistence V2 hardening', () => {
     );
   });
 
+  it('[regression] attaches entity listeners when meta snapshot arrives after loadProject sets collabMetaRef (fresh-browser race)', async () => {
+    // Regression for the race condition where loadProject() completes
+    // (calling applyCanonicalState → setting collabMetaRef) BEFORE the meta
+    // onSnapshot delivers its first snapshot.  Without the fix, the meta
+    // listener would see previousMeta === nextMeta (same revision/epoch/
+    // baseCommitId/commitState) and take the early-return path, skipping
+    // attachEpochListeners entirely.  Entity listeners would never be created
+    // and real-time updates from other users would be invisible for the whole
+    // session — exactly the "different Chrome account doesn't see updates" bug.
+
+    // Hold loadCanonicalProjectState so we can control the race precisely.
+    const loadDeferred = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalProjectState.mockReturnValue(loadDeferred.promise);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    // Start loadProject but do NOT await — we need it to stall at
+    // loadCanonicalProjectState so the V2 useEffect runs first.
+    let loadDone = false;
+    act(() => {
+      void result.current.loadProject('project-1', SHARED_PROJECTS).then(() => { loadDone = true; });
+    });
+
+    // Flush React: setStorageMode('v2') fires, V2 useEffect runs.
+    // At this point collabMetaRef is still null (loadProject is stalled),
+    // so the initial attachEpochListeners guard is skipped.
+    await flush();
+
+    // Meta listener must be active but entity listeners must NOT be attached yet.
+    expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true);
+    expect(firestoreMocks.listeners.has('projects/project-1/groups')).toBe(false);
+
+    // Now let loadCanonicalProjectState resolve → applyCanonicalState sets
+    // collabMetaRef.current = makeMeta(1).
+    act(() => {
+      loadDeferred.resolve(makeCanonical(1));
+    });
+    await act(async () => {
+      await loadDeferred.promise;
+    });
+    await flush();
+    expect(loadDone).toBe(true);
+
+    // Deliver the meta snapshot carrying the SAME meta that loadProject resolved
+    // with (revision=1, epoch=1, baseCommitId='commit_1', commitState='ready').
+    // Before the fix this triggers the early-return and entity listeners stay
+    // unattached.  After the fix the early-return block detects missing listeners
+    // and calls attachEpochListeners before returning.
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1));
+    });
+
+    // Entity listeners must now be attached.
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/groups')).toBe(true),
+    );
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/blocked_tokens')).toBe(true),
+    );
+
+    // Legacy chunk listener must never have been created.
+    expect(firestoreMocks.listeners.has('projects/project-1/chunks')).toBe(false);
+  });
+
 });

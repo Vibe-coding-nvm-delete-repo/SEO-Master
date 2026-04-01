@@ -2859,7 +2859,7 @@ export function useProjectPersistence(options: {
           previousMeta.baseCommitId === nextMeta.baseCommitId &&
           previousMeta.commitState === nextMeta.commitState
         ) {
-          // Meta is unchanged — normally a no-op.  But guard against the race
+          // Meta is unchanged — normally a no-op, but guard against the race
           // where loadProject() called applyCanonicalState() (setting
           // collabMetaRef) *before* this listener delivered its first snapshot.
           // In that case the initial-meta check at effect-startup saw null and

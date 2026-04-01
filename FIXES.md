@@ -12,6 +12,13 @@
 
 These are "the building is on fire" bugs. Every piece of user state must be visible to ALL users instantly via Firestore. No data can ever be siloed to just one browser.
 
+### [x] 1.0 V2 entity listeners never attached — fresh browser sees no real-time updates (FIXED 2026-04-01)
+**File:** `src/useProjectPersistence.ts` — V2 useEffect meta listener, early-return block (~line 2855)
+**Root cause:** Race between `loadProject()` completing and the meta `onSnapshot` delivering its first snapshot. `loadProject` calls `setStorageMode('v2')` then `await loadCanonicalProjectState(...)`. The `await` yields to React, which runs the V2 `useEffect` while `collabMetaRef.current` is still `null` → the initial `attachEpochListeners` call at effect start is skipped. Later, `applyCanonicalState` sets `collabMetaRef` to the live meta value. When the meta `onSnapshot` fires, it sees `previousMeta === nextMeta` (same revision/epoch/baseCommitId/commitState) and takes the early-return path — **skipping `attachEpochListeners` entirely**. No entity listeners are ever created; the session receives zero real-time updates.
+**Why inconsistent:** A warm IDB cache makes `loadCanonicalProjectState` slower (more chunks to revalidate), so the meta snapshot usually arrives first and takes the correct path. A fresh Chrome profile (different Chrome account) has empty IDB, so `loadCanonicalProjectState` is faster — the race flips. Exactly matches "different Chrome account doesn't see updates, same account does".
+**Fix:** In the early-return block, check `entityListenersCleanupRef.current === null`. If entity listeners were never attached AND the meta is in a ready/complete V2 state, call `attachEpochListeners(nextMeta.datasetEpoch, nextMeta)` before returning. The existing generation and abort-controller fencing keeps any concurrent epoch-load completions safe.
+**All instances fixed:** Single call site — the only early-return block in the meta `onSnapshot` callback.
+
 ### [ ] 1.1 Redundant double/triple setState in processCSV
 **File:** `src/App.tsx` ~lines 1661-1707
 **Problem:** `setResults()`, `setClusterSummary()`, etc. are called BEFORE `persistence.bulkSet()` (lines 1661-1666), then `persistence.bulkSet()` is called (line 1687) which internally syncs refs AND calls setState again, then MORE direct setters fire (lines 1690-1707). This causes triple renders and wasted work.
