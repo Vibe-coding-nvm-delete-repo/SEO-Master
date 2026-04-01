@@ -7,6 +7,7 @@
 - [`docs/group-project-flow.md`](./docs/group-project-flow.md) — visual Group workspace flow, shared sync path, and collaboration guarantees
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — system shape and storage model
 - [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) — shared-project persistence contract
+- [`SHARED_DUAL_PATH_INVENTORY.md`](./SHARED_DUAL_PATH_INVENTORY.md) — legacy vs V2 dual-path checklist (rules, client, tests)
 - [`PERSISTENCE_AUDIT.md`](./PERSISTENCE_AUDIT.md) — current persistence-state summary and remaining limits
 - [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md) — latest repo-wide refactor analysis and importance scoring
 - [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) — execution tracker for refactor work
@@ -51,6 +52,26 @@ Use only these checked-in commands for hosting releases. Do not run ad hoc `fire
 - HTML must stay non-cacheable so the wrong app shell cannot stay pinned after deploy.
 - Deploys from a dirty tracked worktree are blocked by default.
 - The release is not considered successful unless the hosted site serves the same app shell and bundle path that `KWG/dist/index.html` references.
+
+## Shared V2 Operations
+
+- `npm run migrate:shared:v2 -- --dry-run`
+  - Scans shared `collab` projects without writing changes
+- `npm run migrate:shared:v2 -- --project=<project-id>`
+  - Migrates one shared project through the explicit V2 cutover script
+
+The shared runtime no longer treats legacy chunk data as a supported live collaboration surface. If an old shared project still exists only in the legacy shape, migrate it first.
+
+## Runtime Trace
+
+Runtime trace logging is opt-in and is controlled through `localStorage`.
+
+- `kwg.runtimeTrace.enabled=1`
+  - Enables structured trace events and console output
+- `kwg.runtimeTrace.endpoint=https://your-endpoint.example/ingest`
+  - Overrides the default local collector URL
+- `kwg.runtimeTrace.endpoint=console-only`
+  - Keeps trace output in the browser console without any network transport
 
 ## Local Backups
 

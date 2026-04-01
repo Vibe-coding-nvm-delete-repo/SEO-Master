@@ -105,6 +105,11 @@ const collabMocks = vi.hoisted(() => ({
   heartbeatProjectOperationLock: vi.fn(),
 }));
 
+const runtimeTraceMocks = vi.hoisted(() => ({
+  beginRuntimeTrace: vi.fn(() => 'trace-test'),
+  traceRuntimeEvent: vi.fn(),
+}));
+
 vi.mock('./firebase', () => ({ db: {} }));
 vi.mock('firebase/firestore', () => ({
   collection: firestoreMocks.collection,
@@ -142,8 +147,16 @@ vi.mock('./projectCollabV2', async () => {
     heartbeatProjectOperationLock: collabMocks.heartbeatProjectOperationLock,
   };
 });
+vi.mock('./runtimeTrace', () => ({
+  beginRuntimeTrace: runtimeTraceMocks.beginRuntimeTrace,
+  traceRuntimeEvent: runtimeTraceMocks.traceRuntimeEvent,
+}));
 
-import { blockedTokenDocId, CLIENT_SCHEMA_VERSION } from './projectCollabV2';
+import {
+  blockedTokenDocId,
+  CLIENT_SCHEMA_VERSION,
+  PROJECT_BLOCKED_TOKENS_SUBCOLLECTION,
+} from './projectCollabV2';
 import { buildProjectDataPayloadFromChunkDocs } from './projectChunkPayload';
 import { useProjectPersistence } from './useProjectPersistence';
 
@@ -352,6 +365,10 @@ const PROJECTS: Project[] = [
   { id: 'project-2', name: 'Project 2', description: '', uid: 'user-1', createdAt: '2026-03-30T00:00:00.000Z' },
 ];
 
+const SHARED_PROJECTS: Project[] = [
+  { id: 'project-1', name: 'Shared Project', description: 'collab', uid: 'user-1', createdAt: '2026-03-30T00:00:00.000Z' },
+];
+
 describe('useProjectPersistence V2 hardening', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -364,6 +381,127 @@ describe('useProjectPersistence V2 hardening', () => {
     collabMocks.acquireProjectOperationLock.mockReset();
     collabMocks.releaseProjectOperationLock.mockResolvedValue(undefined);
     collabMocks.heartbeatProjectOperationLock.mockReset();
+    runtimeTraceMocks.beginRuntimeTrace.mockReset();
+    runtimeTraceMocks.beginRuntimeTrace.mockReturnValue('trace-test');
+    runtimeTraceMocks.traceRuntimeEvent.mockReset();
+  });
+
+  it('never attaches the legacy chunk listener for shared collab projects', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    expect(firestoreMocks.listeners.has('projects/project-1/chunks')).toBe(false);
+    expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true);
+  });
+
+  it('propagates a shared V2 edit from client A to client B without any legacy listener', async () => {
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    let echoedTokenDoc: Record<string, unknown> | null = null;
+
+    collabMocks.commitRevisionedDocChanges.mockImplementation(
+      async (_projectId, subcollection, changes, actorId) => {
+        if (subcollection !== PROJECT_BLOCKED_TOKENS_SUBCOLLECTION) {
+          return [];
+        }
+        return changes
+          .filter((change: { kind: 'upsert' | 'delete' }) => change.kind === 'upsert')
+          .map((change: {
+            id: string;
+            mutationId?: string;
+            value?: Record<string, unknown>;
+          }) => {
+            echoedTokenDoc = {
+              ...(change.value ?? {}),
+              id: change.id,
+              revision: 1,
+              updatedByClientId: actorId,
+              lastMutationId: change.mutationId ?? null,
+            };
+            return {
+              kind: 'upsert' as const,
+              id: change.id,
+              revision: 1,
+              lastMutationId: change.mutationId ?? null,
+              value: echoedTokenDoc,
+            };
+          });
+      },
+    );
+
+    const clientA = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-a',
+      }),
+    );
+    const clientB = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-b',
+      }),
+    );
+
+    act(() => {
+      clientA.result.current.setActiveProjectId('project-1');
+      clientB.result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await clientA.result.current.loadProject('project-1', SHARED_PROJECTS);
+      await clientB.result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await waitFor(() => expect(clientA.result.current.storageMode).toBe('v2'));
+    await waitFor(() => expect(clientB.result.current.storageMode).toBe('v2'));
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.get('projects/project-1/blocked_tokens')?.length).toBe(2),
+    );
+
+    await act(async () => {
+      await clientA.result.current.blockTokens(['Alpha']);
+    });
+
+    expect(Array.from(clientA.result.current.blockedTokens)).toEqual(['Alpha']);
+    expect(Array.from(clientB.result.current.blockedTokens)).toEqual([]);
+    expect(firestoreMocks.listeners.has('projects/project-1/chunks')).toBe(false);
+    expect(echoedTokenDoc).toBeTruthy();
+
+    act(() => {
+      emitQuerySnapshot('projects/project-1/blocked_tokens', [{
+        type: 'added',
+        doc: {
+          id: `1::${blockedTokenDocId('Alpha')}`,
+          data: () => echoedTokenDoc,
+        },
+      }]);
+    });
+
+    await waitFor(() => expect(Array.from(clientB.result.current.blockedTokens)).toEqual(['Alpha']));
   });
 
   it('rejects blocked-token edits before optimistic local apply when a foreign operation lock is active', async () => {
@@ -765,6 +903,17 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['epoch-11']));
+    expect(runtimeTraceMocks.traceRuntimeEvent.mock.calls.some(([event]) =>
+      event?.event === 'v2:canonical-load-complete' &&
+      event?.source === 'useProjectPersistence.v2MetaListener' &&
+      event?.data?.incoming?.datasetEpoch === 11,
+    )).toBe(true);
+    expect(runtimeTraceMocks.traceRuntimeEvent.mock.calls.some(([event]) =>
+      event?.event === 'v2:canonical-apply' &&
+      event?.source === 'useProjectPersistence.applyCanonicalState' &&
+      event?.data?.incoming?.datasetEpoch === 11 &&
+      event?.data?.before?.blockedTokenDocCount === 1,
+    )).toBe(true);
 
     await act(async () => {
       epoch10.resolve(makeCanonical(10, ['epoch-10']));
@@ -773,6 +922,11 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     expect(Array.from(result.current.blockedTokens)).toEqual(['epoch-11']);
+    expect(runtimeTraceMocks.traceRuntimeEvent.mock.calls.some(([event]) =>
+      event?.event === 'v2:canonical-load-drop' &&
+      event?.source === 'useProjectPersistence.v2MetaListener' &&
+      event?.data?.reason === 'generation-mismatch',
+    )).toBe(true);
   });
 
   it('falls back to full canonical recovery when a meta listener epoch load is unresolved', async () => {
@@ -996,6 +1150,11 @@ describe('useProjectPersistence V2 hardening', () => {
 
     expect(collabMocks.loadCanonicalEpoch).not.toHaveBeenCalled();
     expect(Array.from(result.current.blockedTokens)).toEqual(['stable']);
+    expect(runtimeTraceMocks.traceRuntimeEvent.mock.calls.some(([event]) =>
+      event?.event === 'v2:listener-skip-pending-writes' &&
+      event?.source === 'useProjectPersistence.v2MetaListener' &&
+      event?.data?.listener === 'collab/meta',
+    )).toBe(true);
   });
 
   it('serializes canonical V2 cache writes so stale completions cannot overtake newer ones', async () => {
@@ -1485,6 +1644,11 @@ describe('useProjectPersistence V2 hardening', () => {
     await flush();
     expect(Array.from(result.current.blockedTokens)).toEqual(['Alpha']);
     expect(collabMocks.saveCanonicalCacheToIDB).not.toHaveBeenCalled();
+    expect(runtimeTraceMocks.traceRuntimeEvent.mock.calls.some(([event]) =>
+      event?.event === 'v2:listener-skip-pending-writes' &&
+      event?.source === 'useProjectPersistence.v2EntityListener' &&
+      event?.data?.listener === PROJECT_BLOCKED_TOKENS_SUBCOLLECTION,
+    )).toBe(true);
   });
 
   it('rejects V2 writes before optimistic local apply when the project requires a newer client schema', async () => {
@@ -1668,6 +1832,12 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     expect(Array.from(result.current.blockedTokens)).toEqual(['Project Two']);
+    expect(runtimeTraceMocks.traceRuntimeEvent.mock.calls.some(([event]) =>
+      event?.event === 'v2:listener-drop' &&
+      event?.source === 'useProjectPersistence.v2EntityListener' &&
+      event?.data?.listener === PROJECT_BLOCKED_TOKENS_SUBCOLLECTION &&
+      event?.data?.reason === 'project-switch',
+    )).toBe(true);
   });
 
   it('clears projectLoadingRef after loadProject failure so legacy chunk snapshots are not stuck on guard 1a', async () => {
@@ -1724,7 +1894,7 @@ describe('useProjectPersistence V2 hardening', () => {
     }
   });
 
-  it('live collab meta snapshot without V2 readMode flips storage to legacy and reloads chunk view', async () => {
+  it('live collab meta loss keeps shared projects on the V2 path and re-runs canonical load', async () => {
     workspaceMocks.loadProjectDataForView.mockResolvedValue({
       results: [],
       clusterSummary: [],
@@ -1745,11 +1915,20 @@ describe('useProjectPersistence V2 hardening', () => {
       lastSaveId: 42,
     });
 
-    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    collabMocks.loadCanonicalProjectState
+      .mockResolvedValueOnce(makeCanonical(1))
+      .mockResolvedValueOnce({
+        ...makeCanonical(1),
+        mode: 'v2' as const,
+        entities: {
+          ...makeCanonical(1).entities,
+          meta: null,
+        },
+      });
 
     const { result } = renderHook(() =>
       useProjectPersistence({
-        projects: PROJECTS,
+        projects: SHARED_PROJECTS,
         setProjects: vi.fn(),
         addToast: vi.fn(),
       }),
@@ -1760,7 +1939,7 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await act(async () => {
-      await result.current.loadProject('project-1', PROJECTS);
+      await result.current.loadProject('project-1', SHARED_PROJECTS);
     });
 
     await waitFor(() => expect(result.current.storageMode).toBe('v2'));
@@ -1769,17 +1948,17 @@ describe('useProjectPersistence V2 hardening', () => {
       expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
     );
 
-    const callsBeforeLegacyFlip = workspaceMocks.loadProjectDataForView.mock.calls.length;
+    const canonicalCallsBeforeMetaLoss = collabMocks.loadCanonicalProjectState.mock.calls.length;
 
     act(() => {
       emitDocSnapshot('projects/project-1/collab/meta', null);
     });
 
-    await waitFor(() => expect(result.current.storageMode).toBe('legacy'));
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
     await waitFor(() =>
-      expect(workspaceMocks.loadProjectDataForView.mock.calls.length).toBeGreaterThan(callsBeforeLegacyFlip),
+      expect(collabMocks.loadCanonicalProjectState.mock.calls.length).toBeGreaterThan(canonicalCallsBeforeMetaLoss),
     );
-    expect(workspaceMocks.loadProjectDataForView).toHaveBeenCalledWith('project-1');
+    expect(firestoreMocks.listeners.has('projects/project-1/chunks')).toBe(false);
   });
 
   it('blocks transitional setter writes for active V2 projects', async () => {

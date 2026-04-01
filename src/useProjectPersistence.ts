@@ -122,6 +122,7 @@ import {
   type CanonicalProjectState,
   type ProjectBaseSnapshot,
 } from './projectCollabV2';
+import { isSharedProject } from './projectSharing';
 import type {
   ProjectActivityLogDoc,
   ProjectBlockedKeywordDoc,
@@ -469,8 +470,9 @@ export function useProjectPersistence(options: {
   projects: Project[];
   setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
   addToast: (msg: string, type: 'success' | 'info' | 'warning' | 'error') => void;
+  clientIdOverride?: string;
 }): ProjectPersistence {
-  const { projects, setProjects, addToast } = options;
+  const { projects, setProjects, addToast, clientIdOverride } = options;
 
   // ── 14 persisted state variables ──────────────────────────────────────
   const [results, setResults] = useState<ProcessedRow[] | null>(null);
@@ -620,7 +622,7 @@ export function useProjectPersistence(options: {
   // ── Save infrastructure ───────────────────────────────────────────────
   // Unique per browser session — written to Firestore meta doc so the
   // onSnapshot listener can recognise (and skip) our own save echoes.
-  const clientIdRef = useRef(SESSION_CLIENT_ID);
+  const clientIdRef = useRef(clientIdOverride ?? SESSION_CLIENT_ID);
   const projectLoadingRef = useRef(false);
   const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
   const pendingLocalPersistRef = useRef<Promise<void>>(Promise.resolve());
@@ -639,6 +641,8 @@ export function useProjectPersistence(options: {
   const loadFenceRef = useRef(0);
   const getLegacyPersistBlockReason = useCallback((): string | null => {
     if (!activeProjectIdRef.current) return 'no-active-project';
+    const activeProject = projectsRef.current.find((project) => project.id === activeProjectIdRef.current);
+    if (isSharedProject(activeProject)) return 'shared-project-v2-only';
     if (storageModeRef.current !== 'legacy') return 'storage-mode-not-legacy';
     if (!projectStorageModeResolvedRef.current) return 'storage-mode-unresolved';
     if (projectLoadingRef.current) return 'project-loading';
@@ -655,6 +659,11 @@ export function useProjectPersistence(options: {
     }
     const projectName = projectsRef.current.find((project) => project.id === projectId)?.name ?? null;
     return { projectId, projectName };
+  }, []);
+
+  const isProjectSharedById = useCallback((projectId: string | null): boolean => {
+    if (!projectId) return false;
+    return isSharedProject(projectsRef.current.find((project) => project.id === projectId));
   }, []);
 
   /** Build a full ProjectDataPayload from `latest.current` + optional overrides. */
@@ -1188,6 +1197,77 @@ export function useProjectPersistence(options: {
     return payload;
   }, [applyViewState]);
 
+  const summarizeResolvedPayload = useCallback((payload: ProjectDataPayload | null) => ({
+    hasPayload: Boolean(payload),
+    resultsCount: payload?.results?.length ?? 0,
+    groupedCount: payload?.groupedClusters?.length ?? 0,
+    approvedCount: payload?.approvedGroups?.length ?? 0,
+    blockedTokenCount: payload?.blockedTokens?.length ?? 0,
+    blockedKeywordCount: payload?.blockedKeywords?.length ?? 0,
+    labelSectionCount: payload?.labelSections?.length ?? 0,
+    activityLogCount: payload?.activityLog?.length ?? 0,
+    lastSaveId: payload?.lastSaveId ?? null,
+    updatedAt: payload?.updatedAt ?? null,
+  }), []);
+
+  const summarizeCurrentCanonicalState = useCallback(() => {
+    const payload = assembleCanonicalPayload(baseSnapshotRef.current, {
+      meta: collabMetaRef.current,
+      groups: groupDocsRef.current,
+      blockedTokens: blockedTokenDocsRef.current,
+      manualBlockedKeywords: manualBlockedKeywordDocsRef.current,
+      tokenMergeRules: tokenMergeRuleDocsRef.current,
+      labelSections: labelSectionDocsRef.current,
+      activityLog: activityLogDocsRef.current,
+      activeOperation: activeOperationRef.current,
+    });
+    return {
+      datasetEpoch: collabMetaRef.current?.datasetEpoch ?? baseSnapshotRef.current?.datasetEpoch ?? null,
+      metaRevision: collabMetaRef.current?.revision ?? null,
+      baseCommitId: collabMetaRef.current?.baseCommitId ?? null,
+      groupDocCount: groupDocsRef.current.length,
+      blockedTokenDocCount: blockedTokenDocsRef.current.length,
+      manualBlockedKeywordDocCount: manualBlockedKeywordDocsRef.current.length,
+      tokenMergeRuleDocCount: tokenMergeRuleDocsRef.current.length,
+      labelSectionDocCount: labelSectionDocsRef.current.length,
+      activityLogDocCount: activityLogDocsRef.current.length,
+      resolved: summarizeResolvedPayload(payload),
+    };
+  }, [summarizeResolvedPayload]);
+
+  const summarizeIncomingCanonicalState = useCallback((canonical: CanonicalProjectState) => ({
+    mode: canonical.mode,
+    datasetEpoch: canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null,
+    metaRevision: canonical.entities.meta?.revision ?? null,
+    baseCommitId: canonical.entities.meta?.baseCommitId ?? null,
+    groupDocCount: canonical.entities.groups.length,
+    blockedTokenDocCount: canonical.entities.blockedTokens.length,
+    manualBlockedKeywordDocCount: canonical.entities.manualBlockedKeywords.length,
+    tokenMergeRuleDocCount: canonical.entities.tokenMergeRules.length,
+    labelSectionDocCount: canonical.entities.labelSections.length,
+    activityLogDocCount: canonical.entities.activityLog.length,
+    resolved: summarizeResolvedPayload(canonical.resolved),
+  }), [summarizeResolvedPayload]);
+
+  const traceV2RuntimeEvent = useCallback((
+    event: string,
+    source: string,
+    data?: Record<string, unknown>,
+    projectId?: string | null,
+  ) => {
+    const resolvedProjectId = projectId ?? activeProjectIdRef.current;
+    const traceId = activePersistTraceRef.current ?? beginRuntimeTrace(source, resolvedProjectId, {
+      trigger: 'v2-runtime-diagnostics',
+    });
+    traceRuntimeEvent({
+      traceId,
+      event,
+      source,
+      projectId: resolvedProjectId,
+      data,
+    });
+  }, []);
+
   const rollbackConflictedMutation = useCallback((message: string, datasetEpoch: number | null) => {
     if (datasetEpoch == null || !message.startsWith('conflict:')) return;
     const [, subcollection, logicalId] = message.split(':', 3);
@@ -1213,6 +1293,14 @@ export function useProjectPersistence(options: {
   const applyCanonicalState = useCallback((canonical: CanonicalProjectState) => {
     if (canonical.mode !== 'v2') return;
     const meta = canonical.entities.meta;
+    traceV2RuntimeEvent(
+      'v2:canonical-apply',
+      'useProjectPersistence.applyCanonicalState',
+      {
+        before: summarizeCurrentCanonicalState(),
+        incoming: summarizeIncomingCanonicalState(canonical),
+      },
+    );
     const isReadyWritableCanonical = Boolean(
       canonical.resolved &&
       meta?.readMode === 'v2' &&
@@ -1255,7 +1343,7 @@ export function useProjectPersistence(options: {
     const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
     applyViewState(toProjectViewState(canonical.resolved, project));
     saveCounterRef.current = canonical.resolved.lastSaveId ?? saveCounterRef.current;
-  }, [applyViewState, rebuildRevisionMap, rememberWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe]);
+  }, [applyViewState, rebuildRevisionMap, rememberWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, summarizeCurrentCanonicalState, summarizeIncomingCanonicalState, traceV2RuntimeEvent]);
 
   const reloadCanonicalStateFromCloud = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
@@ -1271,7 +1359,10 @@ export function useProjectPersistence(options: {
     ) ?? await loadCanonicalProjectState(
       projectId,
       clientIdRef.current,
-      () => loadProjectDataForView(projectId),
+      async () => null,
+      {
+        sharedProject: isProjectSharedById(projectId),
+      },
     );
     if (activeProjectIdRef.current !== projectId) return;
     if (epochLoadGenerationRef.current !== reloadGeneration) return;
@@ -1293,12 +1384,26 @@ export function useProjectPersistence(options: {
       }
       return;
     }
+    if (isProjectSharedById(projectId) && canonical.mode !== 'v2') {
+      traceV2RuntimeEvent(
+        'v2:canonical-load-drop',
+        'useProjectPersistence.reloadCanonicalStateFromCloud',
+        {
+          reason: 'shared-non-v2',
+          incoming: summarizeIncomingCanonicalState(canonical),
+        },
+        projectId,
+      );
+      setCanonicalReloading(false);
+      setWriteUnsafe(true, canonical.resolved ? 'canonical-invalid' : 'canonical-unresolved');
+      return;
+    }
     clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
     applyCanonicalState(canonical);
     if (canonical.entities.meta && canonical.resolved) {
       updateCanonicalCache(canonical.resolved, canonical.entities.meta);
     }
-  }, [applyCanonicalState, clearPendingForEpoch, setCanonicalReloading, setWriteUnsafe, updateCanonicalCache]);
+  }, [applyCanonicalState, clearPendingForEpoch, isProjectSharedById, setCanonicalReloading, setWriteUnsafe, summarizeIncomingCanonicalState, traceV2RuntimeEvent, updateCanonicalCache]);
 
   const hasOwnedActiveOperationLock = useCallback((): boolean => {
     if (lockHeartbeatLostRef.current) return false;
@@ -1919,6 +2024,7 @@ export function useProjectPersistence(options: {
       projectCount: projectList.length,
     });
     const project = projectList.find(p => p.id === projectId);
+    const sharedProject = isSharedProject(project);
     try {
     const canonicalCache = await loadCanonicalCacheFromIDB(projectId);
     const idbData = canonicalCache?.payload ?? await loadProjectDataFromIDBOnly(projectId);
@@ -1941,10 +2047,24 @@ export function useProjectPersistence(options: {
       applyViewState(toProjectViewState(idbData, project, { skipRebuild: true }));
     }
 
+    if (sharedProject) {
+      setStorageMode('v2');
+      storageModeRef.current = 'v2';
+    }
+
     const canonical = await loadCanonicalProjectState(
       projectId,
       clientIdRef.current,
-      async () => idbData ?? loadProjectDataForView(projectId),
+      async () => {
+        if (sharedProject) {
+          return idbData ?? null;
+        }
+        return idbData ?? loadProjectDataForView(projectId);
+      },
+      {
+        sharedProject,
+        localFallbackPayload: sharedProject ? (idbData ?? null) : undefined,
+      },
     ).catch((error) => {
       traceRuntimeEvent({
         traceId: loadTraceId,
@@ -1976,7 +2096,7 @@ export function useProjectPersistence(options: {
       ? canonical.entities.meta
       : null;
 
-    if (canonical.mode === 'v2' || legacyFallbackMeta) {
+    if (canonical.mode === 'v2' || legacyFallbackMeta || sharedProject) {
       setStorageMode('v2');
       storageModeRef.current = 'v2';
       projectStorageModeResolvedRef.current = true;
@@ -2019,7 +2139,14 @@ export function useProjectPersistence(options: {
         }
       }
 
-      const warnStuckShared = !canonical.resolved || legacyFallbackMeta != null;
+      const warnStuckShared = sharedProject
+        ? (
+          !canonical.resolved ||
+          canonical.entities.meta?.readMode !== 'v2' ||
+          canonical.entities.meta?.commitState !== 'ready' ||
+          canonical.entities.meta?.migrationState !== 'complete'
+        )
+        : (!canonical.resolved || legacyFallbackMeta != null);
       if (warnStuckShared) {
         setWriteUnsafe(
           true,
@@ -2030,9 +2157,9 @@ export function useProjectPersistence(options: {
           message = legacyFallbackMeta
             ? 'Could not auto-repair shared project data (Firestore blocked the fix—often missing required fields on collab/meta or rules not deployed). You can still view your last local copy; editing stays off until repair succeeds. If this persists, deploy latest firestore.rules from the repo or reset collab/meta in the Firebase console.'
             : 'Could not auto-repair shared project data (Firestore blocked the fix). Edits stay read-only until latest security rules are deployed or an admin repairs the project.';
-        } else if (legacyFallbackMeta) {
+        } else if (legacyFallbackMeta || sharedProject) {
           message =
-            'Shared project data is incomplete in the cloud. Showing the last local snapshot in read-only mode until the shared state is repaired.';
+            'Shared project data is incomplete in the cloud. Showing the last available snapshot in read-only mode until the V2 shared state is repaired.';
         } else {
           message =
             'Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.';
@@ -2080,64 +2207,6 @@ export function useProjectPersistence(options: {
         projectLoadingRef.current = false;
       }
     }
-    /*
-
-    // ── Phase 1: IDB-first fast path (~5ms) ──────────────────────────────
-    // Show cached data instantly. Reconcile with Firestore in background.
-
-
-
-      const viewState = toProjectViewState(idbData, project, { skipRebuild: true });
-      applyViewState(viewState);
-
-      const loadedSaveId = idbData.lastSaveId ?? 0;
-      if (loadedSaveId > saveCounterRef.current) {
-        saveCounterRef.current = loadedSaveId;
-      }
-      loadFenceRef.current = countGroupedPages(viewState);
-
-      // Phase 1 done — spinner can disappear, data is visible.
-      projectLoadingRef.current = false;
-
-      // ── Phase 2: Background Firestore reconciliation (fire-and-forget) ──
-      // The onSnapshot listener handles real-time sync going forward.
-      // This is a safety net for when IDB is stale and the first snapshot
-      // was suppressed by the projectLoading guard during Phase 1.
-      const saveIdAtLoad = saveCounterRef.current;
-      reconcileWithFirestore(projectId, idbData)
-        .then((result) => {
-          if (activeProjectIdRef.current !== projectId) return;   // user switched projects
-          if (saveCounterRef.current > saveIdAtLoad) return;      // user edited or onSnapshot advanced
-          if (result.action === 'update' && result.data) {
-            const fsSaveId = result.data.lastSaveId ?? 0;
-            if (fsSaveId <= saveCounterRef.current) return;       // already up to date
-            const fsViewState = toProjectViewState(result.data, project);
-            applyViewState(fsViewState);
-            saveCounterRef.current = fsSaveId;
-            const fsTotal = countGroupedPages(fsViewState);
-            if (fsTotal > loadFenceRef.current) loadFenceRef.current = fsTotal;
-          }
-        })
-        .catch((err) => {
-          console.warn('[PERSIST] Background Firestore reconciliation failed:', err);
-        });
-
-      return;
-    }
-
-    // ── Fallback: No IDB cache — blocking load from both sources ────────
-    const data = await loadProjectDataForView(projectId);
-    const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
-    applyViewState(viewState);
-
-    const loadedSaveId = data?.lastSaveId ?? 0;
-    if (loadedSaveId > saveCounterRef.current) {
-      saveCounterRef.current = loadedSaveId;
-    }
-    loadFenceRef.current = countGroupedPages(viewState);
-
-    projectLoadingRef.current = false;
-    */
   }, [applyCanonicalState, applyViewState, clearWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setStorageMode, setWriteUnsafe, updateCanonicalCache]);
 
   const clearProject = useCallback(() => {
@@ -2202,6 +2271,7 @@ export function useProjectPersistence(options: {
   useEffect(() => {
     const pid = activeProjectIdRef.current;
     if (!pid) return;
+    if (isProjectSharedById(pid)) return;
     if (storageMode !== 'legacy') return;
     const ourClientId = clientIdRef.current;
     const unsub = onSnapshot(
@@ -2339,7 +2409,7 @@ export function useProjectPersistence(options: {
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
       if (typeof unsub === 'function') unsub();
     };
-  }, [activeProjectId, applyViewState, storageMode]);
+  }, [activeProjectId, applyViewState, getActiveProjectNotificationMeta, isProjectSharedById, storageMode]);
 
   useEffect(() => {
     const pid = activeProjectIdRef.current;
@@ -2398,6 +2468,28 @@ export function useProjectPersistence(options: {
       const isEntityListenerCurrent = () =>
         activeProjectIdRef.current === listenerProjectId &&
         epochLoadGenerationRef.current === listenerGeneration;
+      const getEntityListenerDropReason = () =>
+        activeProjectIdRef.current !== listenerProjectId ? 'project-switch' : 'generation-mismatch';
+      const traceEntityListenerEvent = (
+        event: string,
+        listener: string,
+        changeCount: number,
+        extra?: Record<string, unknown>,
+      ) => {
+        traceV2RuntimeEvent(
+          event,
+          'useProjectPersistence.v2EntityListener',
+          {
+            listener,
+            datasetEpoch,
+            changeCount,
+            listenerGeneration,
+            currentGeneration: epochLoadGenerationRef.current,
+            ...extra,
+          },
+          listenerProjectId,
+        );
+      };
       const cacheCanonicalView = () => {
         if (!isEntityListenerCurrent()) return;
         const currentMeta = collabMetaRef.current;
@@ -2414,10 +2506,19 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_GROUPS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
-            if (!isEntityListenerCurrent()) return;
+            const changes = snap.docChanges();
+            if (!isEntityListenerCurrent()) {
+              traceEntityListenerEvent('v2:listener-drop', PROJECT_GROUPS_SUBCOLLECTION, changes.length, {
+                reason: getEntityListenerDropReason(),
+              });
+              return;
+            }
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-            if (snap.metadata?.hasPendingWrites) return;
-            const merged = mergeRevisionedDocs(groupDocsRef.current, snap.docChanges() as any, PROJECT_GROUPS_SUBCOLLECTION, datasetEpoch);
+            if (snap.metadata?.hasPendingWrites) {
+              traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_GROUPS_SUBCOLLECTION, changes.length);
+              return;
+            }
+            const merged = mergeRevisionedDocs(groupDocsRef.current, changes as any, PROJECT_GROUPS_SUBCOLLECTION, datasetEpoch);
             if (!merged.changed) return;
             groupDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2433,10 +2534,19 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
-            if (!isEntityListenerCurrent()) return;
+            const changes = snap.docChanges();
+            if (!isEntityListenerCurrent()) {
+              traceEntityListenerEvent('v2:listener-drop', PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, changes.length, {
+                reason: getEntityListenerDropReason(),
+              });
+              return;
+            }
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-            if (snap.metadata?.hasPendingWrites) return;
-            const merged = mergeRevisionedDocs(blockedTokenDocsRef.current, snap.docChanges() as any, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, datasetEpoch);
+            if (snap.metadata?.hasPendingWrites) {
+              traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, changes.length);
+              return;
+            }
+            const merged = mergeRevisionedDocs(blockedTokenDocsRef.current, changes as any, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, datasetEpoch);
             if (!merged.changed) return;
             blockedTokenDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2452,10 +2562,19 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
-            if (!isEntityListenerCurrent()) return;
+            const changes = snap.docChanges();
+            if (!isEntityListenerCurrent()) {
+              traceEntityListenerEvent('v2:listener-drop', PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, changes.length, {
+                reason: getEntityListenerDropReason(),
+              });
+              return;
+            }
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-            if (snap.metadata?.hasPendingWrites) return;
-            const merged = mergeRevisionedDocs(manualBlockedKeywordDocsRef.current, snap.docChanges() as any, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, datasetEpoch);
+            if (snap.metadata?.hasPendingWrites) {
+              traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, changes.length);
+              return;
+            }
+            const merged = mergeRevisionedDocs(manualBlockedKeywordDocsRef.current, changes as any, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, datasetEpoch);
             if (!merged.changed) return;
             manualBlockedKeywordDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2471,10 +2590,19 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
-            if (!isEntityListenerCurrent()) return;
+            const changes = snap.docChanges();
+            if (!isEntityListenerCurrent()) {
+              traceEntityListenerEvent('v2:listener-drop', PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, changes.length, {
+                reason: getEntityListenerDropReason(),
+              });
+              return;
+            }
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-            if (snap.metadata?.hasPendingWrites) return;
-            const merged = mergeRevisionedDocs(tokenMergeRuleDocsRef.current, snap.docChanges() as any, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, datasetEpoch);
+            if (snap.metadata?.hasPendingWrites) {
+              traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, changes.length);
+              return;
+            }
+            const merged = mergeRevisionedDocs(tokenMergeRuleDocsRef.current, changes as any, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, datasetEpoch);
             if (!merged.changed) return;
             tokenMergeRuleDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2490,10 +2618,19 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_LABEL_SECTIONS_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
-            if (!isEntityListenerCurrent()) return;
+            const changes = snap.docChanges();
+            if (!isEntityListenerCurrent()) {
+              traceEntityListenerEvent('v2:listener-drop', PROJECT_LABEL_SECTIONS_SUBCOLLECTION, changes.length, {
+                reason: getEntityListenerDropReason(),
+              });
+              return;
+            }
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-            if (snap.metadata?.hasPendingWrites) return;
-            const merged = mergeRevisionedDocs(labelSectionDocsRef.current, snap.docChanges() as any, PROJECT_LABEL_SECTIONS_SUBCOLLECTION, datasetEpoch);
+            if (snap.metadata?.hasPendingWrites) {
+              traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_LABEL_SECTIONS_SUBCOLLECTION, changes.length);
+              return;
+            }
+            const merged = mergeRevisionedDocs(labelSectionDocsRef.current, changes as any, PROJECT_LABEL_SECTIONS_SUBCOLLECTION, datasetEpoch);
             if (!merged.changed) return;
             labelSectionDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2509,10 +2646,19 @@ export function useProjectPersistence(options: {
         onSnapshot(
           query(collection(db, 'projects', pid, PROJECT_ACTIVITY_LOG_SUBCOLLECTION), where('datasetEpoch', '==', datasetEpoch)),
           (snap) => {
-            if (!isEntityListenerCurrent()) return;
+            const changes = snap.docChanges();
+            if (!isEntityListenerCurrent()) {
+              traceEntityListenerEvent('v2:listener-drop', PROJECT_ACTIVITY_LOG_SUBCOLLECTION, changes.length, {
+                reason: getEntityListenerDropReason(),
+              });
+              return;
+            }
             markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-            if (snap.metadata?.hasPendingWrites) return;
-            const merged = mergeRevisionedDocs(activityLogDocsRef.current as Array<ProjectActivityLogDoc & { revision?: number; lastMutationId?: string | null }>, snap.docChanges() as any, PROJECT_ACTIVITY_LOG_SUBCOLLECTION, datasetEpoch);
+            if (snap.metadata?.hasPendingWrites) {
+              traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_ACTIVITY_LOG_SUBCOLLECTION, changes.length);
+              return;
+            }
+            const merged = mergeRevisionedDocs(activityLogDocsRef.current as Array<ProjectActivityLogDoc & { revision?: number; lastMutationId?: string | null }>, changes as any, PROJECT_ACTIVITY_LOG_SUBCOLLECTION, datasetEpoch);
             if (!merged.changed) return;
             activityLogDocsRef.current = merged.docs as ProjectActivityLogDoc[];
             cacheCanonicalView();
@@ -2549,7 +2695,19 @@ export function useProjectPersistence(options: {
       (snap) => {
         if (activeProjectIdRef.current !== listenerProjectId) return;
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-        if (snap.metadata?.hasPendingWrites) return;
+        if (snap.metadata?.hasPendingWrites) {
+          traceV2RuntimeEvent(
+            'v2:listener-skip-pending-writes',
+            'useProjectPersistence.v2MetaListener',
+            {
+              listener: `${PROJECT_COLLAB_META_COLLECTION}/${PROJECT_COLLAB_META_DOC}`,
+              currentGeneration: epochLoadGenerationRef.current,
+              metaRevision: collabMetaRef.current?.revision ?? null,
+            },
+            listenerProjectId,
+          );
+          return;
+        }
         const nextMeta = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
         const previousMeta = collabMetaRef.current;
         collabMetaRef.current = nextMeta;
@@ -2559,10 +2717,9 @@ export function useProjectPersistence(options: {
           (nextMeta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
         ));
         if (!nextMeta || nextMeta.readMode !== 'v2') {
+          const sharedProject = isProjectSharedById(pid);
           setCanonicalReloading(false);
           setWriteUnsafe(false);
-          // Firestore recovered to legacy (or meta doc removed): match loadProject legacy branch
-          // so chunk listeners attach — do not leave storageMode 'v2' with non-V2 meta (H1).
           epochLoadGenerationRef.current += 1;
           epochLoadAbortRef.current?.abort();
           epochLoadAbortRef.current = null;
@@ -2584,14 +2741,53 @@ export function useProjectPersistence(options: {
           setLegacyWritesBlocked(false);
           setActiveOperation(null);
           activeOperationRef.current = null;
-          setStorageMode('legacy');
-          storageModeRef.current = 'legacy';
+          setStorageMode(sharedProject ? 'v2' : 'legacy');
+          storageModeRef.current = sharedProject ? 'v2' : 'legacy';
           projectStorageModeResolvedRef.current = true;
           const loadPid = pid;
           void (async () => {
             try {
-              const data = await loadProjectDataForView(loadPid);
+              const canonical = await loadCanonicalProjectState(
+                loadPid,
+                clientIdRef.current,
+                async () => null,
+                {
+                  sharedProject,
+                },
+              );
               if (activeProjectIdRef.current !== loadPid) return;
+              if (sharedProject && canonical.mode !== 'v2') {
+                traceV2RuntimeEvent(
+                  'v2:canonical-load-drop',
+                  'useProjectPersistence.metaUnsub',
+                  {
+                    reason: 'shared-non-v2',
+                    incoming: summarizeIncomingCanonicalState(canonical),
+                  },
+                  loadPid,
+                );
+                setCanonicalReloading(false);
+                setWriteUnsafe(true, canonical.resolved ? 'canonical-invalid' : 'canonical-unresolved');
+                return;
+              }
+              if (canonical.mode === 'v2') {
+                applyCanonicalState(canonical);
+                if (canonical.entities.meta && canonical.resolved) {
+                  updateCanonicalCache(canonical.resolved, canonical.entities.meta);
+                }
+                const resolvedMeta = canonical.entities.meta;
+                if (
+                  resolvedMeta &&
+                  canonical.resolved &&
+                  resolvedMeta.readMode === 'v2' &&
+                  resolvedMeta.commitState === 'ready' &&
+                  resolvedMeta.migrationState === 'complete'
+                ) {
+                  attachEpochListeners(resolvedMeta.datasetEpoch, resolvedMeta);
+                }
+                return;
+              }
+              const data = canonical.resolved;
               const proj = projectsRef.current.find((p) => p.id === loadPid);
               const viewState = data ? toProjectViewState(data, proj) : createEmptyProjectViewState();
               applyViewState(viewState);
@@ -2602,7 +2798,7 @@ export function useProjectPersistence(options: {
               loadFenceRef.current = countGroupedPages(viewState);
             } catch (loadErr) {
               if (activeProjectIdRef.current !== loadPid) return;
-              reportPersistFailure(addToastRef.current, 'legacy transition after collab meta change', loadErr, {
+              reportPersistFailure(addToastRef.current, sharedProject ? 'shared V2 reload after collab meta change' : 'legacy transition after collab meta change', loadErr, {
                 channel: 'listener',
                 ...getActiveProjectNotificationMeta(),
               });
@@ -2636,8 +2832,46 @@ export function useProjectPersistence(options: {
           ) ?? await loadCanonicalProjectState(
             pid,
             clientIdRef.current,
-            () => loadProjectDataForView(pid),
+            async () => null,
+            {
+              sharedProject: isProjectSharedById(pid),
+            },
           );
+          traceV2RuntimeEvent(
+            'v2:canonical-load-complete',
+            'useProjectPersistence.v2MetaListener',
+            {
+              generation,
+              currentGeneration: epochLoadGenerationRef.current,
+              incoming: canonical ? summarizeIncomingCanonicalState(canonical) : null,
+            },
+            pid,
+          );
+          const dropReason =
+            cancelled
+              ? 'cancelled'
+              : generation !== epochLoadGenerationRef.current
+                ? 'generation-mismatch'
+                : abortController.signal.aborted
+                  ? 'aborted'
+                  : activeProjectIdRef.current !== pid
+                    ? 'project-switch'
+                    : !canonical
+                      ? 'canonical-unresolved'
+                      : null;
+          if (dropReason) {
+            traceV2RuntimeEvent(
+              'v2:canonical-load-drop',
+              'useProjectPersistence.v2MetaListener',
+              {
+                reason: dropReason,
+                generation,
+                currentGeneration: epochLoadGenerationRef.current,
+                incoming: canonical ? summarizeIncomingCanonicalState(canonical) : null,
+              },
+              pid,
+            );
+          }
           if (
             cancelled ||
             abortController.signal.aborted ||
@@ -2704,7 +2938,18 @@ export function useProjectPersistence(options: {
       (snap) => {
         if (activeProjectIdRef.current !== listenerProjectId) return;
         markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, snap);
-        if (snap.metadata?.hasPendingWrites) return;
+        if (snap.metadata?.hasPendingWrites) {
+          traceV2RuntimeEvent(
+            'v2:listener-skip-pending-writes',
+            'useProjectPersistence.v2OperationListener',
+            {
+              listener: `${PROJECT_OPERATIONS_SUBCOLLECTION}/${PROJECT_OPERATION_CURRENT_DOC}`,
+              currentGeneration: epochLoadGenerationRef.current,
+            },
+            listenerProjectId,
+          );
+          return;
+        }
         const rawOperation = snap.exists() ? (snap.data() as ProjectOperationLockDoc) : null;
         const nextOperation = (
           rawOperation &&
@@ -2741,6 +2986,7 @@ export function useProjectPersistence(options: {
     clearPendingForEpoch,
     clearWritableCanonical,
     getActiveProjectNotificationMeta,
+    isProjectSharedById,
     recomposeFromCanonicalRefs,
     reloadCanonicalStateFromCloud,
     setActiveOperation,
@@ -2749,6 +2995,8 @@ export function useProjectPersistence(options: {
     setStorageMode,
     setWriteUnsafe,
     storageMode,
+    summarizeIncomingCanonicalState,
+    traceV2RuntimeEvent,
     updateCanonicalCache,
     v2DocKey,
   ]);

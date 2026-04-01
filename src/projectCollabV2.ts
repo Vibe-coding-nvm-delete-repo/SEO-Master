@@ -103,6 +103,11 @@ export interface CanonicalProjectState {
   };
 }
 
+export interface LoadCanonicalProjectStateOptions {
+  sharedProject?: boolean;
+  localFallbackPayload?: ProjectDataPayload | null;
+}
+
 export interface RevisionedDocChange<T extends object> {
   kind: 'upsert' | 'delete';
   id: string;
@@ -167,6 +172,42 @@ function emptyEntities(): ProjectCollabEntityState {
     labelSections: [],
     activityLog: [],
     activeOperation: null,
+  };
+}
+
+function emptyProjectDataPayload(updatedAt = nowIso()): ProjectDataPayload {
+  return {
+    results: [],
+    clusterSummary: [],
+    tokenSummary: [],
+    groupedClusters: [],
+    approvedGroups: [],
+    stats: null,
+    datasetStats: null,
+    blockedTokens: [],
+    blockedKeywords: [],
+    labelSections: [],
+    activityLog: [],
+    tokenMergeRules: [],
+    autoGroupSuggestions: [],
+    autoMergeRecommendations: [],
+    groupMergeRecommendations: [],
+    updatedAt,
+    lastSaveId: 1,
+  };
+}
+
+function buildSharedV2FallbackState(
+  meta: ProjectCollabMetaDoc | null,
+  resolved: ProjectDataPayload | null,
+  diagnostics?: CanonicalProjectState['diagnostics'],
+): CanonicalProjectState {
+  return {
+    mode: 'v2',
+    base: null,
+    entities: { ...emptyEntities(), meta },
+    resolved,
+    diagnostics,
   };
 }
 
@@ -1106,16 +1147,6 @@ function isLegacyGroupDoc(group: ProjectGroupDoc): boolean {
   return (group.clusters?.length ?? 0) > 0;
 }
 
-export async function loadBaseSnapshotFromFirestore(projectId: string): Promise<ProjectBaseSnapshot | null> {
-  try {
-    const snapshot = await getDocs(projectCollection(projectId, PROJECT_BASE_SUBCOLLECTION));
-    if (snapshot.empty) return null;
-    return toBaseSnapshot(buildProjectDataPayloadFromChunkDocs(snapshot.docs as Array<{ data: () => any }>));
-  } catch {
-    return null;
-  }
-}
-
 export interface LoadedBaseCommit {
   manifest: ProjectBaseCommitManifestDoc;
   base: ProjectBaseSnapshot;
@@ -1318,6 +1349,7 @@ async function saveCollabEntityDocs(
           ...docItem,
           id: docItem.id,
           datasetEpoch,
+          revision: 1,
         }),
       );
       ops += 1;
@@ -1475,7 +1507,7 @@ export async function migrateLegacyProjectToV2(
   }
 
   let lockLost = false;
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+  const heartbeatTimer: ReturnType<typeof setInterval> = setInterval(() => {
     void heartbeatProjectOperationLock(projectId, actorId)
       .then((nextLock) => {
         if (!nextLock) {
@@ -1572,9 +1604,7 @@ export async function migrateLegacyProjectToV2(
       resolved: assembleCanonicalPayload(base, { ...entities, meta, activeOperation: null }),
     };
   } finally {
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-    }
+    clearInterval(heartbeatTimer);
     await releaseProjectOperationLock(projectId, actorId).catch(() => undefined);
   }
 }
@@ -1693,7 +1723,9 @@ async function recoverStuckV2Meta(
   actorId: string,
   /** When true, treat even 'ready'/'complete' meta as stuck (loadCanonicalEpoch already failed). */
   canonicalLoadFailed = false,
+  options?: { allowLegacyReset?: boolean },
 ): Promise<NonNullable<CanonicalProjectState['diagnostics']>> {
+  const allowLegacyReset = options?.allowLegacyReset !== false;
   if (meta.readMode !== 'v2') {
     return {
       recovery: {
@@ -1784,6 +1816,14 @@ async function recoverStuckV2Meta(
       }
 
       if (!canFinalize && current.migrationState === 'failed') {
+        if (!allowLegacyReset) {
+          return {
+            recovery: {
+              attempted: true,
+              outcome: 'unchanged',
+            },
+          };
+        }
         // Even though migrationState is already 'failed', readMode may still
         // be 'v2' (e.g. the original migration set migrationState:'failed'
         // without resetting readMode). Fix that here so the next load skips
@@ -1837,11 +1877,9 @@ async function recoverStuckV2Meta(
         : {
           ...current,
           migrationState: 'failed',
-          // Reset to legacy so the client can save via the legacy chunk path
-          // and Firestore rules (!hasV2Meta) allow those writes. Without this,
-          // the client falls back to legacy mode locally but Firestore still
-          // blocks legacy chunk writes because readMode is still 'v2'.
-          readMode: 'legacy',
+          // Shared-project cutover keeps failed recovery inside the V2 contract.
+          // Non-shared legacy projects can still opt into the old reset path.
+          readMode: allowLegacyReset ? 'legacy' : 'v2',
           commitState: current.commitState,
           lastMigratedAt: now,
           lastWriterClientId: actorId,
@@ -1882,7 +1920,10 @@ export async function loadCanonicalProjectState(
   projectId: string,
   actorId: string,
   legacyLoader: () => Promise<ProjectDataPayload | null>,
+  options?: LoadCanonicalProjectStateOptions,
 ): Promise<CanonicalProjectState> {
+  const sharedProject = options?.sharedProject === true;
+  const localFallbackPayload = sharedProject ? (options?.localFallbackPayload ?? null) : null;
   const meta = await loadCollabMeta(projectId);
   if (meta?.readMode === 'v2') {
     let canonical = await loadCanonicalEpoch(projectId, meta);
@@ -1890,11 +1931,13 @@ export async function loadCanonicalProjectState(
       return canonical;
     }
 
-    // V2 meta without a usable base commit — attempt recovery so that
-    // recoverStuckV2Meta can reset readMode back to 'legacy' in Firestore.
-    // Without this, the meta stays stuck at readMode:'v2' forever and every
-    // load shows the "canonical state is incomplete" warning.
-    const recoveryDiagnostics = await recoverStuckV2Meta(projectId, meta, actorId, /* canonicalLoadFailed */ true);
+    const recoveryDiagnostics = await recoverStuckV2Meta(
+      projectId,
+      meta,
+      actorId,
+      /* canonicalLoadFailed */ true,
+      { allowLegacyReset: !sharedProject },
+    );
     const recoveredMeta = await loadCollabMeta(projectId) ?? meta;
     if (
       recoveredMeta.revision !== meta.revision ||
@@ -1910,12 +1953,14 @@ export async function loadCanonicalProjectState(
       }
     }
 
-    // Bootstrap must stay read-only for legacy data. Re-attempting migration during
-    // ordinary project open turns a local read path into a write path, which can
-    // fail under normal local/legacy permissions and block core functionality.
-    // If V2 meta is unrecoverable, surface the best available legacy payload and
-    // let the user keep working instead of retrying migration here.
     if (recoveredMeta.migrationState === 'failed' || !recoveredMeta.baseCommitId) {
+      if (sharedProject) {
+        return buildSharedV2FallbackState(
+          recoveredMeta,
+          localFallbackPayload,
+          recoveryDiagnostics,
+        );
+      }
       const legacyPayload = await legacyLoader();
       if (legacyPayload) {
         return {
@@ -1938,6 +1983,29 @@ export async function loadCanonicalProjectState(
     };
   }
 
+  if (sharedProject) {
+    if (!meta) {
+      try {
+        return await migrateLegacyProjectToV2(
+          projectId,
+          emptyProjectDataPayload(),
+          actorId,
+        );
+      } catch (migrationError) {
+        logPersistError(`shared-project initial V2 migration (${projectId})`, migrationError);
+        const reloadedMeta = await loadCollabMeta(projectId).catch(() => null);
+        if (reloadedMeta?.readMode === 'v2') {
+          const canonical = await loadCanonicalEpoch(projectId, reloadedMeta);
+          if (canonical) {
+            return canonical;
+          }
+          return buildSharedV2FallbackState(reloadedMeta, localFallbackPayload);
+        }
+        return buildSharedV2FallbackState(reloadedMeta, localFallbackPayload);
+      }
+    }
+    return buildSharedV2FallbackState(meta, localFallbackPayload);
+  }
   const legacyPayload = await legacyLoader();
   if (!legacyPayload) {
     return {

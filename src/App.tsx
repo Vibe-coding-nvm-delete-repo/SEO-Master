@@ -45,8 +45,6 @@ import {
   formatKeywordRatingDuration,
 } from './KeywordRatingEngine';
 import {
-  buildProjectDataPayloadFromChunkDocs,
-  loadProjectDataFromFirestore,
   saveAppPrefsToFirestore,
   saveAppPrefsToIDB,
   saveToIDB,
@@ -54,7 +52,6 @@ import {
 } from './projectStorage';
 import {
   createEmptyProjectViewState,
-  loadProjectDataForView,
   loadSavedWorkspacePrefs,
   toProjectViewState,
   type ProjectViewState,

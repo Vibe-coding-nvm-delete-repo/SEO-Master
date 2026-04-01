@@ -14,6 +14,7 @@
     "release:live": "node scripts/release.mjs live",
     "backup:firestore:status": "node scripts/firestore-backup.mjs status",
     "backup:firestore:ensure": "node scripts/firestore-backup.mjs ensure",
+    "migrate:shared:v2": "tsx scripts/migrate-shared-projects-v2.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "vitest run src/App.shared-projects.integration.test.tsx",

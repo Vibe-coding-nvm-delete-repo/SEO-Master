@@ -10,6 +10,7 @@ export type RuntimeTraceEventInput = {
 
 const TRACE_ENDPOINT = 'http://127.0.0.1:7673/ingest/205fa36c-ad66-4c4d-ae8d-1b7715a1d3dd';
 const TRACE_ENABLED_KEY = 'kwg.runtimeTrace.enabled';
+const TRACE_ENDPOINT_KEY = 'kwg.runtimeTrace.endpoint';
 const TRACE_SESSION_KEY = 'kwg.runtimeTrace.sessionId';
 const TRACE_RUN_KEY = 'kwg.runtimeTrace.runId';
 
@@ -53,6 +54,13 @@ function runtimeTraceEnabled(): boolean {
   return false;
 }
 
+function resolveTraceEndpoint(): string | null {
+  const configured = readStorageValue(TRACE_ENDPOINT_KEY)?.trim();
+  if (!configured) return TRACE_ENDPOINT;
+  if (configured.toLowerCase() === 'console-only') return null;
+  return configured;
+}
+
 export function beginRuntimeTrace(source: string, projectId?: string | null, data?: RuntimeTraceData): string {
   const traceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   traceHopByTraceId.set(traceId, 0);
@@ -89,16 +97,19 @@ export function traceRuntimeEvent(input: RuntimeTraceEventInput): void {
     timestamp: Date.now(),
   };
 
-  fetch(TRACE_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Debug-Session-Id': sessionId,
-    },
-    body: JSON.stringify(payload),
-  }).catch(() => {
-    /* ignore transport errors in instrumentation */
-  });
+  const endpoint = resolveTraceEndpoint();
+  if (endpoint) {
+    fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': sessionId,
+      },
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      /* ignore transport errors in instrumentation */
+    });
+  }
 
   console.debug('[runtime-trace]', payload);
 }

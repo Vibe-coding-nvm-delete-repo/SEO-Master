@@ -135,6 +135,19 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 **Scenario:** User removes page X from group A at T=0 (triggers re-review). User adds page Y to group A at T=2s. Timer fires at T=5s, reads current `groupedClustersRef` which now has page Y. Re-review runs on wrong group composition.
 **Fix:** Capture the full group snapshot when scheduling, not just IDs. The re-review should operate on the group state that triggered it.
 
+### [x] 1.9 Shared projects could still fall back to legacy chunk writes after V2 recovery/missing meta
+**Date fixed:** 2026-03-31
+**Files:** `src/useProjectPersistence.ts`, `src/projectCollabV2.ts`, `src/projectWorkspace.ts`, `scripts/migrate-shared-projects-v2.ts`, `package.json`, `firestore.rules`, `src/projectCollabV2.storage.test.ts`, `src/useProjectPersistence.v2.test.tsx`, `src/App.shared-projects.integration.test.tsx`
+**Root cause:** Shared projects were still allowed to resolve/open in legacy mode when `collab/meta` was missing, downgraded, or unrecoverable. The client reattached the legacy `projects/{id}/chunks` listener, recovery could reset shared `readMode` back to `legacy`, and rules still allowed shared legacy chunk/entity writes before `hasV2Meta` existed. That meant the same shared project could bounce between two persistence contracts depending on bootstrap timing or recovery state.
+**All instances fixed:**
+- Shared project detection now gates bootstrap/listener behavior through one helper in `src/projectSharing.ts`.
+- `src/useProjectPersistence.ts` no longer attaches the legacy chunk listener for shared `collab` projects, forces shared loads/reloads through the V2 canonical path, and keeps shared meta-loss handling on V2 instead of reloading legacy chunks or reopening the legacy runtime loader.
+- `src/projectCollabV2.ts` now treats `loadCanonicalProjectState(..., { sharedProject: true })` as V2-only bootstrap: shared projects keep only a local read-only fallback view when bootstrap/recovery is incomplete, recovery no longer resets shared `readMode` back to `legacy`, and runtime no longer reads legacy chunk payloads from Firestore during shared open.
+- `src/projectWorkspace.ts` no longer contains the dormant `loadProjectDataV2Aware` bootstrap fork, so shared-project runtime bootstrap now has one source of truth.
+- `scripts/migrate-shared-projects-v2.ts` provides the explicit out-of-band shared migration entrypoint, so legacy chunk reads needed for migration happen there instead of inside the shared runtime path.
+- `firestore.rules` now block legacy chunk writes and legacy-bypass entity writes for shared `collab` projects, and shared `collab/meta` updates can no longer use the old V2-to-legacy escape hatch.
+- Regression coverage added for shared bootstrap, shared meta-loss handling, shared App-level V2 listener updates, and explicit two-client A→B V2 convergence with no legacy chunk listener.
+
 ---
 
 ## Tier 2 — CORRECTNESS (bugs that produce wrong results)
