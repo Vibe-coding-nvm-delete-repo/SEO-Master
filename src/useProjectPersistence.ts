@@ -135,6 +135,8 @@ import type {
 
 export const PROJECT_LOCAL_WRITE_TIMEOUT_MS = 15_000;
 export const PROJECT_CLOUD_WRITE_TIMEOUT_MS = 30_000;
+/** Minimum background time (ms) before a returning V2 tab triggers a cloud state reload. */
+const V2_BACKGROUND_RELOAD_THRESHOLD_MS = 30_000;
 
 /** Matches App.tsx remove-from-approved row shape (cluster-level location). */
 function appendResultRowsRemoveFromApproved(
@@ -1733,10 +1735,24 @@ export function useProjectPersistence(options: {
   }, [flushNow, getActiveProjectNotificationMeta, hasOwnedActiveOperationLock, invalidateOwnedActiveOperationLock, reloadCanonicalStateFromCloud]);
 
   // Best-effort: extra flush when the tab hides or unloads (navigation may already queue saves).
+  // For V2 shared projects, refresh state from cloud when the tab returns to focus after a
+  // long background period — catches any updates missed while the tab was suspended.
   useEffect(() => {
+    let lastHiddenAt = 0;
     const onVis = () => {
-      if (document.visibilityState === 'hidden' && storageModeRef.current === 'legacy') {
-        enqueueSave('visibility-hidden');
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAt = Date.now();
+        if (storageModeRef.current === 'legacy') {
+          enqueueSave('visibility-hidden');
+        }
+      } else if (document.visibilityState === 'visible') {
+        if (
+          storageModeRef.current === 'v2' &&
+          lastHiddenAt > 0 &&
+          Date.now() - lastHiddenAt >= V2_BACKGROUND_RELOAD_THRESHOLD_MS
+        ) {
+          void reloadCanonicalStateFromCloud();
+        }
       }
     };
     const onPageHide = () => {
@@ -1750,7 +1766,7 @@ export function useProjectPersistence(options: {
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('pagehide', onPageHide);
     };
-  }, [enqueueSave]);
+  }, [enqueueSave, reloadCanonicalStateFromCloud]);
 
   // ── Auto-recovery: when local durability is "Failed", periodically retry ──
   // This ensures that transient IDB failures (busy connection, temporary lock)
@@ -2089,11 +2105,6 @@ export function useProjectPersistence(options: {
       applyViewState(toProjectViewState(idbData, project, { skipRebuild: true }));
     }
 
-    if (sharedProject) {
-      setStorageMode('v2');
-      storageModeRef.current = 'v2';
-    }
-
     const canonical = await loadCanonicalProjectState(
       projectId,
       clientIdRef.current,
@@ -2221,7 +2232,14 @@ export function useProjectPersistence(options: {
       const viewState = data ? toProjectViewState(data, project) : createEmptyProjectViewState();
       applyViewState(viewState);
       const loadedSaveId = data?.lastSaveId ?? 0;
-      if (loadedSaveId > saveCounterRef.current) {
+      if (canonical.resolved && loadedSaveId > 0) {
+        // Firestore is authoritative — adopt its saveId unconditionally.
+        // An inflated local saveId from unflushed IDB edits causes Guard 6
+        // to reject all incoming remote snapshots permanently.
+        // Only override when loadedSaveId > 0 so a missing/unset Firestore
+        // value on a brand-new project doesn't reset a valid local counter.
+        saveCounterRef.current = loadedSaveId;
+      } else if (loadedSaveId > saveCounterRef.current) {
         saveCounterRef.current = loadedSaveId;
       }
       loadFenceRef.current = countGroupedPages(viewState);
@@ -2728,6 +2746,11 @@ export function useProjectPersistence(options: {
       initialMeta.migrationState === 'complete'
     ) {
       attachEpochListeners(initialMeta.datasetEpoch, initialMeta);
+    } else if (initialMeta) {
+      console.warn(
+        '[PERSIST] V2 entity listeners deferred — collabMeta present but base snapshot not loaded.',
+        { epoch: initialMeta.datasetEpoch, hasBase: !!baseSnapshotRef.current },
+      );
     }
 
     let cancelled = false;
