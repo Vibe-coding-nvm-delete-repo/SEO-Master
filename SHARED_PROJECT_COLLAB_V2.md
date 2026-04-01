@@ -190,6 +190,7 @@ When a V2 project cannot load a ready canonical epoch, the recovery workflow **a
 Guardrails for the live meta listener:
 - meta-driven reloads must use the same recovery-capable canonical path as bootstrap/conflict reloads when a lightweight epoch load is null or unresolved; do not rely on `loadCanonicalEpoch` alone for listener-driven recovery
 - when a listener sees a newer `collab/meta` revision, only attach new epoch listeners from the final authoritative resolved meta state for that epoch
+- while a meta-driven reload is in flight, routine shared edits may stay writable only if the current `collab/meta` still points at the same `datasetEpoch/baseCommitId` as the last acknowledged writable canonical base already loaded in memory; if meta has advanced to a different base commit or epoch, the persistence boundary must fail closed until that canonical load finishes
 - when a listener sees `readMode` change from `'v2'` to `'legacy'`, immediately clear `isWriteUnsafe` and unlock writes
 - UI success messaging for grouping/approve/unapprove/ungroup flows must only run after the mutation is actually accepted by the persistence boundary; blocked shared writes must preserve user selection/input and surface only the read-only warning
 

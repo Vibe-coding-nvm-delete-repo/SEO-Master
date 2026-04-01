@@ -148,6 +148,38 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 - `firestore.rules` now block legacy chunk writes and legacy-bypass entity writes for shared `collab` projects, and shared `collab/meta` updates can no longer use the old V2-to-legacy escape hatch.
 - Regression coverage added for shared bootstrap, shared meta-loss handling, shared App-level V2 listener updates, and explicit two-client A→B V2 convergence with no legacy chunk listener.
 
+### [x] 1.10 Shared token merge / auto-merge lock ownership and Shift+1 routing regressions
+**Date fixed:** 2026-03-31
+**Files:** `src/App.tsx`, `src/GroupDataView.tsx`, `src/hooks/useAutoMerge.ts`, `src/hooks/useAutoMerge.test.tsx`, `src/hooks/useGlobalGroupingShortcuts.ts`, `src/hooks/useGlobalGroupingShortcuts.test.tsx`
+**Root cause:** Token auto-merge recommendation generation and review actions were split across UI wrappers and hook internals in a way that violated the shared V2 operation contract. `updateAutoMergeRecommendations()` requires the caller to already own the shared `token-merge` bulk-operation lock, but `useAutoMerge` generated recommendations without acquiring that lock itself, several UI callsites wrapped async token-merge callbacks without returning their promises (releasing the lock too early), and the global shortcut handler incorrectly treated bare `Shift` as an action key. That combination meant `Shift+1` could fire the wrong action locally, token auto-merge writes could be rejected in shared mode, and local recommendation refs could advance even when the shared write was blocked.
+**All instances fixed:**
+- `src/hooks/useAutoMerge.ts` now owns the token-merge exclusive-operation boundary for recommendation generation, single-apply, decline, undo, and `Merge All`, and it only mutates `autoMergeRecommendationsRef.current` after the shared write is accepted.
+- `src/App.tsx` now passes the shared `runWithExclusiveOperation` helper into `useAutoMerge`, wires `Shift+1` token auto-merge capability into the global shortcut hook, and keeps the manual merge-confirm path inside a returned token-merge promise so the lock is held until the merge cascade finishes.
+- `src/GroupDataView.tsx` no longer double-wraps token auto-merge review actions with brittle UI-level locks, and the remaining manual unmerge actions now return the real async token-merge promise so the shared lock is not released early.
+- `src/hooks/useGlobalGroupingShortcuts.ts` now ignores bare `Shift`, preserves `Shift+1` for Pages Auto Group on the Pages tab, and routes `Shift+1` to token auto-merge only when the Token Management `auto-merge` view is active outside Pages.
+- Regression coverage now verifies bare `Shift` never triggers grouping, `Shift+1` dispatches to the correct action by context, recommendation generation uses the exclusive token-merge operation, blocked shared writes do not mutate local auto-merge refs, and `Merge All` stays inside one exclusive token-merge operation until the shared write completes.
+
+### [x] 1.11 Shared exclusive-operation cleanup and CSV import acceptance gaps
+**Date fixed:** 2026-03-31
+**Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `src/hooks/useCsvImport.ts`, `src/hooks/useCsvImport.test.tsx`, `src/GroupDataView.tsx`
+**Root cause:** The shared exclusive-operation helper assumed lock acquire/release never throw, so a failed lock transaction could leave the same-browser in-flight gate or local active-operation state wedged until reload. Separately, CSV import treated `bulkSet()` as fire-and-forget even though shared canonical saves are async, so import completion could switch tabs and clear the busy state before the shared write was accepted or rejected.
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now treats lock acquire and release as fallible operations: acquire failures report through the persistence error channel without wedging the local in-flight gate, and release failures report without leaving `activeOperation` pinned locally.
+- `src/useProjectPersistence.v2.test.tsx` now covers both failure modes so a rejected lock acquire or release cannot silently regress back into a browser-local deadlock.
+- `src/hooks/useCsvImport.ts` now awaits the async `bulkSet()` result, only completes the import after an accepted shared mutation, and surfaces blocked/failed shared persistence instead of claiming success.
+- `src/hooks/useCsvImport.test.tsx` now verifies that CSV import stays in the processing state until the async shared save resolves and that blocked shared persistence does not switch the UI to the imported Pages view.
+- `src/GroupDataView.tsx` now only advertises `Shift+1` where the shortcut actually exists, so the UI no longer promises a keyboard path that the handler intentionally does not support.
+
+### [x] 1.12 Shared V2 reloads could still accept stale old-epoch edits after `collab/meta` advanced
+**Date fixed:** 2026-04-01
+**Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FEATURES.md`
+**Root cause:** The shared V2 hook already tracked `lastKnownGoodWritableState` as `datasetEpoch:baseCommitId`, but the mutation boundary and UI editability flags never used it. When the meta listener saw a newer `collab/meta`, it immediately advanced the in-memory meta identity and generation, marked canonical reload in progress, and fenced old entity listeners. But routine shared edits still stayed enabled as long as `isWriteUnsafe` was false. Because revisioned entity writes only CAS per-doc and do not CAS against `collab/meta`, a client in that window could still write old-epoch `groups` / `blocked_tokens` / `label_sections` / `token_merge_rules` / `activity_log` docs against the stale base it had loaded locally. That produced the exact cross-user failure where one browser appeared to save a change that another browser on the new epoch would never observe.
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now derives a canonical identity from `datasetEpoch + baseCommitId` and fail-closes shared edits whenever canonical reload is in progress and the current `collab/meta` identity no longer matches the last acknowledged writable canonical base.
+- The same unsafe-reload guard now feeds `ensureV2MutationAllowed()`, `getBlockedMutationReason()`, `isSharedProjectReadOnly`, `isRoutineSharedEditBlocked`, `isBulkSharedEditBlocked`, and the exported `writeBlockReason`, so every shared action follows one rule instead of leaving per-feature exceptions.
+- `src/useProjectPersistence.v2.test.tsx` rewrites the prior regression that incorrectly allowed grouping during a newer-epoch reload, and adds the positive same-identity reload case to prove benign canonical churn stays writable while true epoch/base-commit advancement blocks until convergence.
+- `FEATURES.md` now documents the stronger shared-editability rule so future changes do not reintroduce “writable while meta already points at a different canonical base” behavior.
+
 ---
 
 ## Tier 2 — CORRECTNESS (bugs that produce wrong results)

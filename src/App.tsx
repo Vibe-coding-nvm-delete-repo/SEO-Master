@@ -934,6 +934,7 @@ export default function App() {
     activeProjectId, flushNow,
     setTokenMgmtSubTab, setTokenMgmtPage,
     handleUndoMergeParent,
+    runWithExclusiveOperation,
   });
 
   const {
@@ -1120,14 +1121,21 @@ export default function App() {
     runWithExclusiveOperation,
   });
 
+  const canRunTokenAutoMerge = Boolean(results?.length) && !isBulkSharedEditBlocked && autoMergeJob.phase !== 'running';
+
   useGlobalGroupingShortcuts({
     activeTab,
+    tokenMgmtSubTab,
     canRunManualGroup,
     canApproveGrouped,
     canRunFilteredAutoGroup,
+    canRunTokenAutoMerge,
     handleGroupClusters,
     approveSelectedGrouped,
     handleRunFilteredAutoGroup,
+    handleRunTokenAutoMerge: () => {
+      void runAutoMergeRecommendations();
+    },
   });
 
   const pendingGroupMergeRecommendationsCount = groupMergeRecommendations.filter(
@@ -1843,9 +1851,7 @@ export default function App() {
             impact={results && clusterSummary ? computeMergeImpact(results, groupedClusters, approvedGroups, mergeModalTokens[0], mergeModalTokens.slice(1)) : { pagesAffected: 0, groupsAffected: 0, approvedGroupsAffected: 0, pageCollisions: 0 }}
             universalBlockedTokens={universalBlockedTokens}
             onConfirm={(parentToken) => {
-              void runWithExclusiveOperation('token-merge', async () => {
-                handleMergeTokens(parentToken);
-              });
+              void runWithExclusiveOperation('token-merge', () => handleMergeTokens(parentToken));
             }}
             onCancel={() => { setIsMergeModalOpen(false); setMergeModalTokens([]); }}
           />
@@ -1854,8 +1860,6 @@ export default function App() {
     </div>
   );
 }
-
-
 
 
 

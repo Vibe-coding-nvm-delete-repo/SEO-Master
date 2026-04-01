@@ -6,12 +6,13 @@ import { stateFullNames, stateAbbrToFull, stopWords } from '../dictionaries';
 import { applyMergeRulesToTokenArr } from '../tokenMerge';
 import { csvImportProjectMismatch } from '../csvImportProjectScope';
 import { createGenerationGuard } from '../collabV2WriteGuard';
-import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, BlockedKeyword, TokenMergeRule } from '../types';
+import { isAcceptedSharedMutation, SHARED_MUTATION_ACCEPTED, type SharedMutationResult } from '../sharedMutation';
+import type { ProcessedRow, Cluster, ClusterSummary, TokenSummary, BlockedKeyword, TokenMergeRule, ProjectOperationLockDoc } from '../types';
 
 interface UseCsvImportParams {
   activeProjectIdRef: React.MutableRefObject<string | null>;
   storageMode: string;
-  runWithExclusiveOperation?: (operationType: string, operation: () => Promise<void>) => Promise<void>;
+  runWithExclusiveOperation?: <T>(operationType: ProjectOperationLockDoc['type'], operation: () => Promise<T>) => Promise<T | null>;
   tokenMergeRules: TokenMergeRule[];
   syncFileNameLocal: (name: string) => void;
   bulkSet: (data: {
@@ -34,7 +35,7 @@ interface UseCsvImportParams {
     autoMergeRecommendations: never[];
     groupMergeRecommendations: never[];
     labelSections: never[];
-  }) => void;
+  }) => Promise<SharedMutationResult>;
   setActiveTab: (tab: string) => void;
   setResults: (r: ProcessedRow[] | null) => void;
   setClusterSummary: (c: ClusterSummary[] | null) => void;
@@ -131,7 +132,7 @@ export function useCsvImport({
           let i = startIndex;
           const chunkSize = 2000;
 
-          const processChunk = () => {
+          const processChunk = async () => {
             try {
               if (csvImportProjectMismatch(importProjectId, activeProjectIdRef.current)) {
                 notifyImportCancelled();
@@ -332,7 +333,9 @@ export function useCsvImport({
 
               if (i < data.length) {
                 setProgress(Math.round((i / data.length) * 100));
-                requestAnimationFrame(processChunk);
+                requestAnimationFrame(() => {
+                  void processChunk();
+                });
               } else {
                 setProgress(100);
                 // Finished processing all chunks
@@ -527,7 +530,7 @@ export function useCsvImport({
                 }
 
                 // Single atomic path: bulkSet updates latest ref + React state + persist
-                bulkSet({
+                const persistResult = await bulkSet({
                   results: outputData,
                   clusterSummary: summaryData,
                   tokenSummary: tokenSummaryData,
@@ -545,6 +548,17 @@ export function useCsvImport({
                   groupMergeRecommendations: [],
                   labelSections: []
                 });
+
+                if (!isAcceptedSharedMutation(persistResult)) {
+                  const message = persistResult.status === 'blocked'
+                    ? 'CSV import could not be saved because the shared project is temporarily locked or read-only.'
+                    : 'CSV import could not be saved to the shared project.';
+                  setError(message);
+                  addToast(message, 'error');
+                  setIsProcessing(false);
+                  resolve();
+                  return;
+                }
 
                 setActiveTab('pages');
                 setIsProcessing(false);
@@ -564,7 +578,7 @@ export function useCsvImport({
             }
           };
 
-          processChunk();
+          void processChunk();
         } catch (err: any) {
           setError(err.message || "An error occurred while processing the CSV.");
           setResults(null);
@@ -597,6 +611,7 @@ export function useCsvImport({
   const runCsvImport = useCallback((file: File) => {
     const runImport = async () => {
       await processCSV(file);
+      return SHARED_MUTATION_ACCEPTED;
     };
 
     if (storageMode === 'v2' && runWithExclusiveOperation) {

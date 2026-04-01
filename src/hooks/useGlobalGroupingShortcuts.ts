@@ -2,22 +2,28 @@ import { useEffect } from 'react';
 
 interface UseGlobalGroupingShortcutsParams {
   activeTab: string;
+  tokenMgmtSubTab: string;
   canRunManualGroup: boolean;
   canApproveGrouped: boolean;
   canRunFilteredAutoGroup: boolean;
+  canRunTokenAutoMerge: boolean;
   handleGroupClusters: () => void;
   approveSelectedGrouped: () => void;
   handleRunFilteredAutoGroup: () => void;
+  handleRunTokenAutoMerge: () => void;
 }
 
 export function useGlobalGroupingShortcuts({
   activeTab,
+  tokenMgmtSubTab,
   canRunManualGroup,
   canApproveGrouped,
   canRunFilteredAutoGroup,
+  canRunTokenAutoMerge,
   handleGroupClusters,
   approveSelectedGrouped,
   handleRunFilteredAutoGroup,
+  handleRunTokenAutoMerge,
 }: UseGlobalGroupingShortcutsParams) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -30,6 +36,19 @@ export function useGlobalGroupingShortcuts({
           target.isContentEditable);
 
       if (event.shiftKey && event.code === 'Digit1') {
+        if (
+          !isTypingTarget &&
+          tokenMgmtSubTab === 'auto-merge' &&
+          activeTab !== 'pages' &&
+          activeTab !== 'group-auto-merge' &&
+          canRunTokenAutoMerge
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          handleRunTokenAutoMerge();
+          return;
+        }
+
         if (activeTab === 'pages' && !isTypingTarget && canRunFilteredAutoGroup) {
           event.preventDefault();
           event.stopPropagation();
@@ -38,7 +57,7 @@ export function useGlobalGroupingShortcuts({
         }
       }
 
-      if (event.key === 'Tab' || event.key === 'Shift') {
+      if (event.key === 'Tab') {
         if (activeTab === 'pages' && canRunManualGroup) {
           event.preventDefault();
           event.stopPropagation();
@@ -61,7 +80,10 @@ export function useGlobalGroupingShortcuts({
     canApproveGrouped,
     canRunFilteredAutoGroup,
     canRunManualGroup,
+    canRunTokenAutoMerge,
     handleGroupClusters,
     handleRunFilteredAutoGroup,
+    handleRunTokenAutoMerge,
+    tokenMgmtSubTab,
   ]);
 }

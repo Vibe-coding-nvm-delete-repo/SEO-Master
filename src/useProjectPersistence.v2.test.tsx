@@ -100,6 +100,7 @@ const collabMocks = vi.hoisted(() => ({
   loadCanonicalCacheFromIDB: vi.fn(async () => null),
   saveCanonicalCacheToIDB: vi.fn(() => Promise.resolve()),
   commitRevisionedDocChanges: vi.fn(),
+  commitCanonicalProjectState: vi.fn(),
   acquireProjectOperationLock: vi.fn(),
   releaseProjectOperationLock: vi.fn(() => Promise.resolve()),
   heartbeatProjectOperationLock: vi.fn(),
@@ -142,6 +143,7 @@ vi.mock('./projectCollabV2', async () => {
     loadCanonicalCacheFromIDB: collabMocks.loadCanonicalCacheFromIDB,
     saveCanonicalCacheToIDB: collabMocks.saveCanonicalCacheToIDB,
     commitRevisionedDocChanges: collabMocks.commitRevisionedDocChanges,
+    commitCanonicalProjectState: collabMocks.commitCanonicalProjectState,
     acquireProjectOperationLock: collabMocks.acquireProjectOperationLock,
     releaseProjectOperationLock: collabMocks.releaseProjectOperationLock,
     heartbeatProjectOperationLock: collabMocks.heartbeatProjectOperationLock,
@@ -153,9 +155,15 @@ vi.mock('./runtimeTrace', () => ({
 }));
 
 import {
+  buildGroupDocChanges,
+  buildTokenMergeRuleDocChanges,
   blockedTokenDocId,
   CLIENT_SCHEMA_VERSION,
+  groupDocId,
   PROJECT_BLOCKED_TOKENS_SUBCOLLECTION,
+  PROJECT_GROUPS_SUBCOLLECTION,
+  PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION,
+  tokenMergeRuleDocId,
 } from './projectCollabV2';
 import { buildProjectDataPayloadFromChunkDocs } from './projectChunkPayload';
 import { useProjectPersistence } from './useProjectPersistence';
@@ -262,6 +270,63 @@ function makeLegacyState(blockedTokens: string[] = []) {
       ...makeCanonical(1, blockedTokens).entities,
       meta: null,
     },
+  };
+}
+
+function makeCluster(tokens: string, pageName = tokens): ClusterSummary {
+  return {
+    pageName,
+    pageNameLower: pageName.toLowerCase(),
+    pageNameLen: pageName.length,
+    tokens,
+    tokenArr: tokens.split(' '),
+    keywordCount: 1,
+    totalVolume: 10,
+    avgKd: 20,
+    avgKwRating: 1,
+    label: '',
+    labelArr: [],
+    locationCity: null,
+    locationState: null,
+    keywords: [{
+      keyword: `${pageName} keyword`,
+      volume: 10,
+      kd: 20,
+      kwRating: 1,
+      locationCity: null,
+      locationState: null,
+    }],
+  };
+}
+
+function makeRow(cluster: ClusterSummary): ProcessedRow {
+  return {
+    pageName: cluster.pageName,
+    pageNameLower: cluster.pageNameLower,
+    pageNameLen: cluster.pageNameLen,
+    tokens: cluster.tokens,
+    tokenArr: cluster.tokenArr,
+    keyword: cluster.keywords[0]?.keyword ?? `${cluster.pageName} keyword`,
+    keywordLower: (cluster.keywords[0]?.keyword ?? `${cluster.pageName} keyword`).toLowerCase(),
+    searchVolume: cluster.keywords[0]?.volume ?? 10,
+    kd: cluster.keywords[0]?.kd ?? 20,
+    kwRating: cluster.keywords[0]?.kwRating ?? 1,
+    label: cluster.label,
+    labelArr: cluster.labelArr,
+    locationCity: cluster.locationCity,
+    locationState: cluster.locationState,
+  };
+}
+
+function makeGroup(id: string, groupName: string, cluster: ClusterSummary): GroupedCluster {
+  return {
+    id,
+    groupName,
+    clusters: [cluster],
+    totalVolume: cluster.totalVolume,
+    keywordCount: cluster.keywordCount,
+    avgKd: cluster.avgKd,
+    avgKwRating: cluster.avgKwRating,
   };
 }
 
@@ -378,6 +443,7 @@ describe('useProjectPersistence V2 hardening', () => {
     collabMocks.loadCanonicalCacheFromIDB.mockResolvedValue(null);
     collabMocks.saveCanonicalCacheToIDB.mockResolvedValue(undefined);
     collabMocks.commitRevisionedDocChanges.mockReset();
+    collabMocks.commitCanonicalProjectState.mockReset();
     collabMocks.acquireProjectOperationLock.mockReset();
     collabMocks.releaseProjectOperationLock.mockResolvedValue(undefined);
     collabMocks.heartbeatProjectOperationLock.mockReset();
@@ -502,6 +568,114 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(Array.from(clientB.result.current.blockedTokens)).toEqual(['Alpha']));
+  });
+
+  it('propagates a successful shared grouping edit from client A to client B through the groups listener', async () => {
+    const alpha = makeCluster('alpha', 'Alpha');
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [alpha];
+    canonical.base.results = [makeRow(alpha)];
+    canonical.resolved.clusterSummary = [alpha];
+    canonical.resolved.results = [makeRow(alpha)];
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+
+    let echoedGroupDoc: Record<string, unknown> | null = null;
+    collabMocks.commitRevisionedDocChanges.mockImplementation(
+      async (_projectId, subcollection, changes, actorId) => {
+        if (subcollection !== PROJECT_GROUPS_SUBCOLLECTION) {
+          return [];
+        }
+        return changes
+          .filter((change: { kind: 'upsert' | 'delete' }) => change.kind === 'upsert')
+          .map((change: {
+            id: string;
+            mutationId?: string;
+            expectedRevision: number;
+            value?: Record<string, unknown>;
+          }) => {
+            echoedGroupDoc = {
+              ...(change.value ?? {}),
+              id: change.id,
+              revision: change.expectedRevision + 1,
+              updatedByClientId: actorId,
+              lastMutationId: change.mutationId ?? null,
+            };
+            return {
+              kind: 'upsert' as const,
+              id: change.id,
+              revision: change.expectedRevision + 1,
+              lastMutationId: change.mutationId ?? null,
+              value: echoedGroupDoc,
+            };
+          });
+      },
+    );
+
+    const clientA = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-a',
+      }),
+    );
+    const clientB = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-b',
+      }),
+    );
+
+    act(() => {
+      clientA.result.current.setActiveProjectId('project-1');
+      clientB.result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await clientA.result.current.loadProject('project-1', SHARED_PROJECTS);
+      await clientB.result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await waitFor(() => expect(clientA.result.current.storageMode).toBe('v2'));
+    await waitFor(() => expect(clientB.result.current.storageMode).toBe('v2'));
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.get('projects/project-1/groups')?.length).toBe(2),
+    );
+
+    const newGroup = makeGroup('group-1', 'Alpha Group', alpha);
+
+    await act(async () => {
+      await clientA.result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
+    });
+
+    expect(clientA.result.current.groupedClusters.map((group) => group.id)).toEqual(['group-1']);
+    expect(clientA.result.current.clusterSummary).toEqual([]);
+    expect(clientB.result.current.groupedClusters).toEqual([]);
+    expect(clientB.result.current.clusterSummary?.map((cluster) => cluster.tokens)).toEqual(['alpha']);
+    expect(echoedGroupDoc).toBeTruthy();
+
+    act(() => {
+      emitQuerySnapshot('projects/project-1/groups', [{
+        type: 'added',
+        doc: {
+          id: `1::${groupDocId(newGroup.id)}`,
+          data: () => echoedGroupDoc,
+        },
+      }]);
+    });
+
+    await waitFor(() =>
+      expect(clientB.result.current.groupedClusters.map((group) => group.id)).toEqual(['group-1']),
+    );
+    expect(clientB.result.current.clusterSummary).toEqual([]);
+    expect(clientB.result.current.results).toEqual([]);
   });
 
   it('rejects blocked-token edits before optimistic local apply when a foreign operation lock is active', async () => {
@@ -708,6 +882,281 @@ describe('useProjectPersistence V2 hardening', () => {
       heldTask.resolve('first');
       await first;
     });
+  });
+
+  it('clears the local exclusive-operation gate when lock acquisition throws so the next operation can retry', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    const lock: ProjectOperationLockDoc = {
+      type: 'token-merge',
+      ownerId: 'client-a',
+      ownerClientId: 'client-a',
+      ownerUserId: null,
+      startedAt: '2026-03-30T00:00:00.000Z',
+      heartbeatAt: '2026-03-30T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      status: 'running',
+    };
+    collabMocks.acquireProjectOperationLock
+      .mockRejectedValueOnce(new Error('acquire boom'))
+      .mockResolvedValueOnce(lock);
+    collabMocks.heartbeatProjectOperationLock.mockResolvedValue(lock);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    await expect(
+      result.current.runWithExclusiveOperation('token-merge', async () => 'first'),
+    ).resolves.toBeNull();
+
+    await expect(
+      result.current.runWithExclusiveOperation('token-merge', async () => 'second'),
+    ).resolves.toBe('second');
+
+    expect(collabMocks.acquireProjectOperationLock).toHaveBeenCalledTimes(2);
+    expect(result.current.activeOperation).toBeNull();
+  });
+
+  it('reports release failures without leaving the local operation state pinned', async () => {
+    const addToast = vi.fn();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
+    const lock: ProjectOperationLockDoc = {
+      type: 'token-merge',
+      ownerId: 'client-a',
+      ownerClientId: 'client-a',
+      ownerUserId: null,
+      startedAt: '2026-03-30T00:00:00.000Z',
+      heartbeatAt: '2026-03-30T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      status: 'running',
+    };
+    collabMocks.acquireProjectOperationLock.mockResolvedValue(lock);
+    collabMocks.heartbeatProjectOperationLock.mockResolvedValue(lock);
+    collabMocks.releaseProjectOperationLock
+      .mockRejectedValueOnce(new Error('release boom'))
+      .mockResolvedValueOnce(undefined);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast,
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    await expect(
+      result.current.runWithExclusiveOperation('token-merge', async () => 'first'),
+    ).resolves.toBe('first');
+
+    await waitFor(() => expect(result.current.activeOperation).toBeNull());
+
+    await expect(
+      result.current.runWithExclusiveOperation('token-merge', async () => 'second'),
+    ).resolves.toBe('second');
+
+    expect(collabMocks.acquireProjectOperationLock).toHaveBeenCalledTimes(2);
+    expect(collabMocks.releaseProjectOperationLock).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates a successful token merge from client A to client B through the canonical epoch barrier', async () => {
+    const alpha = makeCluster('alpha', 'Alpha');
+    const beta = makeCluster('beta', 'Beta');
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [alpha, beta];
+    canonical.base.results = [makeRow(alpha), makeRow(beta)];
+    canonical.base.tokenSummary = [
+      {
+        token: 'alpha',
+        length: 5,
+        frequency: 1,
+        totalVolume: 10,
+        avgKd: 20,
+        label: '',
+        labelArr: [],
+        locationCity: 'No',
+        locationState: 'No',
+      },
+      {
+        token: 'beta',
+        length: 4,
+        frequency: 1,
+        totalVolume: 10,
+        avgKd: 20,
+        label: '',
+        labelArr: [],
+        locationCity: 'No',
+        locationState: 'No',
+      },
+    ];
+    canonical.resolved.clusterSummary = [alpha, beta];
+    canonical.resolved.results = [makeRow(alpha), makeRow(beta)];
+    canonical.resolved.tokenSummary = canonical.base.tokenSummary;
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+
+    const mergedCluster: ClusterSummary = {
+      ...alpha,
+      keywordCount: 2,
+      totalVolume: 20,
+      keywords: [
+        ...alpha.keywords,
+        {
+          keyword: 'beta keyword',
+          volume: 10,
+          kd: 20,
+          kwRating: 1,
+          locationCity: null,
+          locationState: null,
+        },
+      ],
+    };
+    const mergedResults: ProcessedRow[] = [
+      makeRow(alpha),
+      {
+        ...makeRow(beta),
+        pageName: 'Alpha',
+        pageNameLower: 'alpha',
+        pageNameLen: 5,
+        tokens: 'alpha',
+        tokenArr: ['alpha'],
+      },
+    ];
+    const mergeRule: TokenMergeRule = {
+      id: 'rule-1',
+      parentToken: 'alpha',
+      childTokens: ['beta'],
+      createdAt: '2026-03-30T00:00:00.000Z',
+      source: 'manual',
+    };
+    const canonicalAfterMerge = makeCanonical(2);
+    canonicalAfterMerge.base.clusterSummary = [mergedCluster];
+    canonicalAfterMerge.base.results = mergedResults;
+    canonicalAfterMerge.base.tokenSummary = [
+      {
+        token: 'alpha',
+        length: 5,
+        frequency: 2,
+        totalVolume: 20,
+        avgKd: 20,
+        label: '',
+        labelArr: [],
+        locationCity: 'No',
+        locationState: 'No',
+      },
+    ];
+    canonicalAfterMerge.entities.tokenMergeRules = buildTokenMergeRuleDocChanges([], [mergeRule], 'client-a', 2)
+      .filter((change) => change.kind === 'upsert')
+      .map((change) => ({
+        ...(change.kind === 'upsert' ? change.value : {}),
+        id: change.id,
+        revision: 1,
+        lastMutationId: 'm-rule-1',
+      })) as any;
+    canonicalAfterMerge.entities.meta = makeMeta(2, 3);
+    canonicalAfterMerge.resolved.clusterSummary = [mergedCluster];
+    canonicalAfterMerge.resolved.results = mergedResults;
+    canonicalAfterMerge.resolved.tokenSummary = canonicalAfterMerge.base.tokenSummary;
+    canonicalAfterMerge.resolved.tokenMergeRules = [mergeRule];
+    canonicalAfterMerge.resolved.lastSaveId = 2;
+
+    const lock: ProjectOperationLockDoc = {
+      type: 'token-merge',
+      ownerId: 'client-a',
+      ownerClientId: 'client-a',
+      ownerUserId: null,
+      startedAt: '2026-03-30T00:00:00.000Z',
+      heartbeatAt: '2026-03-30T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      status: 'running',
+    };
+    collabMocks.acquireProjectOperationLock.mockResolvedValue(lock);
+    collabMocks.heartbeatProjectOperationLock.mockResolvedValue(lock);
+    collabMocks.commitCanonicalProjectState.mockResolvedValue(canonicalAfterMerge);
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(canonicalAfterMerge);
+
+    const clientA = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-a',
+      }),
+    );
+    const clientB = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-b',
+      }),
+    );
+
+    act(() => {
+      clientA.result.current.setActiveProjectId('project-1');
+      clientB.result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await clientA.result.current.loadProject('project-1', SHARED_PROJECTS);
+      await clientB.result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await waitFor(() => expect(clientA.result.current.storageMode).toBe('v2'));
+    await waitFor(() => expect(clientB.result.current.storageMode).toBe('v2'));
+
+    const mutationResult = await act(async () =>
+      clientA.result.current.runWithExclusiveOperation('token-merge', async () =>
+        clientA.result.current.applyMergeCascade(
+          {
+            results: mergedResults,
+            clusterSummary: [mergedCluster],
+            tokenSummary: canonicalAfterMerge.base.tokenSummary,
+            groupedClusters: [],
+            approvedGroups: [],
+          },
+          mergeRule,
+        ),
+      ),
+    );
+
+    expect(mutationResult).toEqual({ status: 'accepted' });
+    expect(clientA.result.current.tokenMergeRules.map((rule) => rule.id)).toEqual(['rule-1']);
+    expect(clientA.result.current.results?.map((row) => row.tokens)).toEqual(['alpha', 'alpha']);
+    expect(clientB.result.current.tokenMergeRules).toEqual([]);
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', canonicalAfterMerge.entities.meta);
+    });
+
+    await waitFor(() =>
+      expect(clientB.result.current.tokenMergeRules.map((rule) => rule.id)).toEqual(['rule-1']),
+    );
+    expect(clientB.result.current.results?.map((row) => row.tokens)).toEqual(['alpha', 'alpha']);
+    expect(collabMocks.commitCanonicalProjectState).toHaveBeenCalledTimes(1);
   });
 
   it('rejects merge-by-name edits before optimistic local apply when a foreign operation lock is active', async () => {
@@ -966,7 +1415,7 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps routine group edits writable while a newer meta epoch is still reloading', async () => {
+  it('blocks routine group edits while a newer meta epoch is still reloading', async () => {
     const cluster: ClusterSummary = {
       pageName: 'Alpha',
       pageNameLower: 'alpha',
@@ -1035,8 +1484,9 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(result.current.isCanonicalReloading).toBe(true));
-    expect(result.current.isSharedProjectReadOnly).toBe(false);
-    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
+    expect(result.current.writeBlockReason).toBe('canonical-unresolved');
+    expect(result.current.isSharedProjectReadOnly).toBe(true);
+    expect(result.current.isRoutineSharedEditBlocked).toBe(true);
 
     const newGroup: GroupedCluster = {
       id: 'group-1',
@@ -1053,28 +1503,126 @@ describe('useProjectPersistence V2 hardening', () => {
       mutationResult = await result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
     });
 
-    expect(mutationResult?.status).toBe('accepted');
-    expect(result.current.groupedClusters).toHaveLength(1);
-    await waitFor(() => expect(collabMocks.commitRevisionedDocChanges).toHaveBeenCalled());
+    expect(mutationResult).toEqual({ status: 'blocked', reason: 'canonical-unresolved' });
+    expect(result.current.groupedClusters).toHaveLength(0);
+    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
 
     await act(async () => {
-      epochReload.resolve({
-        ...makeCanonical(2),
-        entities: {
-          ...makeCanonical(2).entities,
-          meta: {
-            ...makeMeta(2, 2),
-            commitState: 'writing',
-            migrationState: 'running',
-          },
-        },
-        resolved: null,
-      });
+      epochReload.resolve(makeCanonical(2));
       await epochReload.promise;
     });
 
     expect(result.current.isSharedProjectReadOnly).toBe(false);
     expect(result.current.isRoutineSharedEditBlocked).toBe(false);
+  });
+
+  it('keeps routine group edits writable while canonical reload stays on the last known writable base commit', async () => {
+    const cluster = makeCluster('alpha', 'Alpha');
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [cluster];
+    canonical.base.results = [makeRow(cluster)];
+    canonical.resolved.clusterSummary = [cluster];
+    canonical.resolved.results = [makeRow(cluster)];
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+
+    const epochReload = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalEpoch.mockImplementationOnce(() => epochReload.promise);
+    collabMocks.commitRevisionedDocChanges.mockImplementation(async (_projectId: string, _subcollection: string, changes: Array<any>) =>
+      changes
+        .filter((change: any) => change.kind === 'upsert')
+        .map((change: any) => ({
+          kind: 'upsert' as const,
+          id: change.id,
+          revision: change.expectedRevision + 1,
+          lastMutationId: change.mutationId ?? null,
+          value: {
+            id: change.id,
+            ...(change.value ?? {}),
+            revision: change.expectedRevision + 1,
+            updatedAt: '2026-03-30T00:00:00.000Z',
+            updatedByClientId: 'client-a',
+            lastMutationId: change.mutationId ?? null,
+          },
+        })),
+    );
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-a',
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+
+    await waitFor(() => expect(result.current.isCanonicalReloading).toBe(true));
+    expect(result.current.writeBlockReason).toBeNull();
+    expect(result.current.isSharedProjectReadOnly).toBe(false);
+    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
+
+    const newGroup = makeGroup('group-1', 'Group 1', cluster);
+
+    let mutationResult: Awaited<ReturnType<typeof result.current.addGroupsAndRemovePages>> | null = null;
+    await act(async () => {
+      mutationResult = await result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
+    });
+
+    expect(mutationResult?.status).toBe('accepted');
+    expect(result.current.groupedClusters.map((group) => group.id)).toEqual(['group-1']);
+    expect(result.current.clusterSummary).toEqual([]);
+    await waitFor(() => expect(collabMocks.commitRevisionedDocChanges).toHaveBeenCalledTimes(1));
+
+    const reloadedCanonical = makeCanonical(1);
+    reloadedCanonical.base.clusterSummary = [cluster];
+    reloadedCanonical.base.results = [makeRow(cluster)];
+    reloadedCanonical.entities.groups = [{
+      id: groupDocId(newGroup.id),
+      groupName: newGroup.groupName,
+      status: 'grouped',
+      datasetEpoch: 1,
+      clusterTokens: [cluster.tokens],
+      lastWriterClientId: 'client-a',
+      revision: 1,
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      updatedByClientId: 'client-a',
+      lastMutationId: 'mutation-1',
+      pageCount: 1,
+      totalVolume: newGroup.totalVolume,
+      keywordCount: newGroup.keywordCount,
+      avgKd: newGroup.avgKd,
+      avgKwRating: newGroup.avgKwRating,
+    }];
+    reloadedCanonical.resolved.groupedClusters = [newGroup];
+    reloadedCanonical.resolved.clusterSummary = [];
+    reloadedCanonical.resolved.results = [];
+
+    await act(async () => {
+      epochReload.resolve(reloadedCanonical);
+      await epochReload.promise;
+    });
+
+    expect(result.current.isCanonicalReloading).toBe(false);
+    expect(result.current.isSharedProjectReadOnly).toBe(false);
+    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
+    expect(result.current.groupedClusters.map((group) => group.id)).toEqual(['group-1']);
   });
 
   it('retries full canonical recovery when a meta listener epoch load throws', async () => {

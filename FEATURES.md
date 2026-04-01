@@ -31,9 +31,11 @@
 - IndexedDB caches only server-acknowledged V2 canonical state and tags that cache with `schemaVersion`, `datasetEpoch`, and `baseCommitId`, so refreshes cannot reopen on optimistic shared edits that Firestore never accepted.
 - V2 mutation handling is epoch-scoped and centralized: revision-sensitive shared edits go through one compare-and-set path, reuse canonical doc-id helpers, update local acked revisions immediately on success, and reload canonical state on conflicts instead of leaving optimistic drift behind.
 - Shared `collab` projects now stay on a single V2 persistence path: opening a shared project never reattaches the legacy chunk listener or reads legacy chunk payloads as runtime state, missing/legacy `collab/meta` no longer downgrades shared edits back to legacy chunk writes, and explicit legacy-to-V2 migration is available through `npm run migrate:shared:v2`.
-- Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
+- Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, token auto-merge recommendation generation/review (`run`, `apply`, `decline`, `undo`, `Merge All`), and Auto Group runs acquire a temporary project operation lock before writing shared data.
+- Shared project exclusive-operation cleanup is now exception-safe: failed lock acquire/release attempts report through the persistence error channel without leaving the browser-local operation gate or busy banner pinned until reload.
 - Grouping and related group actions now only clear selection/input and show success toasts after the persistence boundary actually accepts the mutation; if shared state is read-only/recovering, the action preserves the current selection and surfaces only the blocking warning.
 - Shared V2 editability now distinguishes **background canonical reload** from **true write-unsafe state**: transient `collab/meta` or epoch reloads no longer blanket-freeze routine grouping when the last known canonical state is still safe, while schema/rules/canonical-integrity failures still fail closed.
+- Shared V2 editability now also fail-closes the unsafe reload edge: if `collab/meta` has already advanced to a different `datasetEpoch/baseCommitId` than the last acknowledged writable canonical base, routine and bulk edits pause until that newer canonical state finishes loading instead of letting one browser keep writing stale old-epoch entity docs that collaborators will never see.
 - Routine Group edits and bulk Group operations now use separate gating semantics: manual grouping/approve/ungroup/block actions follow routine write safety, while filtered Auto Group, Auto Group panel runs, keyword rating, and token-merge cascades stay on the bulk-operation lock path.
 - Same-browser bulk-operation spam is now rejected before a second project lock attempt starts, so repeated clicks cannot start overlapping shared bulk jobs from one client while the first lock is still active.
 - Group row selection now uses the maintained extracted row components for Pages, Grouped, and Approved tables, so checkbox selection consistently drives the real grouping handlers instead of drifting behind stale inline callback signatures in `App.tsx`.
@@ -192,6 +194,7 @@
   - Review recommendation rows with canonical token, merge tokens, confidence, and impacted keyword/page counts.
   - Apply one merge, decline one recommendation, or bulk `Merge All` pending recommendations.
 - Approved recommendations remain visible with `Undo`, which reverses the applied merge via the existing merge undo cascade.
+- `Shift+1` is now context-aware: it still runs Pages Auto Group on the `Pages` tab, and it runs `Auto Merge KWs` only when the Token Management `auto-merge` view is active outside Pages.
 - Auto-merge recommendations persist to IndexedDB + Firestore and sync across users/projects.
 
 ## Group Auto Merge (Grouped)
@@ -212,6 +215,7 @@
 - After creation, the app runs the same `loadProject` path as **Select Project** so workspace refs (save id, load fence) match the new empty project instead of inheriting the previous session’s guards.
 
 ### CSV import (cross-project safety)
+- Shared-project CSV import now waits for the async canonical `bulkSet` result before leaving the import flow, so the UI does not switch to `Pages` or clear the processing state until the shared save is actually accepted; blocked/failed shared writes now surface as import errors instead of false success.
 - Large CSVs parse in chunks; import is **pinned to the project that was active when the file was chosen**. If you switch projects before parsing finishes, the import is **cancelled** (warning toast) and no data is written, preventing the previous bug where persistence used the **current** project ref while the UI branch used a **stale** project id and could save one project’s file into another’s storage.
 
 ### Projects tab (folders & deleted)

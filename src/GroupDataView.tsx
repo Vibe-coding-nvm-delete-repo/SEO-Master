@@ -1053,9 +1053,11 @@ export default function GroupDataView(props: any) {
                         <span className="truncate">Group Review</span>
                       </span>
                     )}
-                    <span className="text-zinc-400 shrink-0" title="Keyboard shortcut">
-                      Shift+1{activeTab === 'pages' ? '' : ' (Ungrouped)'}
-                    </span>
+                    {activeTab === 'pages' && (
+                      <span className="text-zinc-400 shrink-0" title="Keyboard shortcut">
+                        Shift+1
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -1461,9 +1463,7 @@ export default function GroupDataView(props: any) {
                     )}
                     {tokenMgmtSubTab === 'auto-merge' && autoMergeRecommendations.some(r => r.status === 'pending') && (
                       <button
-                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
-                          applyAllAutoMergeRecommendations();
-                        })}
+                        onClick={() => void applyAllAutoMergeRecommendations()}
                         disabled={isBulkSharedEditBlocked}
                         className="px-2 py-1.5 text-[10px] font-semibold rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors whitespace-nowrap"
                       >
@@ -1478,7 +1478,11 @@ export default function GroupDataView(props: any) {
                         onClick={() => void runAutoMergeRecommendations()}
                         disabled={isBulkSharedEditBlocked || autoMergeJob.phase === 'running'}
                         className="px-2 py-0.5 rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-                        title="Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations"
+                        title={activeTab === 'pages'
+                          ? 'Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations. Shift+1 stays reserved for Pages Auto Group here.'
+                          : activeTab === 'group-auto-merge'
+                            ? 'Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations. No global keyboard shortcut is active from Group Auto Merge.'
+                            : 'Compare each non-blocked token to all other non-blocked tokens and queue exact-identity merge recommendations (Shift+1 while Token Management Auto Merge is active).'}
                       >
                         Auto Merge KWs
                       </button>
@@ -1648,9 +1652,7 @@ export default function GroupDataView(props: any) {
                                 <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{ruleRow.parentStats.avgKd !== null ? ruleRow.parentStats.avgKd : '-'}</td>
                                 <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                                   <button
-                                    onClick={() => void runWithExclusiveOperation('token-merge', async () => {
-                                      handleUndoMergeParent(ruleRow.ruleId);
-                                    })}
+                                    onClick={() => void runWithExclusiveOperation('token-merge', () => handleUndoMergeParent(ruleRow.ruleId))}
                                     disabled={isBulkSharedEditBlocked}
                                     className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
                                     title="Unmerge parent"
@@ -1697,9 +1699,7 @@ export default function GroupDataView(props: any) {
                                     <td className="px-2 py-1 text-right tabular-nums text-zinc-600">{st.avgKd !== null ? st.avgKd : '-'}</td>
                                     <td className="px-1 py-1 text-center" onClick={(e) => e.stopPropagation()}>
                                       <button
-                                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
-                                          handleUndoMergeChild(ruleRow.ruleId, childToken);
-                                        })}
+                                        onClick={() => void runWithExclusiveOperation('token-merge', () => handleUndoMergeChild(ruleRow.ruleId, childToken))}
                                         disabled={isBulkSharedEditBlocked}
                                         className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100 text-amber-600 hover:bg-amber-500 hover:text-white transition-colors"
                                         title="Unmerge child"
@@ -1812,18 +1812,14 @@ export default function GroupDataView(props: any) {
                                   {rec.status === 'pending' ? (
                                     <>
                                       <button
-                                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
-                                          applyAutoMergeRecommendation(rec.id);
-                                        })}
+                                        onClick={() => void applyAutoMergeRecommendation(rec.id)}
                                         disabled={isBulkSharedEditBlocked}
                                         className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-600 text-white hover:bg-emerald-700"
                                       >
                                         Merge
                                       </button>
                                       <button
-                                        onClick={() => void runWithExclusiveOperation('token-merge', async () => {
-                                          declineAutoMergeRecommendation(rec.id);
-                                        })}
+                                        onClick={() => void declineAutoMergeRecommendation(rec.id)}
                                       disabled={isBulkSharedEditBlocked}
                                       className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-zinc-300 text-zinc-600 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
                                       >
@@ -1832,9 +1828,7 @@ export default function GroupDataView(props: any) {
                                     </>
                                   ) : (
                                     <button
-                                      onClick={() => void runWithExclusiveOperation('token-merge', async () => {
-                                        undoAutoMergeRecommendation(rec.id);
-                                      })}
+                                      onClick={() => void undoAutoMergeRecommendation(rec.id)}
                                       disabled={isBulkSharedEditBlocked || !mergeRule}
                                       className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-amber-300 text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed"
                                     >

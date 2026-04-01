@@ -558,12 +558,15 @@ export function useProjectPersistence(options: {
     setIsWriteUnsafeState(unsafe);
     setWriteBlockReasonState(unsafe ? reason : null);
   }, []);
+  const canonicalIdentity = useCallback((datasetEpoch: number | null, baseCommitId: string | null) => {
+    return datasetEpoch != null && baseCommitId ? `${datasetEpoch}:${baseCommitId}` : null;
+  }, []);
   const rememberWritableCanonical = useCallback((datasetEpoch: number | null, baseCommitId: string | null) => {
-    const identity = datasetEpoch != null && baseCommitId ? `${datasetEpoch}:${baseCommitId}` : null;
+    const identity = canonicalIdentity(datasetEpoch, baseCommitId);
     lastKnownGoodWritableStateRef.current = identity;
     setLastKnownGoodWritableState(identity);
     return identity;
-  }, []);
+  }, [canonicalIdentity]);
   const clearWritableCanonical = useCallback(() => {
     lastKnownGoodWritableStateRef.current = null;
     setLastKnownGoodWritableState(null);
@@ -1437,8 +1440,17 @@ export function useProjectPersistence(options: {
     if (writeBlockReasonRef.current) {
       return writeBlockReasonRef.current;
     }
+    if (
+      isCanonicalReloadingRef.current &&
+      canonicalIdentity(
+        collabMetaRef.current?.datasetEpoch ?? null,
+        collabMetaRef.current?.baseCommitId ?? null,
+      ) !== lastKnownGoodWritableStateRef.current
+    ) {
+      return 'canonical-unresolved';
+    }
     return 'unknown';
-  }, []);
+  }, [canonicalIdentity]);
 
   const queueV2Write = useCallback((
     label: string,
@@ -1574,6 +1586,17 @@ export function useProjectPersistence(options: {
       addToastRef.current(message, 'warning');
       return false;
     }
+    const currentCanonicalIdentity = canonicalIdentity(
+      collabMetaRef.current?.datasetEpoch ?? null,
+      collabMetaRef.current?.baseCommitId ?? null,
+    );
+    if (
+      isCanonicalReloadingRef.current &&
+      currentCanonicalIdentity !== lastKnownGoodWritableStateRef.current
+    ) {
+      addToastRef.current(`Shared state is still syncing to a newer canonical version. ${actionLabel} is temporarily read-only.`, 'warning');
+      return false;
+    }
     if (
       activeOperationRef.current &&
       activeOperationRef.current.ownerId !== clientIdRef.current &&
@@ -1584,7 +1607,7 @@ export function useProjectPersistence(options: {
       return false;
     }
     return true;
-  }, []);
+  }, [canonicalIdentity]);
 
   const ensureOwnedBulkMutationAllowed = useCallback((actionLabel: string): boolean => {
     if (!ensureV2MutationAllowed(actionLabel)) return false;
@@ -1632,51 +1655,61 @@ export function useProjectPersistence(options: {
       return null;
     }
     exclusiveOperationInFlightRef.current = true;
-    const lock = await acquireProjectOperationLock(projectId, type, clientIdRef.current);
-    if (!lock) {
-      exclusiveOperationInFlightRef.current = false;
-      addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
-      return null;
-    }
-    setActiveOperation(lock);
-    activeOperationRef.current = lock;
-    lockHeartbeatLostRef.current = false;
-    if (lockHeartbeatTimerRef.current) {
-      clearInterval(lockHeartbeatTimerRef.current);
-    }
-    lockHeartbeatTimerRef.current = setInterval(() => {
-      void heartbeatProjectOperationLock(projectId, clientIdRef.current).then((nextLock) => {
-        if (!nextLock) {
-          invalidateOwnedActiveOperationLock();
-          return;
-        }
-        activeOperationRef.current = nextLock;
-        setActiveOperation(nextLock);
-      }).catch((err) => {
-        invalidateOwnedActiveOperationLock();
-        reportPersistFailure(addToastRef.current, 'project lock heartbeat', err, {
+    let lock: ProjectOperationLockDoc | null = null;
+    try {
+      try {
+        lock = await acquireProjectOperationLock(projectId, type, clientIdRef.current);
+      } catch (err) {
+        reportPersistFailure(addToastRef.current, 'project lock acquire', err, {
           channel: 'lock',
           ...getActiveProjectNotificationMeta(),
         });
-      });
-    }, 5_000);
-    try {
-      const result = await task();
-      if (lockHeartbeatLostRef.current) {
-        throw new Error('lock-lost');
-      }
-      await flushNow();
-      if (lockHeartbeatLostRef.current) {
-        throw new Error('lock-lost');
-      }
-      return result;
-    } catch (err) {
-      if (String((err as Error)?.message || '') === 'lock-lost') {
-        addToastRef.current('Project operation lock was lost before completion. Shared state was not finalized.', 'warning');
-        await reloadCanonicalStateFromCloud();
         return null;
       }
-      throw err;
+      if (!lock) {
+        addToastRef.current('Another client is running a project-wide operation. Try again after it finishes.', 'warning');
+        return null;
+      }
+      setActiveOperation(lock);
+      activeOperationRef.current = lock;
+      lockHeartbeatLostRef.current = false;
+      if (lockHeartbeatTimerRef.current) {
+        clearInterval(lockHeartbeatTimerRef.current);
+      }
+      lockHeartbeatTimerRef.current = setInterval(() => {
+        void heartbeatProjectOperationLock(projectId, clientIdRef.current).then((nextLock) => {
+          if (!nextLock) {
+            invalidateOwnedActiveOperationLock();
+            return;
+          }
+          activeOperationRef.current = nextLock;
+          setActiveOperation(nextLock);
+        }).catch((err) => {
+          invalidateOwnedActiveOperationLock();
+          reportPersistFailure(addToastRef.current, 'project lock heartbeat', err, {
+            channel: 'lock',
+            ...getActiveProjectNotificationMeta(),
+          });
+        });
+      }, 5_000);
+      try {
+        const result = await task();
+        if (lockHeartbeatLostRef.current) {
+          throw new Error('lock-lost');
+        }
+        await flushNow();
+        if (lockHeartbeatLostRef.current) {
+          throw new Error('lock-lost');
+        }
+        return result;
+      } catch (err) {
+        if (String((err as Error)?.message || '') === 'lock-lost') {
+          addToastRef.current('Project operation lock was lost before completion. Shared state was not finalized.', 'warning');
+          await reloadCanonicalStateFromCloud();
+          return null;
+        }
+        throw err;
+      }
     } finally {
       exclusiveOperationInFlightRef.current = false;
       if (lockHeartbeatTimerRef.current) {
@@ -1684,7 +1717,16 @@ export function useProjectPersistence(options: {
         lockHeartbeatTimerRef.current = null;
       }
       lockHeartbeatLostRef.current = false;
-      await releaseProjectOperationLock(projectId, clientIdRef.current);
+      if (lock) {
+        try {
+          await releaseProjectOperationLock(projectId, clientIdRef.current);
+        } catch (err) {
+          reportPersistFailure(addToastRef.current, 'project lock release', err, {
+            channel: 'lock',
+            ...getActiveProjectNotificationMeta(),
+          });
+        }
+      }
       setActiveOperation(null);
       activeOperationRef.current = null;
     }
@@ -3541,18 +3583,34 @@ export function useProjectPersistence(options: {
     activeOperation.ownerClientId !== clientIdRef.current &&
     Date.parse(activeOperation.expiresAt || '0') > Date.now(),
   );
+  const currentCanonicalIdentity = canonicalIdentity(
+    collabMetaRef.current?.datasetEpoch ?? null,
+    collabMetaRef.current?.baseCommitId ?? null,
+  );
+  const isCanonicalReloadWriteBlocked = storageMode === 'v2' && (
+    isCanonicalReloading &&
+    currentCanonicalIdentity !== lastKnownGoodWritableState
+  );
+  const effectiveWriteBlockReason = writeBlockReason ?? (
+    isCanonicalReloadWriteBlocked
+      ? 'canonical-unresolved'
+      : null
+  );
   const isSharedProjectReadOnly = storageMode === 'v2' && (
     legacyWritesBlocked ||
-    isWriteUnsafe
+    isWriteUnsafe ||
+    isCanonicalReloadWriteBlocked
   );
   const isRoutineSharedEditBlocked = storageMode === 'v2' && (
     legacyWritesBlocked ||
     isWriteUnsafe ||
+    isCanonicalReloadWriteBlocked ||
     isProjectBusy
   );
   const isBulkSharedEditBlocked = storageMode === 'v2' && (
     legacyWritesBlocked ||
     isWriteUnsafe ||
+    isCanonicalReloadWriteBlocked ||
     isProjectBusy
   );
 
@@ -3648,7 +3706,7 @@ export function useProjectPersistence(options: {
     isProjectBusy,
     isCanonicalReloading,
     isWriteUnsafe,
-    writeBlockReason,
+    writeBlockReason: effectiveWriteBlockReason,
     lastKnownGoodWritableState,
     isRoutineSharedEditBlocked,
     isBulkSharedEditBlocked,

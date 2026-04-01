@@ -42,6 +42,7 @@ interface UseAutoMergeParams {
   setTokenMgmtSubTab: (tab: string) => void;
   setTokenMgmtPage: (page: number) => void;
   handleUndoMergeParent: (ruleId: string) => Promise<boolean>;
+  runWithExclusiveOperation?: <T>(type: 'token-merge', task: () => Promise<T>) => Promise<T | null>;
 }
 
 export type AutoMergeJobState = {
@@ -96,11 +97,19 @@ export function useAutoMerge({
   setTokenMgmtSubTab,
   setTokenMgmtPage,
   handleUndoMergeParent,
+  runWithExclusiveOperation,
 }: UseAutoMergeParams) {
   const autoMergeAbortRef = useRef<AbortController | null>(null);
   const autoMergeJobStartRef = useRef(0);
 
   const [autoMergeJob, setAutoMergeJob] = useState<AutoMergeJobState>(INITIAL_AUTO_MERGE_JOB);
+
+  const runTokenMergeOperation = useCallback(async <T,>(task: () => Promise<T>): Promise<T | null> => {
+    if (runWithExclusiveOperation) {
+      return runWithExclusiveOperation('token-merge', task);
+    }
+    return task();
+  }, [runWithExclusiveOperation]);
 
   // Live elapsed timer while auto-merge runs
   useEffect(() => {
@@ -410,10 +419,23 @@ export function useAutoMerge({
       );
       const recs = buildAutoMergeRecommendations(tokenRows, rows, responseMap);
       const nextRecs = mergeRecommendationsAfterRerun(autoMergeRecommendationsRef.current, recs);
-      autoMergeRecommendationsRef.current = nextRecs;
-      const persistResult = await updateAutoMergeRecommendations(nextRecs);
-      if (!isAcceptedSharedMutation(persistResult)) {
-        throw new Error('Failed to persist shared auto-merge recommendations.');
+      const persistRecommendations = async () => {
+        const persistResult = await updateAutoMergeRecommendations(nextRecs);
+        if (!isAcceptedSharedMutation(persistResult)) {
+          return false;
+        }
+        autoMergeRecommendationsRef.current = nextRecs;
+        return true;
+      };
+      const persisted = await runTokenMergeOperation(persistRecommendations);
+      if (!persisted) {
+        setAutoMergeJob(prev => ({
+          ...prev,
+          phase: 'error',
+          error: 'Failed to persist shared auto-merge recommendations.',
+          elapsedMs: elapsedNow(),
+        }));
+        return;
       }
       setAutoMergeJob({
         phase: 'done',
@@ -498,28 +520,28 @@ export function useAutoMerge({
         },
       });
     }
-  }, [addToast, buildAutoMergeRecommendations, groupReviewSettingsSnapshot, updateAutoMergeRecommendations, setTokenMgmtPage, setTokenMgmtSubTab, tokenTopPagesMap, universalBlockedTokens]);
+  }, [addToast, buildAutoMergeRecommendations, groupReviewSettingsSnapshot, runTokenMergeOperation, updateAutoMergeRecommendations, setTokenMgmtPage, setTokenMgmtSubTab, tokenTopPagesMap, universalBlockedTokens]);
 
   const handleCancelAutoMerge = useCallback(() => {
     autoMergeAbortRef.current?.abort();
   }, []);
 
-  const applyAutoMergeRecommendation = useCallback(async (recommendationId: string) => {
+  const applyAutoMergeRecommendationInternal = useCallback(async (recommendationId: string): Promise<boolean> => {
     const recs = autoMergeRecommendationsRef.current;
     const rec = recs.find(r => r.id === recommendationId && r.status === 'pending');
     const currentResults = resultsRef.current;
     if (!rec) {
       addToast('That merge recommendation is no longer pending.', 'info');
-      return;
+      return false;
     }
     if (!currentResults) {
       addToast('Keyword data is not loaded yet.', 'error');
-      return;
+      return false;
     }
     const childTokens = rec.mergeTokens.filter(t => t !== rec.canonicalToken);
     if (childTokens.length === 0) {
       addToast('Nothing to merge for this row (tokens already match canonical).', 'info');
-      return;
+      return false;
     }
     const cascade = executeMergeCascade(
       currentResults,
@@ -537,41 +559,74 @@ export function useAutoMerge({
       recommendationId: rec.id,
     };
     const applyResult = await applyMergeCascade(cascade, newRule);
-    if (!isAcceptedSharedMutation(applyResult)) return;
+    if (!isAcceptedSharedMutation(applyResult)) return false;
     const nextRecs = markRecommendationApproved(recs, rec.id, new Date().toISOString());
-    autoMergeRecommendationsRef.current = nextRecs;
     const recommendationResult = await updateAutoMergeRecommendations(nextRecs);
-    if (!isAcceptedSharedMutation(recommendationResult)) return;
+    if (!isAcceptedSharedMutation(recommendationResult)) return false;
+    autoMergeRecommendationsRef.current = nextRecs;
     setTokenMgmtSubTab('merge');
     setTokenMgmtPage(1);
     logAndToast('merge', `Auto-merged ${childTokens.join(', ')} → ${rec.canonicalToken}`, childTokens.length, `Auto-merged into '${rec.canonicalToken}'`, 'success');
+    return true;
   }, [addToast, logAndToast, applyMergeCascade, updateAutoMergeRecommendations, setTokenMgmtPage, setTokenMgmtSubTab]);
 
-  const declineAutoMergeRecommendation = useCallback(async (recommendationId: string) => {
+  const applyAutoMergeRecommendation = useCallback(async (recommendationId: string): Promise<boolean> => {
+    const applied = await runTokenMergeOperation(() => applyAutoMergeRecommendationInternal(recommendationId));
+    return applied !== false && applied !== null;
+  }, [applyAutoMergeRecommendationInternal, runTokenMergeOperation]);
+
+  const declineAutoMergeRecommendationInternal = useCallback(async (recommendationId: string): Promise<boolean> => {
     const recs = autoMergeRecommendationsRef.current;
+    const rec = recs.find(r => r.id === recommendationId && r.status === 'pending');
+    if (!rec) {
+      return false;
+    }
     const next = recs.map(r => r.id === recommendationId ? { ...r, status: 'declined' as const, reviewedAt: new Date().toISOString() } : r);
     const result = await updateAutoMergeRecommendations(next);
-    if (!isAcceptedSharedMutation(result)) return;
+    if (!isAcceptedSharedMutation(result)) return false;
     autoMergeRecommendationsRef.current = next;
+    return true;
   }, [updateAutoMergeRecommendations]);
 
-  const applyAllAutoMergeRecommendations = useCallback(async () => {
-    const pending = autoMergeRecommendationsRef.current.filter(r => r.status === 'pending');
-    for (const recommendation of pending) {
-      await applyAutoMergeRecommendation(recommendation.id);
-    }
-  }, [applyAutoMergeRecommendation]);
+  const declineAutoMergeRecommendation = useCallback(async (recommendationId: string): Promise<boolean> => {
+    const declined = await runTokenMergeOperation(() => declineAutoMergeRecommendationInternal(recommendationId));
+    return declined !== false && declined !== null;
+  }, [declineAutoMergeRecommendationInternal, runTokenMergeOperation]);
 
-  const undoAutoMergeRecommendation = useCallback(async (recommendationId: string) => {
+  const applyAllAutoMergeRecommendations = useCallback(async (): Promise<boolean> => {
+    const applied = await runTokenMergeOperation(async () => {
+      const pending = autoMergeRecommendationsRef.current.filter(r => r.status === 'pending');
+      if (pending.length === 0) {
+        return false;
+      }
+      let mergedAny = false;
+      for (const recommendation of pending) {
+        const merged = await applyAutoMergeRecommendationInternal(recommendation.id);
+        if (merged) {
+          mergedAny = true;
+        }
+      }
+      return mergedAny;
+    });
+    return Boolean(applied);
+  }, [applyAutoMergeRecommendationInternal, runTokenMergeOperation]);
+
+  const undoAutoMergeRecommendationInternal = useCallback(async (recommendationId: string): Promise<boolean> => {
     const rule = tokenMergeRules.find(r => r.recommendationId === recommendationId);
-    if (!rule) return;
+    if (!rule) return false;
     const undone = await handleUndoMergeParent(rule.id);
-    if (!undone) return;
+    if (!undone) return false;
     const next = markRecommendationPendingAfterUndo(autoMergeRecommendationsRef.current, recommendationId);
     const result = await updateAutoMergeRecommendations(next);
-    if (!isAcceptedSharedMutation(result)) return;
+    if (!isAcceptedSharedMutation(result)) return false;
     autoMergeRecommendationsRef.current = next;
+    return true;
   }, [handleUndoMergeParent, tokenMergeRules, updateAutoMergeRecommendations]);
+
+  const undoAutoMergeRecommendation = useCallback(async (recommendationId: string): Promise<boolean> => {
+    const undone = await runTokenMergeOperation(() => undoAutoMergeRecommendationInternal(recommendationId));
+    return undone !== false && undone !== null;
+  }, [runTokenMergeOperation, undoAutoMergeRecommendationInternal]);
 
   return {
     autoMergeJob,
