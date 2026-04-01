@@ -537,7 +537,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       if (models.length > 0) {
         setAgModel((current) => normalizePreferredOpenRouterModel(current, models.map((model: any) => model.id)));
       }
-    }).catch(() => {}).finally(() => { if (!cancelled) setAgModelsLoading(false); });
+    }).catch((err) => { console.warn('[AutoGroup] Failed to fetch models:', err); }).finally(() => { if (!cancelled) setAgModelsLoading(false); });
     return () => { cancelled = true; };
   }, [agApiKey]);
 

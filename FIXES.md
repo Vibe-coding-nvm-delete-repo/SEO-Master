@@ -12,14 +12,16 @@
 
 These are "the building is on fire" bugs. Every piece of user state must be visible to ALL users instantly via Firestore. No data can ever be siloed to just one browser.
 
-### [ ] 1.1 Redundant double/triple setState in processCSV
+### [x] 1.1 Redundant double/triple setState in processCSV
+**Date fixed:** Previously resolved (processCSV moved to `useCsvImport.ts` with single atomic `bulkSet()` call)
 **File:** `src/App.tsx` ~lines 1661-1707
 **Problem:** `setResults()`, `setClusterSummary()`, etc. are called BEFORE `persistence.bulkSet()` (lines 1661-1666), then `persistence.bulkSet()` is called (line 1687) which internally syncs refs AND calls setState again, then MORE direct setters fire (lines 1690-1707). This causes triple renders and wasted work.
 **Severity note:** Verified that `persistence.bulkSet()` DOES sync `latest.current` before saving, so Firestore gets correct data. The direct setState calls at lines 1661-1666 are redundant, not data-losing — but they cause unnecessary re-renders and could confuse future developers into thinking the pattern is "setState then bulkSet."
 **Scenario:** Triple render on every CSV upload. Not a data loss bug per se, but a correctness/performance issue that makes the codebase misleading about the right pattern.
 **Fix:** Remove direct setState calls at lines 1661-1666 and 1690-1707. Let `persistence.bulkSet()` handle all state + ref sync + Firestore save atomically. Pass stats/datasetStats through bulkSet too.
 
-### [ ] 1.2 Ref-before-save violations in handleRemoveFromApproved (CRITICAL)
+### [x] 1.2 Ref-before-save violations in handleRemoveFromApproved (CRITICAL)
+**Date fixed:** Previously resolved (`removeFromApproved` moved into persistence layer at `useProjectPersistence.ts:3525`, reads `latest.current` atomically)
 **File:** `src/App.tsx` ~lines 2943-2971
 **Problem:** `setClusterSummary(newClusters)`, `setResults(...)`, `setGroupedClusters(updatedGrouped)`, `setApprovedGroups(newApproved)` called WITHOUT ref sync, then `persistence.bulkSet()` at line 2971 reads stale `latest.current`. Unlike 1.1, here `bulkSet()` does NOT receive all the changed data — it only gets the fields passed to it, and reads everything else from `latest.current` which is stale.
 **Scenario:** User 1 unapproves a group. Firestore saves stale approvedGroups (ref wasn't updated). User 2 still sees it as approved. This is a **confirmed data loss bug**.
@@ -41,7 +43,8 @@ resultsRef.current = [...results, ...newRows];
 persistence.bulkSet({ groupedClusters: updatedGrouped, approvedGroups: newApproved, clusterSummary: nextClusters });
 ```
 
-### [ ] 1.3 startTransition wrapping persistence-critical state (Token Merge) (CRITICAL)
+### [x] 1.3 startTransition wrapping persistence-critical state (Token Merge) (CRITICAL)
+**Date fixed:** Previously resolved (`useTokenMerge.ts:82` calls `applyMergeCascade` first, then UI-only state)
 **File:** `src/App.tsx` ~lines 2736-2757
 **Problem:** `startTransition()` wraps `setResults()`, `setClusterSummary()`, `setGroupedClusters()`, `setApprovedGroups()`, `setTokenSummary()`, `setTokenMergeRules()` at lines 2736-2745. React treats these as low-priority — refs may not sync for several render cycles. Then `persistence.applyMergeCascade(cascade, newRule)` is called at line 2757 OUTSIDE the transition block. The persistence call reads `latest.current` which still has pre-merge data because the deferred setState hasn't triggered the ref-sync useEffects yet.
 **Scenario:** User merges tokens. `startTransition` defers state updates. `persistence.applyMergeCascade()` fires immediately with stale refs. Firestore saves pre-merge data. Second user never sees the merge. Even worse: if User 1 does anything else (group, approve), those actions also use stale refs until React eventually processes the deferred transition.
@@ -56,7 +59,8 @@ startTransition(() => {
 });
 ```
 
-### [ ] 1.4 suppressSnapshotRef timing gap (fragile 1000ms timeout)
+### [x] 1.4 suppressSnapshotRef timing gap (fragile 1000ms timeout)
+**Date fixed:** Previously resolved (old `suppressSnapshotRef` + 1000ms timeout replaced by `evaluateSnapshotGuards()` with clientId match guard `2:ownEcho` + `6:staleSaveId` + `1b:isFlushing`)
 **File:** `src/useProjectPersistence.ts` — `enqueueSave()` ~line 291 and ~line 305
 **Problem:** `enqueueSave()` correctly sets `suppressSnapshotRef.current = true` at line 291 BEFORE calling `saveProjectDataToFirestore()`. However, it resets to `false` after a **hardcoded 1000ms setTimeout** at line 305. If the Firestore snapshot echo takes longer than 1 second (slow network, large dataset, cold start), the suppress flag is already false when the snapshot arrives → listener processes it → overwrites in-flight UI changes.
 **Scenario:** User on slow 3G connection groups page X. Save fires, suppress set to true. Firestore write takes 2 seconds. At T=1s, suppress resets to false. At T=2s, snapshot echo arrives with the save's data. But user grouped page Y at T=1.5s. Listener sees `suppressSnapshotRef = false`, applies snapshot, page Y grouping lost.
@@ -77,7 +81,8 @@ suppressSnapshotRef.current = false;
 applyViewState(data); // Truly remote change, apply it
 ```
 
-### [ ] 1.5 GroupReviewSettings writes without suppressSnapshotRef
+### [x] 1.5 GroupReviewSettings writes without suppressSnapshotRef
+**Date fixed:** 2026-04-01
 **File:** `src/GroupReviewSettings.tsx` ~lines 146-149 and 183-186
 **Problem:** This component has its own independent Firestore sync (not using the persistence hook). Two `setDoc()` calls — one for saving settings, one for backfill inside `onSnapshot` — neither sets `suppressSnapshotRef`. The backfill write inside the listener can overwrite a concurrent user's changes.
 **Scenario:** User A changes temperature to 0.5 and saves. Before the snapshot echoes back, User B changes concurrency. The backfill write from User A's snapshot overwrites User B's concurrency change.
@@ -85,13 +90,15 @@ applyViewState(data); // Truly remote change, apply it
   - (a) Add a local `suppressRef` to this component following the same pattern, OR
   - (b) Consolidate shared settings into the main persistence layer (preferred long-term)
 
-### [ ] 1.6 Universal blocked tokens race condition
+### [x] 1.6 Universal blocked tokens race condition
+**Date fixed:** 2026-04-01
 **File:** `src/App.tsx` ~lines 951-972
 **Problem:** `universalBlockedTokens` is loaded from Firestore via `onSnapshot` and stored as a `Set`. When User A blocks a token, User B's snapshot fires and replaces the ENTIRE Set. If User B had pending local changes (blocked a different token, save not yet committed), those changes are wiped.
 **Scenario:** User A blocks "cheap". User B blocks "free" at the same moment. User A's snapshot fires on User B's client, replacing the Set with just {"cheap"}. User B's "free" block is lost.
 **Fix:** Use the same `suppressSnapshotRef` + ref-before-save pattern. Or switch to Firestore `arrayUnion`/`arrayRemove` for atomic token additions/removals instead of overwriting the full array.
 
-### [ ] 1.7 Silent Firestore save failures (systematic — 17 instances)
+### [x] 1.7 Silent Firestore save failures (systematic — 17 instances)
+**Date fixed:** 2026-04-01 (remaining 3 instances: GenerateTab, AutoGroupPanel, TableHeader)
 **Complete list of every silent `.catch(() => {})` on Firestore/IDB operations:**
 1. `src/App.tsx:808` — starred_models setDoc
 2. `src/App.tsx:958` — universal_blocked setDoc
@@ -129,7 +136,8 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 }
 ```
 
-### [ ] 1.8 Stale closure in scheduled re-review timer
+### [x] 1.8 Stale closure in scheduled re-review timer
+**Date fixed:** Previously resolved (`useGroupReviewAutoProcessor.ts:36` uses functional updater on current persistence state, not stale closure capture)
 **File:** `src/App.tsx` ~lines 2658-2692
 **Problem:** `scheduleReReview()` stores group IDs in a ref and reads `groupedClustersRef.current` 5 seconds later. If the user modifies those groups during the 5s window, the timer rebuilds groups with wrong page memberships.
 **Scenario:** User removes page X from group A at T=0 (triggers re-review). User adds page Y to group A at T=2s. Timer fires at T=5s, reads current `groupedClustersRef` which now has page Y. Re-review runs on wrong group composition.

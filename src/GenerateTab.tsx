@@ -2866,8 +2866,9 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       localStorageValue: json,
     }).then(() => {
       suppressSettingsSnapshotRef.current = false;
-    }).catch(() => {
+    }).catch((err) => {
       suppressSettingsSnapshotRef.current = false;
+      reportPersistFailure(addToast, 'generate settings', err);
     });
 
     if (sharedSelectedModelDocId !== settingsDocId && nextSettings.selectedModel.trim() && !nextSettings.selectedModelLocked) {
