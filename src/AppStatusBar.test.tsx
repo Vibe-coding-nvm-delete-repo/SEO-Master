@@ -11,6 +11,7 @@ import {
   recordSharedCloudWriteStart,
   recordSharedCloudWriteOk,
   resetCloudSyncStateForTests,
+  setProjectAuthoritativeSyncState,
 } from './cloudSyncStatus';
 import { performSharedMutation, trackSharedListenerApply } from './sharedCollabContract';
 import { getSharedActionRegistryEntry } from './sharedCollaboration';
@@ -58,6 +59,12 @@ describe('AppStatusBar', () => {
   it('updates the open tooltip when auxiliary diagnostics change and surfaces background sync status', async () => {
     await flushCloud(() => {
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, { metadata: { fromCache: false } });
+      setProjectAuthoritativeSyncState({
+        enabled: true,
+        ready: true,
+        phase: 'synced',
+        pendingTargets: [],
+      });
     });
 
     render(<AppStatusBar activeProjectId="proj_1" />);
@@ -83,6 +90,12 @@ describe('AppStatusBar', () => {
     await flushCloud(() => {
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, { metadata: { fromCache: false } });
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projects, { metadata: { fromCache: false } });
+      setProjectAuthoritativeSyncState({
+        enabled: true,
+        ready: true,
+        phase: 'synced',
+        pendingTargets: [],
+      });
       recordProjectCloudWriteStart();
       recordProjectFirestoreSaveOk();
       recordSharedCloudWriteStart();

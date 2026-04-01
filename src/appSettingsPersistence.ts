@@ -31,6 +31,15 @@ import {
 } from './sharedCollaboration';
 import { failedSharedMutation, SHARED_MUTATION_ACCEPTED, type SharedMutationResult } from './sharedMutation';
 
+function normalizeAppSettingsMutationError(err: unknown): 'permission-denied' | 'unknown' {
+  const code = typeof err === 'object' && err && 'code' in err ? String((err as { code?: unknown }).code ?? '') : '';
+  const message = typeof err === 'object' && err && 'message' in err ? String((err as { message?: unknown }).message ?? '') : '';
+  if (code.includes('permission-denied') || message.includes('permission-denied')) {
+    return 'permission-denied';
+  }
+  return 'unknown';
+}
+
 /**
  * Upper bound for app-settings IDB durability (includes time queued behind other IDB writes).
  * Without this, a hung `saveToIDB` would leave `localWritePendingCount` stuck and the status
@@ -256,6 +265,7 @@ type LoadAppSettingsDocOptions = {
   localPreferred?: boolean;
   idbKey?: string;
   registryKind?: AppSettingsRegistryKind;
+  allowProjectScopedLocalCache?: boolean;
 };
 
 export async function loadAppSettingsDoc<T extends DocumentData>({
@@ -263,8 +273,13 @@ export async function loadAppSettingsDoc<T extends DocumentData>({
   localPreferred = false,
   idbKey,
   registryKind,
+  allowProjectScopedLocalCache = false,
 }: LoadAppSettingsDocOptions): Promise<T | null> {
-  requireAppSettingsRegistryEntry(docId, registryKind ?? inferAppSettingsRegistryKind(docId));
+  const resolvedKind = registryKind ?? inferAppSettingsRegistryKind(docId);
+  const entry = requireAppSettingsRegistryEntry(docId, resolvedKind);
+  if (localPreferred && entry.scope === 'project_generate_content' && !allowProjectScopedLocalCache) {
+    throw new Error(`Project-scoped shared doc "${docId}" cannot use local-preferred load without provisional-cache approval.`);
+  }
   if (localPreferred) {
     const cached = await loadCachedState<T>({
       idbKey: idbKey ?? appSettingsIdbKey(docId),
@@ -357,7 +372,7 @@ export async function writeAppSettingsDocRemote<T extends DocumentData>({
   } catch (err) {
     recordSharedCloudWriteError();
     reportPersistFailure(addToast, cloudContext, err);
-    return failedSharedMutation('unknown');
+    return failedSharedMutation(normalizeAppSettingsMutationError(err));
   }
 }
 
@@ -403,7 +418,7 @@ export async function writeAppSettingsRowsRemote<T extends Record<string, unknow
   } catch (err) {
     recordSharedCloudWriteError();
     reportPersistFailure(addToast, cloudContext, err);
-    return failedSharedMutation('unknown');
+    return failedSharedMutation(normalizeAppSettingsMutationError(err));
   }
 }
 
@@ -411,15 +426,21 @@ type LoadAppSettingsRowsOptions = {
   docId: string;
   loadMode?: 'remote' | 'local-preferred';
   registryKind?: AppSettingsRegistryKind;
+  allowProjectScopedLocalCache?: boolean;
 };
 
 export async function loadAppSettingsRows<T>({
   docId,
   loadMode = 'remote',
   registryKind,
+  allowProjectScopedLocalCache = false,
 }: LoadAppSettingsRowsOptions): Promise<T[]> {
-  requireAppSettingsRegistryEntry(docId, registryKind ?? inferAppSettingsRegistryKind(docId));
+  const resolvedKind = registryKind ?? inferAppSettingsRegistryKind(docId);
+  const entry = requireAppSettingsRegistryEntry(docId, resolvedKind);
   if (loadMode === 'local-preferred') {
+    if (entry.scope === 'project_generate_content' && !allowProjectScopedLocalCache) {
+      throw new Error(`Project-scoped shared rows "${docId}" cannot use local-preferred load without provisional-cache approval.`);
+    }
     return loadChunkedAppSettingsRowsLocalPreferred<T>(docId);
   }
   return loadChunkedAppSettingsRows<T>(docId);

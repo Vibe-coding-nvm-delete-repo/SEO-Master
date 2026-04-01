@@ -192,6 +192,49 @@ describe('appSettings collaboration contract', () => {
     unsubscribe();
   });
 
+  it('blocks local-preferred project-scoped shared doc reads unless the caller explicitly allows provisional cache use', async () => {
+    sharedStore.docs.set('project_proj-1__generate_settings_page_names', {
+      updatedAt: '2026-04-01T00:00:00.000Z',
+      prompt: 'Shared generate prompt',
+    });
+
+    await expect(loadAppSettingsDoc<Record<string, unknown>>({
+      docId: 'project_proj-1__generate_settings_page_names',
+      localPreferred: true,
+      registryKind: 'settings',
+    })).rejects.toThrow('cannot use local-preferred load without provisional-cache approval');
+
+    await expect(loadAppSettingsDoc<Record<string, unknown>>({
+      docId: 'project_proj-1__generate_settings_page_names',
+      localPreferred: true,
+      registryKind: 'settings',
+      allowProjectScopedLocalCache: true,
+    })).resolves.toMatchObject({
+      prompt: 'Shared generate prompt',
+    });
+  });
+
+  it('blocks local-preferred project-scoped shared row reads unless the caller explicitly allows provisional cache use', async () => {
+    sharedStore.docs.set('project_proj-1__generate_rows_page_names', {
+      rows: [{ id: 'row-1', output: 'Shared title' }],
+      updatedAt: '2026-04-01T00:00:00.000Z',
+      totalRows: 1,
+    });
+
+    await expect(loadAppSettingsRows<Record<string, unknown>>({
+      docId: 'project_proj-1__generate_rows_page_names',
+      loadMode: 'local-preferred',
+      registryKind: 'rows',
+    })).rejects.toThrow('cannot use local-preferred load without provisional-cache approval');
+
+    await expect(loadAppSettingsRows<Record<string, unknown>>({
+      docId: 'project_proj-1__generate_rows_page_names',
+      loadMode: 'local-preferred',
+      registryKind: 'rows',
+      allowProjectScopedLocalCache: true,
+    })).resolves.toEqual([{ id: 'row-1', output: 'Shared title' }]);
+  });
+
   it('deletes shared fields through the approved remote mutation wrapper', async () => {
     sharedStore.docs.set('group_review_settings', {
       updatedAt: '2026-04-01T00:00:00.000Z',

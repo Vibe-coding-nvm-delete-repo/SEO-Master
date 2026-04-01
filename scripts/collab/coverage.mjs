@@ -108,6 +108,14 @@ function validateRequiredCoverageId(actionId, kind, expectedId, coverage) {
   return null;
 }
 
+function validateBrowserHarness(actionId, coverage) {
+  const normalized = coverage.file.replace(/\\/g, '/');
+  const requiresBrowserHarness = actionId.startsWith('generate.');
+  if (!requiresBrowserHarness) return null;
+  if (normalized.startsWith('e2e/')) return null;
+  return `${actionId} browser coverage must live in e2e/ for isolated-runtime verification (found ${coverage.file})`;
+}
+
 const repoRoot = process.cwd();
 const outputArgIndex = process.argv.findIndex((arg) => arg === '--write');
 const outputPath = outputArgIndex >= 0 ? process.argv[outputArgIndex + 1] : null;
@@ -133,6 +141,8 @@ for (const entry of registryEntries) {
   if (isRequiredCoverage(manifestEntry.browser)) {
     const browserIdError = validateRequiredCoverageId(entry.id, 'browser', entry.testIds.browser, manifestEntry.browser);
     if (browserIdError) errors.push(browserIdError);
+    const browserHarnessError = validateBrowserHarness(entry.id, manifestEntry.browser);
+    if (browserHarnessError) errors.push(browserHarnessError);
     const browserFileError = ensureFileContainsId(repoRoot, manifestEntry.browser, 'browser', entry.id);
     if (browserFileError) errors.push(browserFileError);
   } else if (entry.userVisibleSharedState) {

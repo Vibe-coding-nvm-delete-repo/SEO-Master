@@ -36,10 +36,12 @@
 - Grouping and related group actions now only clear selection/input and show success toasts after the persistence boundary actually accepts the mutation; if shared state is read-only/recovering, the action preserves the current selection and surfaces only the blocking warning.
 - Shared V2 editability now distinguishes **background canonical reload** from **true write-unsafe state**: transient `collab/meta` or epoch reloads no longer blanket-freeze routine grouping when the last known canonical state is still safe, while schema/rules/canonical-integrity failures still fail closed.
 - Shared V2 editability now also fail-closes the unsafe reload edge: if `collab/meta` has already advanced to a different `datasetEpoch/baseCommitId` than the last acknowledged writable canonical base, routine and bulk edits pause until that newer canonical state finishes loading instead of letting one browser keep writing stale old-epoch entity docs that collaborators will never see.
+- Shared V2 convergence now has an explicit authoritative-readiness contract: the first server-authoritative snapshot for each active-epoch entity collection replaces stale local cached docs, `collab/meta` plus `project_operations/current` are part of the readiness barrier, and the status bar no longer reports `Cloud: synced` until the open shared project has actually converged.
 - Routine Group edits and bulk Group operations now use separate gating semantics: manual grouping/approve/ungroup/block actions follow routine write safety, while filtered Auto Group, Auto Group panel runs, keyword rating, and token-merge cascades stay on the bulk-operation lock path.
 - Same-browser bulk-operation spam is now rejected before a second project lock attempt starts, so repeated clicks cannot start overlapping shared bulk jobs from one client while the first lock is still active.
 - Group row selection now uses the maintained extracted row components for Pages, Grouped, and Approved tables, so checkbox selection consistently drives the real grouping handlers instead of drifting behind stale inline callback signatures in `App.tsx`.
 - When shared V2 state is incomplete, project open can still show the last available local snapshot in read-only mode, but the client now immediately retries the V2 bootstrap path and never falls back to reading legacy Firestore chunk payloads as the active shared runtime view surface.
+- Project deep links under `/seo-magic/group/data/:projectKey` now fail closed while the target metadata is still unresolved instead of silently opening the last workspace-preference project; the app preserves the pending URL key and resolves it again when the live `projects` snapshot arrives, so stale bootstrap project lists no longer hijack one project link into another project.
 
 ---
 
@@ -80,6 +82,7 @@
 - `H2 Body` pipeline sync now ignores execution-only setting edits like concurrency, so changing concurrent request count no longer forces an unnecessary upstream row reload or clobbers the active table state.
 - Generate settings now preserve local concurrency edits through hydration races, so `Concurrent Requests` changes in shared generate subtabs no longer snap back to `5` when Firestore or cache snapshots arrive late.
 - Derived content subtabs now react to local upstream row updates with a local-preferred reload before Firestore catches up, so finishing `Pages`, `H2s`, `Page Guide`, `H2 Body`, or other upstream stages populates the next content subtab immediately instead of leaving it blank until a later remote snapshot lands.
+- Project-scoped Generate/Content cache reads are now explicitly provisional only: app-facing code must opt in before using `local-preferred` for project-scoped shared docs, hidden nested Content panels stay idle while invisible, and blocked shared workspace bootstrap writes now surface as structured workspace errors instead of generic raw failures.
 - `H2 Content` includes a top-level bulk `Redo Rated 3/4` action that resets only the H2 answers currently rated `3` or `4` back to pending for rewrite.
 - Shared Generate/Content instances now scope the header `Clear` button to the active visible subtab:
   - clearing a slot subtab only wipes that slot’s own generated state
@@ -217,6 +220,7 @@
 
 ### CSV import (cross-project safety)
 - Shared-project CSV import now waits for the async canonical `bulkSet` result before leaving the import flow, so the UI does not switch to `Pages` or clear the processing state until the shared save is actually accepted; blocked/failed shared writes now surface as import errors instead of false success.
+- Shared-project CSV bootstrap no longer races the live `collab/meta` listener on first open. When a shared project is still bootstrapping its initial V2 canonical state, the listener now stands down instead of launching a second recovery/bootstrap path that could hit `meta-conflict` before import.
 - Large CSVs parse in chunks; import is **pinned to the project that was active when the file was chosen**. If you switch projects before parsing finishes, the import is **cancelled** (warning toast) and no data is written, preventing the previous bug where persistence used the **current** project ref while the UI branch used a **stale** project id and could save one project’s file into another’s storage.
 
 ### Projects tab (compact row layout, folders & deleted)
@@ -1047,3 +1051,8 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 - Added `npm run collab:census` and `npm run collab:audit`, backed by a checked-in Firestore callsite classification manifest, so every raw Firestore touchpoint in `src/` is now classified and new unknown callsites fail the collaboration gate by default.
 - Release scripts now run the collaboration gate before preview/live release checks, and maintainer docs now explicitly forbid new raw app-facing Firestore callsites without classification and contract registration.
 - The collaboration gate now also includes a two-session QA browser flow whose cross-page storage sync correctly follows the actual scenario id, so Generate/Content shared settings, rows, and logs are validated against real cross-page convergence instead of a broken harness parser.
+
+### 2026-04-01: Project Deep-Link Resolution Guard
+
+- Direct `Group > Data` project URLs now keep their requested `projectKey` pending during bootstrap instead of falling back to the last saved `activeProjectId` when the initial project list is stale or empty.
+- The live projects snapshot now retries that pending URL resolution and opens the intended project as soon as its metadata is present, preventing one project link from loading a different project out of workspace preferences.

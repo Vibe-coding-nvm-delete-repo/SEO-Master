@@ -5621,8 +5621,12 @@ export default function GenerateTab({
     setWorkspaceReady(false);
     setWorkspaceError(null);
     void ensureProjectGenerateWorkspace(activeProjectId)
-      .then(() => {
+      .then((result) => {
         if (!alive) return;
+        if (result.status !== 'ready') {
+          setWorkspaceError(result.message ?? 'Failed to prepare the shared Generate workspace.');
+          return;
+        }
         setWorkspaceReady(true);
       })
       .catch((error) => {

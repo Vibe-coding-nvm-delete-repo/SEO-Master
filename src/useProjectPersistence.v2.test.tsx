@@ -341,6 +341,9 @@ function emitDocSnapshot(path: string, data: any, hasPendingWrites = false) {
 function emitQuerySnapshot(path: string, changes: any[], hasPendingWrites = false) {
   firestoreMocks.emit(path, {
     metadata: { hasPendingWrites },
+    docs: changes
+      .filter((change) => change.type !== 'removed')
+      .map((change) => change.doc),
     docChanges: () => changes,
   });
 }
@@ -2053,6 +2056,50 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(storageMocks.saveProjectDataToFirestore).not.toHaveBeenCalled();
     expect(storageMocks.saveProjectToFirestore).not.toHaveBeenCalled();
     expect(storageMocks.saveToIDB).not.toHaveBeenCalled();
+
+    await act(async () => {
+      canonicalLoad.resolve(makeCanonical(1));
+      await canonicalLoad.promise;
+    });
+  });
+
+  it('does not start a second shared bootstrap load when the meta listener echoes bootstrap state during initial load', async () => {
+    const canonicalLoad = deferred<ReturnType<typeof makeCanonical>>();
+    collabMocks.loadCanonicalProjectState.mockImplementation(() => canonicalLoad.promise);
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+      void result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', null);
+    });
+
+    await flush();
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', {
+        ...makeMeta(1, 1),
+        migrationState: 'running',
+        commitState: 'writing',
+      });
+    });
+
+    await flush();
+    expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       canonicalLoad.resolve(makeCanonical(1));

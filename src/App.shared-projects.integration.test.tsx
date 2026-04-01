@@ -555,6 +555,27 @@ describe('App shared project visibility', () => {
     await act(async () => {
       firestoreListeners.handlers.get('projects/proj-1/groups')?.({
         metadata: { hasPendingWrites: false },
+        docs: [
+          {
+            id: '1::group-initial-group',
+            data: () => ({
+              id: 'group-initial-group',
+              groupName: 'Updated Group',
+              status: 'grouped',
+              clusterTokens: ['initial tokens'],
+              datasetEpoch: 1,
+              lastWriterClientId: 'client-a',
+              revision: 2,
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              updatedByClientId: 'client-a',
+              lastMutationId: null,
+              pageCount: 1,
+              totalVolume: 1000,
+              keywordCount: 1,
+              avgKd: 20,
+            }),
+          },
+        ],
         docChanges: () => [
           {
             type: 'modified',
