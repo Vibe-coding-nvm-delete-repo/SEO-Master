@@ -9,6 +9,12 @@ import { WORKSPACE_FIRESTORE_DATABASE_ID } from './firestoreDbConfig';
 import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
 import type { SharedChannelKind, SharedScope } from './sharedCollaboration';
 import type { SharedMutationResult } from './sharedMutation';
+import {
+  appendCollaborationDiagnostic,
+  clearCollaborationDiagnostics as clearCollabDiagnosticsJournal,
+  getCollaborationDiagnostics as getCollabDiagnosticsJournal,
+  type CollabDiagnosticEntry,
+} from './collabDiagnosticsLog';
 
 const subscribers = new Set<() => void>();
 
@@ -441,6 +447,14 @@ export function markListenerSnapshot(
   const channel = resolveCloudSyncChannel(channelId);
   let changed = listenerErrorChannels.delete(channel.id);
   if (snap?.metadata?.fromCache === false) {
+    appendCollaborationDiagnostic({
+      kind: 'listener-snapshot-server',
+      channelId,
+      data: {
+        domain: channel.domain,
+        reachability: channel.reachability,
+      },
+    });
     if (channel.reachability === 'project' && !projectServerReachable) {
       projectServerReachable = true;
       changed = true;
@@ -479,18 +493,35 @@ export function setProjectAuthoritativeSyncState(update: ProjectAuthoritativeSyn
   projectAuthoritativeSyncReady = update.ready;
   projectAuthoritativeSyncPhase = update.phase;
   projectAuthoritativePendingTargets = nextPending;
+  appendCollaborationDiagnostic({
+    kind: 'authoritative-sync-state',
+    data: {
+      enabled: update.enabled,
+      ready: update.ready,
+      phase: update.phase,
+      pendingTargets: nextPending,
+    },
+  });
   markStateChanged();
 }
 
 export function markListenerError(channelId: CloudSyncChannelId): void {
   if (listenerErrorChannels.has(channelId)) return;
   listenerErrorChannels.add(channelId);
+  appendCollaborationDiagnostic({
+    kind: 'listener-error',
+    channelId,
+  });
   markStateChanged();
 }
 
 export function clearListenerError(channelId: CloudSyncChannelId): void {
   if (!listenerErrorChannels.has(channelId)) return;
   listenerErrorChannels.delete(channelId);
+  appendCollaborationDiagnostic({
+    kind: 'listener-error-cleared',
+    channelId,
+  });
   markStateChanged();
 }
 
@@ -667,6 +698,15 @@ export function recordCollaborationMutationResult(args: {
   const channel = ensureCollaborationChannelHealth(args);
   let changed = false;
   if (args.result.status === 'accepted') {
+    appendCollaborationDiagnostic({
+      kind: 'mutation-accepted',
+      actionId: args.actionId,
+      data: {
+        scope: args.scope,
+        channelKind: args.channelKind,
+        storageChannel: args.storageChannel,
+      },
+    });
     const now = Date.now();
     if (channel.lastAcceptedWriteAtMs !== now) {
       channel.lastAcceptedWriteAtMs = now;
@@ -681,13 +721,35 @@ export function recordCollaborationMutationResult(args: {
       changed = true;
     }
   } else if (args.result.status === 'blocked') {
+    appendCollaborationDiagnostic({
+      kind: 'mutation-blocked',
+      actionId: args.actionId,
+      data: {
+        reason: args.result.reason,
+        scope: args.scope,
+        channelKind: args.channelKind,
+        storageChannel: args.storageChannel,
+      },
+    });
     if (channel.lastBlockedReason !== args.result.reason) {
       channel.lastBlockedReason = args.result.reason;
       changed = true;
     }
-  } else if (channel.lastFailedReason !== args.result.reason) {
-    channel.lastFailedReason = args.result.reason;
-    changed = true;
+  } else {
+    appendCollaborationDiagnostic({
+      kind: 'mutation-failed',
+      actionId: args.actionId,
+      data: {
+        reason: args.result.reason,
+        scope: args.scope,
+        channelKind: args.channelKind,
+        storageChannel: args.storageChannel,
+      },
+    });
+    if (channel.lastFailedReason !== args.result.reason) {
+      channel.lastFailedReason = args.result.reason;
+      changed = true;
+    }
   }
   if (changed) markStateChanged();
 }
@@ -703,6 +765,15 @@ export function recordCollaborationListenerApply(args: {
   const now = Date.now();
   if (channel.lastListenerApplyAtMs === now) return;
   channel.lastListenerApplyAtMs = now;
+  appendCollaborationDiagnostic({
+    kind: 'listener-apply',
+    actionId: args.actionId,
+    data: {
+      scope: args.scope,
+      channelKind: args.channelKind,
+      storageChannel: args.storageChannel,
+    },
+  });
   markStateChanged();
 }
 
@@ -731,6 +802,15 @@ export function setSharedProjectSyncState(next: SharedProjectSyncState): void {
     authoritativeReady: next.authoritativeReady,
     pendingKeys: [...next.pendingKeys],
   };
+  appendCollaborationDiagnostic({
+    kind: 'shared-project-sync-state',
+    projectId: next.activeProjectId,
+    data: {
+      bootstrapSource: next.bootstrapSource,
+      authoritativeReady: next.authoritativeReady,
+      pendingKeys: [...next.pendingKeys],
+    },
+  });
   markStateChanged();
 }
 
@@ -771,7 +851,16 @@ export function resetCloudSyncStateForTests(): void {
     authoritativeReady: false,
     pendingKeys: [],
   };
+  clearCollabDiagnosticsJournal();
   notifyQueued = false;
+}
+
+export function getCollaborationDiagnostics(limit = 300): readonly CollabDiagnosticEntry[] {
+  return getCollabDiagnosticsJournal(limit);
+}
+
+export function clearCollaborationDiagnostics(): void {
+  clearCollabDiagnosticsJournal();
 }
 
 /** Read-only probe for recovery timers — true when the last IDB write failed. */

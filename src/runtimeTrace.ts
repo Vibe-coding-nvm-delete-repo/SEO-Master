@@ -61,6 +61,16 @@ function resolveTraceEndpoint(): string | null {
   return configured;
 }
 
+export function getRuntimeTraceSessionContext(): { sessionId: string | null; runId: string | null } {
+  if (!isBrowser()) {
+    return { sessionId: null, runId: null };
+  }
+  return {
+    sessionId: readOrCreateId(TRACE_SESSION_KEY),
+    runId: readOrCreateId(TRACE_RUN_KEY),
+  };
+}
+
 export function beginRuntimeTrace(source: string, projectId?: string | null, data?: RuntimeTraceData): string {
   const traceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   traceHopByTraceId.set(traceId, 0);
@@ -80,8 +90,7 @@ export function traceRuntimeEvent(input: RuntimeTraceEventInput): void {
   const hop = previous + 1;
   traceHopByTraceId.set(input.traceId, hop);
 
-  const sessionId = readOrCreateId(TRACE_SESSION_KEY);
-  const runId = readOrCreateId(TRACE_RUN_KEY);
+  const { sessionId, runId } = getRuntimeTraceSessionContext();
   const payload = {
     sessionId,
     runId,

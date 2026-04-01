@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-01T14:36:42.741Z",
+  "generatedAt": "2026-04-01T19:29:13.478Z",
   "callsiteCount": 125,
   "unknownCount": 0,
   "callsites": [
@@ -1901,7 +1901,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2415,
+      "line": 2575,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -1917,7 +1917,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2701,
+      "line": 2863,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -1933,7 +1933,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2729,
+      "line": 2891,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -1949,7 +1949,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2757,
+      "line": 2919,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -1965,7 +1965,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2785,
+      "line": 2947,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -1981,7 +1981,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2813,
+      "line": 2975,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -1997,7 +1997,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2841,
+      "line": 3003,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -2013,7 +2013,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 2892,
+      "line": 3052,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {
@@ -2029,7 +2029,7 @@
     },
     {
       "path": "src/useProjectPersistence.ts",
-      "line": 3158,
+      "line": 3338,
       "operation": "onSnapshot",
       "snippet": "onSnapshot(",
       "classification": {

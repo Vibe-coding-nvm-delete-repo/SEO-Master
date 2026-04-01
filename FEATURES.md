@@ -41,6 +41,7 @@
 - Same-browser bulk-operation spam is now rejected before a second project lock attempt starts, so repeated clicks cannot start overlapping shared bulk jobs from one client while the first lock is still active.
 - Group row selection now uses the maintained extracted row components for Pages, Grouped, and Approved tables, so checkbox selection consistently drives the real grouping handlers instead of drifting behind stale inline callback signatures in `App.tsx`.
 - When shared V2 state is incomplete, project open can still show the last available local snapshot in read-only mode, but the client now immediately retries the V2 bootstrap path and never falls back to reading legacy Firestore chunk payloads as the active shared runtime view surface.
+- Shared V2 fallback payloads are now explicitly provisional: if the immutable base commit is not loaded yet, the browser stays read-only, the fallback view is not written back into the canonical IndexedDB cache, and identical `collab/meta` listener snapshots still retry canonical recovery instead of silently accepting stale local state as shared truth.
 - Project deep links under `/seo-magic/group/data/:projectKey` now fail closed while the target metadata is still unresolved instead of silently opening the last workspace-preference project; the app preserves the pending URL key and resolves it again when the live `projects` snapshot arrives, so stale bootstrap project lists no longer hijack one project link into another project.
 
 ---
@@ -1056,3 +1057,21 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 
 - Direct `Group > Data` project URLs now keep their requested `projectKey` pending during bootstrap instead of falling back to the last saved `activeProjectId` when the initial project list is stale or empty.
 - The live projects snapshot now retries that pending URL resolution and opens the intended project as soon as its metadata is present, preventing one project link from loading a different project out of workspace preferences.
+
+### 2026-04-01: Shared V2 Convergence Hardening
+
+- Shared project V2 bootstrap now queues initial `collab/meta` snapshots received during bootstrap and drains them deterministically after bootstrap resolves, so listener activation no longer depends on a second meta event.
+- Shared write gating now fails closed until authoritative shared readiness is reached, preventing editable-but-desynced windows during shared convergence.
+- Authoritative readiness now survives listener reattach after authoritative canonical activation, and convergence remains deterministic across reloads/project switches.
+
+### 2026-04-01: Mandatory Collab Convergence Gate
+
+- Collaboration gating now includes runtime convergence validation, not only static Firestore census/audit checks.
+- `npm run collab:gate` now executes a convergence matrix covering shared app settings, project metadata, shared-project V2 persistence, Firestore rules, and two-session browser collaboration flows.
+- `npm run collab:release-gate` now starts with that stricter collab gate, then runs full typecheck/tests/build.
+
+### 2026-04-01: Durable Collaboration Diagnostics Journal
+
+- Added a bounded browser-local collaboration diagnostics journal that records authoritative-sync transitions, shared-project phase changes, listener server snapshots/errors, listener-apply events, and shared mutation outcomes.
+- Each entry is stamped with runtime `sessionId` and `runId` correlation context to improve cross-client incident timeline reconstruction.
+- Exposed support helpers on `window.__kwgCollabDiagnostics` (`read(limit)`, `clear()`) for quick incident export in production sessions.

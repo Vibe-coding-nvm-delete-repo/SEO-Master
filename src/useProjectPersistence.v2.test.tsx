@@ -109,6 +109,7 @@ const collabMocks = vi.hoisted(() => ({
 const runtimeTraceMocks = vi.hoisted(() => ({
   beginRuntimeTrace: vi.fn(() => 'trace-test'),
   traceRuntimeEvent: vi.fn(),
+  getRuntimeTraceSessionContext: vi.fn(() => ({ sessionId: 'session-test', runId: 'run-test' })),
 }));
 
 vi.mock('./firebase', () => ({ db: {} }));
@@ -152,6 +153,7 @@ vi.mock('./projectCollabV2', async () => {
 vi.mock('./runtimeTrace', () => ({
   beginRuntimeTrace: runtimeTraceMocks.beginRuntimeTrace,
   traceRuntimeEvent: runtimeTraceMocks.traceRuntimeEvent,
+  getRuntimeTraceSessionContext: runtimeTraceMocks.getRuntimeTraceSessionContext,
 }));
 
 import {
@@ -453,6 +455,8 @@ describe('useProjectPersistence V2 hardening', () => {
     runtimeTraceMocks.beginRuntimeTrace.mockReset();
     runtimeTraceMocks.beginRuntimeTrace.mockReturnValue('trace-test');
     runtimeTraceMocks.traceRuntimeEvent.mockReset();
+    runtimeTraceMocks.getRuntimeTraceSessionContext.mockReset();
+    runtimeTraceMocks.getRuntimeTraceSessionContext.mockReturnValue({ sessionId: 'session-test', runId: 'run-test' });
   });
 
   it('never attaches the legacy chunk listener for shared collab projects', async () => {
@@ -2025,6 +2029,50 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
   });
 
+  it('keeps shared V2 fallback payloads provisional until the canonical base commit is reloaded', async () => {
+    const fallbackCanonical = makeCanonical(1, ['cached']);
+    fallbackCanonical.base = null as any;
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(fallbackCanonical as any);
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical(1, ['remote']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    expect(result.current.storageMode).toBe('v2');
+    expect(result.current.isSharedProjectReadOnly).toBe(true);
+    expect(result.current.isRoutineSharedEditBlocked).toBe(true);
+    expect(result.current.writeBlockReason).toBe('canonical-unresolved');
+    expect(Array.from(result.current.blockedTokens)).toEqual(['cached']);
+    expect(collabMocks.saveCanonicalCacheToIDB).not.toHaveBeenCalled();
+
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 1));
+    });
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['remote']));
+    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
+    expect(collabMocks.loadCanonicalEpoch).toHaveBeenCalledTimes(1);
+    expect(collabMocks.saveCanonicalCacheToIDB).toHaveBeenCalledTimes(1);
+  });
+
   it('suppresses legacy chunk writes while project storage mode is unresolved', async () => {
     const canonicalLoad = deferred<ReturnType<typeof makeCanonical>>();
     collabMocks.loadCanonicalProjectState.mockImplementation(() => canonicalLoad.promise);
@@ -2105,6 +2153,45 @@ describe('useProjectPersistence V2 hardening', () => {
       canonicalLoad.resolve(makeCanonical(1));
       await canonicalLoad.promise;
     });
+  });
+
+  it('drains queued bootstrap meta without requiring a second meta snapshot event', async () => {
+    const canonicalLoad = deferred<ReturnType<typeof makeCanonical>>();
+    const fallbackCanonical = makeCanonical(1, ['cached']);
+    fallbackCanonical.base = null as any;
+    collabMocks.loadCanonicalProjectState.mockImplementationOnce(() => canonicalLoad.promise);
+    collabMocks.loadCanonicalEpoch.mockResolvedValueOnce(makeCanonical(1, ['remote']));
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+      void result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await flush();
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true),
+    );
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 1));
+    });
+
+    await act(async () => {
+      canonicalLoad.resolve(fallbackCanonical as any);
+      await canonicalLoad.promise;
+    });
+
+    await waitFor(() => expect(Array.from(result.current.blockedTokens)).toEqual(['remote']));
+    expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
+    expect(collabMocks.loadCanonicalEpoch).toHaveBeenCalledTimes(1);
   });
 
   it('drops conflicted optimistic state and reloads canonical docs from cloud', async () => {

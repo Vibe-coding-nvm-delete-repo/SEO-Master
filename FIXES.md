@@ -200,6 +200,16 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 - `src/generateWorkspaceScope.ts`, `src/ContentTab.tsx`, and `src/GenerateTab.tsx` now surface structured workspace-ensure results instead of collapsing blocked bootstrap writes into raw thrown errors.
 - Regression coverage now locks in the stricter status semantics, fail-closed project-scoped cache reads, hidden-surface idle behavior, and shared workspace ensure handling.
 
+### [x] 1.16 Shared V2 fallback payloads could masquerade as canonical state
+**Date fixed:** 2026-04-01
+**Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FIXES.md`, `FEATURES.md`
+**Root cause:** The shared-project V2 hook treated a fallback `canonical.resolved` payload as equivalent to a fully loaded canonical epoch whenever `collab/meta` already said `readMode:'v2'` and `commitState:'ready'`. That collapsed provisional local fallback and authoritative canonical state into the same branch. Once that happened, a stale cache payload could be re-saved as canonical IndexedDB state, the browser could appear writable even though no immutable base commit was loaded, and the `collab/meta` listener could short-circuit identical meta snapshots before retrying the canonical reload that should have repaired the session.
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now tracks whether the current V2 base snapshot is `authoritative` or only `provisional`, so only a loaded base commit matching the active `collab/meta` epoch can unlock writes or qualify for canonical cache persistence.
+- Shared fallback payloads without a loaded base commit now stay explicitly read-only/provisional, and the hook rebuilds local refs from them only for temporary UI continuity instead of treating them as server-acknowledged truth.
+- The `collab/meta` duplicate-snapshot guard now skips reloads only when the browser already holds an authoritative base for that exact meta identity, so same-meta listener events can still repair a provisional fallback session.
+- `src/useProjectPersistence.v2.test.tsx` now proves that fallback payloads stay read-only, do not overwrite the canonical cache, and recover to the real shared state once the live `collab/meta` snapshot for that epoch is observed.
+
 **Root cause:** `src/hooks/useGlobalGroupingShortcuts.ts` treated every editable target as either globally allowed or globally blocked, instead of distinguishing between dataset-defining filter/search controls and arbitrary editors. That meant `Shift+1` could silently no-op when focus stayed inside the pages/token-management filters that define the visible list, while the same hook also let `Tab` grouping shortcuts fire during input focus. The bug lived in the shared shortcut boundary, not in Auto Group itself.
 
 **Instances fixed:**
@@ -433,3 +443,18 @@ All items in this file were triple-checked on 2026-03-25:
 - **3.5:** CORRECTED — duplication is `formatCost()` across files, not cost estimation in AutoGroupEngine.
 - **4.1:** CLARIFIED — not a leak (connections are closed), but no pooling/reuse.
 - **4.6:** DOWNGRADED — no leak in normal operation, only on unmount with pending toasts.
+
+- [x] (2026-04-01) Hardened shared-project V2 convergence bootstrap/readiness in `src/useProjectPersistence.ts` and `src/useProjectPersistence.v2.test.tsx`.
+  Root cause: the shared V2 bootstrap path could skip an actionable initial `collab/meta` snapshot and rely on a later meta event to attach/reload listeners, while readiness tracking could be reset during listener attach even after an authoritative canonical load. This left some sessions in non-authoritative listener state and allowed inconsistent propagation behavior.
+  Instances fixed: queued bootstrap-meta drain (instead of skip-and-forget), deterministic post-authoritative listener reattach trigger, authoritative canonical-base tracking for cache/listener guard paths, preserved authoritative entity readiness across listener reattach, and strict shared fail-closed mutation/read-only gating until authoritative shared readiness is satisfied.
+  Prevention rule: shared V2 bootstrap snapshots are never dropped; listener activation and authoritative readiness must converge without requiring a second meta event.
+
+- [x] (2026-04-01) Strengthened collaboration gating so convergence checks are mandatory in `package.json` (`collab:convergence`, `collab:gate`, `collab:release-gate`).
+  Root cause: static census/audit/coverage checks alone can verify callsite hygiene, but they cannot guarantee runtime cross-client convergence for every shared lane.
+  Instances fixed: collab gate now enforces targeted convergence tests for app settings, project metadata, shared-project V2 persistence, Firestore rules, and two-session browser collaboration before release gating continues.
+  Prevention rule: no release gate can pass unless shared-lane convergence tests pass in addition to Firestore callsite contract checks.
+
+- [x] (2026-04-01) Added durable collaboration diagnostics journaling in `src/collabDiagnosticsLog.ts`, `src/cloudSyncStatus.ts`, and `src/runtimeTrace.ts` with regression tests in `src/collabDiagnosticsLog.test.ts` and `src/cloudSyncStatus.diagnostics.test.ts`.
+  Root cause: prevention gates were strong, but forensic debugging still depended on transient console output and in-memory state, making post-incident cross-client timeline reconstruction difficult.
+  Instances fixed: authoritative/readiness transitions, shared project sync phase updates, listener server snapshots/errors, listener apply events, and shared mutation accepted/blocked/failed outcomes now append structured entries with session/run correlation IDs to a bounded local diagnostics journal.
+  Prevention rule: every critical shared convergence transition must emit durable diagnostics so support can reconstruct causality after the fact.

@@ -214,6 +214,44 @@ function ensureNullableArray<T>(value: T[] | null | undefined): T[] | null {
   return Array.isArray(value) ? value : null;
 }
 
+type CanonicalBaseAuthority = 'authoritative' | 'provisional';
+
+function isReadyV2Meta(meta: ProjectCollabMetaDoc | null | undefined): meta is ProjectCollabMetaDoc {
+  return Boolean(
+    meta &&
+    meta.readMode === 'v2' &&
+    meta.commitState === 'ready' &&
+    meta.migrationState === 'complete' &&
+    typeof meta.datasetEpoch === 'number',
+  );
+}
+
+function hasLoadedCanonicalBaseForMeta(
+  meta: ProjectCollabMetaDoc | null | undefined,
+  base: ProjectBaseSnapshot | null,
+): boolean {
+  return Boolean(
+    isReadyV2Meta(meta) &&
+    base &&
+    base.datasetEpoch === meta.datasetEpoch,
+  );
+}
+
+function hasAuthoritativeCanonicalBaseForMeta(
+  meta: ProjectCollabMetaDoc | null | undefined,
+  base: ProjectBaseSnapshot | null,
+  authority: CanonicalBaseAuthority | null,
+): boolean {
+  return authority === 'authoritative' && hasLoadedCanonicalBaseForMeta(meta, base);
+}
+
+function hasAuthoritativeCanonicalState(canonical: CanonicalProjectState): boolean {
+  if (canonical.mode !== 'v2' || !canonical.resolved) {
+    return false;
+  }
+  return hasLoadedCanonicalBaseForMeta(canonical.entities.meta, canonical.base);
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -515,11 +553,14 @@ export function useProjectPersistence(options: {
   const [isWriteUnsafe, setIsWriteUnsafeState] = useState(false);
   const [writeBlockReason, setWriteBlockReasonState] = useState<ProjectPersistence['writeBlockReason']>(null);
   const [lastKnownGoodWritableState, setLastKnownGoodWritableState] = useState<string | null>(null);
+  const [sharedAuthoritativeReadyState, setSharedAuthoritativeReadyState] = useState(false);
+  const [v2ListenerAttachNonce, setV2ListenerAttachNonce] = useState(0);
   const activeProjectIdRef = useRef<string | null>(null);
   const storageModeRef = useRef<'legacy' | 'v2'>('legacy');
   const addToastRef = useRef(addToast);
   const projectsRef = useRef(projects);
   const baseSnapshotRef = useRef<ProjectBaseSnapshot | null>(null);
+  const baseSnapshotAuthorityRef = useRef<CanonicalBaseAuthority | null>(null);
   const groupDocsRef = useRef<ProjectGroupDoc[]>([]);
   const blockedTokenDocsRef = useRef<ProjectBlockedTokenDoc[]>([]);
   const manualBlockedKeywordDocsRef = useRef<ProjectBlockedKeywordDoc[]>([]);
@@ -540,7 +581,14 @@ export function useProjectPersistence(options: {
   const isWriteUnsafeRef = useRef(false);
   const writeBlockReasonRef = useRef<ProjectPersistence['writeBlockReason']>(null);
   const lastKnownGoodWritableStateRef = useRef<string | null>(null);
+  const sharedAuthoritativeReadyRef = useRef(false);
   const projectStorageModeResolvedRef = useRef(false);
+  const pendingBootstrapMetaRef = useRef<{
+    projectId: string;
+    meta: ProjectCollabMetaDoc | null;
+    fromCache: boolean;
+  } | null>(null);
+  const drainingBootstrapMetaRef = useRef(false);
   const lockHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lockHeartbeatLostRef = useRef(false);
   const exclusiveOperationInFlightRef = useRef(false);
@@ -575,6 +623,9 @@ export function useProjectPersistence(options: {
   const canonicalIdentity = useCallback((datasetEpoch: number | null, baseCommitId: string | null) => {
     return datasetEpoch != null && baseCommitId ? `${datasetEpoch}:${baseCommitId}` : null;
   }, []);
+  const requestV2ListenerAttach = useCallback(() => {
+    setV2ListenerAttachNonce((nonce) => nonce + 1);
+  }, []);
   const rememberWritableCanonical = useCallback((datasetEpoch: number | null, baseCommitId: string | null) => {
     const identity = canonicalIdentity(datasetEpoch, baseCommitId);
     lastKnownGoodWritableStateRef.current = identity;
@@ -589,6 +640,8 @@ export function useProjectPersistence(options: {
   const sharedBootstrapSourceRef = useRef<SharedAuthoritativeBootstrapSource>('empty');
   const syncSharedProjectStatus = useCallback((projectId: string | null) => {
     if (!projectId) {
+      sharedAuthoritativeReadyRef.current = false;
+      setSharedAuthoritativeReadyState(false);
       setProjectAuthoritativeSyncState({
         enabled: false,
         ready: false,
@@ -599,8 +652,11 @@ export function useProjectPersistence(options: {
       return;
     }
     const pendingKeys = SHARED_AUTHORITATIVE_KEYS.filter((key) => !sharedAuthoritativeConfirmedKeysRef.current.has(key));
+    const authoritativeReady = pendingKeys.length === 0;
+    sharedAuthoritativeReadyRef.current = authoritativeReady;
+    setSharedAuthoritativeReadyState(authoritativeReady);
     const phase =
-      pendingKeys.length === 0
+      authoritativeReady
         ? 'synced'
         : sharedBootstrapSourceRef.current === 'local-cache'
           ? 'provisional-cache'
@@ -609,21 +665,21 @@ export function useProjectPersistence(options: {
             : 'connecting';
     setProjectAuthoritativeSyncState({
       enabled: true,
-      ready: pendingKeys.length === 0,
+      ready: authoritativeReady,
       phase,
       pendingTargets: pendingKeys,
     });
     setSharedProjectSyncState({
       activeProjectId: projectId,
       bootstrapSource: sharedBootstrapSourceRef.current,
-      authoritativeReady: pendingKeys.length === 0,
+      authoritativeReady,
       pendingKeys,
     });
   }, []);
   const resetSharedAuthoritativeTracking = useCallback((
     projectId: string | null,
     bootstrapSource: SharedAuthoritativeBootstrapSource,
-    options?: { preserveMeta?: boolean; preserveOperation?: boolean },
+    options?: { preserveMeta?: boolean; preserveOperation?: boolean; preserveEntities?: boolean },
   ) => {
     sharedBootstrapSourceRef.current = bootstrapSource;
     const next = new Set<string>();
@@ -635,6 +691,14 @@ export function useProjectPersistence(options: {
       sharedAuthoritativeConfirmedKeysRef.current.has('project_operations/current')
     ) {
       next.add('project_operations/current');
+    }
+    if (options?.preserveEntities) {
+      for (const key of SHARED_AUTHORITATIVE_KEYS) {
+        if (key === 'collab/meta' || key === 'project_operations/current') continue;
+        if (sharedAuthoritativeConfirmedKeysRef.current.has(key)) {
+          next.add(key);
+        }
+      }
     }
     sharedAuthoritativeConfirmedKeysRef.current = next;
     syncSharedProjectStatus(projectId);
@@ -651,6 +715,15 @@ export function useProjectPersistence(options: {
       sharedBootstrapSourceRef.current = 'server-authoritative';
     }
     sharedAuthoritativeConfirmedKeysRef.current.add(key);
+    syncSharedProjectStatus(projectId);
+  }, [syncSharedProjectStatus]);
+  const markAllSharedAuthoritativeKeys = useCallback((
+    projectId: string | null,
+    bootstrapSource: SharedAuthoritativeBootstrapSource = 'server-authoritative',
+  ) => {
+    if (!projectId) return;
+    sharedBootstrapSourceRef.current = bootstrapSource;
+    sharedAuthoritativeConfirmedKeysRef.current = new Set(SHARED_AUTHORITATIVE_KEYS);
     syncSharedProjectStatus(projectId);
   }, [syncSharedProjectStatus]);
 
@@ -750,6 +823,12 @@ export function useProjectPersistence(options: {
     if (!projectId) return false;
     return isSharedProject(projectsRef.current.find((project) => project.id === projectId));
   }, []);
+  const hasFullSharedAuthoritativeReadiness = useCallback((projectId: string | null): boolean => {
+    if (!projectId) return false;
+    if (storageModeRef.current !== 'v2') return true;
+    if (!isProjectSharedById(projectId)) return true;
+    return sharedAuthoritativeReadyRef.current;
+  }, [isProjectSharedById]);
 
   /** Build a full ProjectDataPayload from `latest.current` + optional overrides. */
   const buildPayload = useCallback((overrides?: Partial<PersistedState>): ProjectDataPayload => {
@@ -1187,6 +1266,7 @@ export function useProjectPersistence(options: {
   const updateCanonicalCache = useCallback((payload: ProjectDataPayload, meta: ProjectCollabMetaDoc | null) => {
     const projectId = activeProjectIdRef.current;
     if (!projectId) return;
+    if (!hasAuthoritativeCanonicalBaseForMeta(meta, baseSnapshotRef.current, baseSnapshotAuthorityRef.current)) return;
     if (!meta || meta.readMode !== 'v2' || meta.commitState !== 'ready' || meta.migrationState !== 'complete') return;
     if (!meta.baseCommitId) return;
     const context: V2CacheContext = {
@@ -1386,12 +1466,7 @@ export function useProjectPersistence(options: {
         incoming: summarizeIncomingCanonicalState(canonical),
       },
     );
-    const isReadyWritableCanonical = Boolean(
-      canonical.resolved &&
-      meta?.readMode === 'v2' &&
-      meta?.commitState === 'ready' &&
-      meta?.migrationState === 'complete'
-    );
+    const isReadyWritableCanonical = hasAuthoritativeCanonicalState(canonical);
     const recoveryReason: ProjectPersistence['writeBlockReason'] =
       canonical.diagnostics?.recovery?.outcome === 'failed' && canonical.diagnostics?.recovery?.code === 'permission-denied'
         ? 'permission-denied'
@@ -1404,13 +1479,28 @@ export function useProjectPersistence(options: {
       canonical.entities.meta.readMode === 'v2' &&
       (canonical.entities.meta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
     ));
-    baseSnapshotRef.current = canonical.base;
-    groupDocsRef.current = canonical.entities.groups;
-    blockedTokenDocsRef.current = canonical.entities.blockedTokens;
-    manualBlockedKeywordDocsRef.current = canonical.entities.manualBlockedKeywords;
-    tokenMergeRuleDocsRef.current = canonical.entities.tokenMergeRules;
-    labelSectionDocsRef.current = canonical.entities.labelSections;
-    activityLogDocsRef.current = canonical.entities.activityLog;
+    if (isReadyWritableCanonical) {
+      baseSnapshotRef.current = canonical.base;
+      baseSnapshotAuthorityRef.current = 'authoritative';
+      groupDocsRef.current = canonical.entities.groups;
+      blockedTokenDocsRef.current = canonical.entities.blockedTokens;
+      manualBlockedKeywordDocsRef.current = canonical.entities.manualBlockedKeywords;
+      tokenMergeRuleDocsRef.current = canonical.entities.tokenMergeRules;
+      labelSectionDocsRef.current = canonical.entities.labelSections;
+      activityLogDocsRef.current = canonical.entities.activityLog;
+    } else if (canonical.resolved) {
+      syncCanonicalRefsFromResolvedPayload(canonical.resolved);
+      baseSnapshotAuthorityRef.current = 'provisional';
+    } else {
+      baseSnapshotRef.current = canonical.base;
+      baseSnapshotAuthorityRef.current = canonical.base ? 'provisional' : null;
+      groupDocsRef.current = canonical.entities.groups;
+      blockedTokenDocsRef.current = canonical.entities.blockedTokens;
+      manualBlockedKeywordDocsRef.current = canonical.entities.manualBlockedKeywords;
+      tokenMergeRuleDocsRef.current = canonical.entities.tokenMergeRules;
+      labelSectionDocsRef.current = canonical.entities.labelSections;
+      activityLogDocsRef.current = canonical.entities.activityLog;
+    }
     activeEpochRef.current = canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null;
     rebuildRevisionMap(activeEpochRef.current);
     setActiveOperation(canonical.entities.activeOperation);
@@ -1418,7 +1508,10 @@ export function useProjectPersistence(options: {
     if (isReadyWritableCanonical) {
       rememberWritableCanonical(meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null, meta?.baseCommitId ?? null);
       setWriteUnsafe(false);
-    } else if (!lastKnownGoodWritableStateRef.current) {
+      if (isProjectSharedById(activeProjectIdRef.current)) {
+        markAllSharedAuthoritativeKeys(activeProjectIdRef.current, 'server-authoritative');
+      }
+    } else {
       setWriteUnsafe(true, recoveryReason);
     }
     setCanonicalReloading(false);
@@ -1434,7 +1527,7 @@ export function useProjectPersistence(options: {
     const project = projectsRef.current.find((item) => item.id === activeProjectIdRef.current);
     applyViewState(toProjectViewState(canonical.resolved, project));
     saveCounterRef.current = canonical.resolved.lastSaveId ?? saveCounterRef.current;
-  }, [applyViewState, rebuildRevisionMap, rememberWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, summarizeCurrentCanonicalState, summarizeIncomingCanonicalState, traceV2RuntimeEvent]);
+  }, [applyViewState, isProjectSharedById, markAllSharedAuthoritativeKeys, rebuildRevisionMap, rememberWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setWriteUnsafe, summarizeCurrentCanonicalState, summarizeIncomingCanonicalState, syncCanonicalRefsFromResolvedPayload, traceV2RuntimeEvent]);
 
   const reloadCanonicalStateFromCloud = useCallback(async () => {
     const projectId = activeProjectIdRef.current;
@@ -1491,10 +1584,49 @@ export function useProjectPersistence(options: {
     }
     clearPendingForEpoch(canonical.entities.meta?.datasetEpoch ?? canonical.base?.datasetEpoch ?? null);
     applyCanonicalState(canonical);
+    if (hasAuthoritativeCanonicalState(canonical)) {
+      requestV2ListenerAttach();
+    }
     if (canonical.entities.meta && canonical.resolved) {
       updateCanonicalCache(canonical.resolved, canonical.entities.meta);
     }
-  }, [applyCanonicalState, clearPendingForEpoch, isProjectSharedById, setCanonicalReloading, setWriteUnsafe, summarizeIncomingCanonicalState, traceV2RuntimeEvent, updateCanonicalCache]);
+  }, [applyCanonicalState, clearPendingForEpoch, isProjectSharedById, requestV2ListenerAttach, setCanonicalReloading, setWriteUnsafe, summarizeIncomingCanonicalState, traceV2RuntimeEvent, updateCanonicalCache]);
+
+  const drainQueuedBootstrapMeta = useCallback(() => {
+    const pending = pendingBootstrapMetaRef.current;
+    if (!pending) return;
+    if (drainingBootstrapMetaRef.current) return;
+    if (activeProjectIdRef.current !== pending.projectId) {
+      pendingBootstrapMetaRef.current = null;
+      return;
+    }
+    if (projectLoadingRef.current || !projectStorageModeResolvedRef.current) {
+      return;
+    }
+    if (storageModeRef.current !== 'v2') {
+      pendingBootstrapMetaRef.current = null;
+      return;
+    }
+    pendingBootstrapMetaRef.current = null;
+    collabMetaRef.current = pending.meta;
+    if (!pending.fromCache && pending.meta?.readMode === 'v2') {
+      markSharedAuthoritativeKey(pending.projectId, 'collab/meta', 'server-authoritative');
+    }
+    if (!pending.meta || pending.meta.readMode !== 'v2') {
+      return;
+    }
+    drainingBootstrapMetaRef.current = true;
+    void reloadCanonicalStateFromCloud()
+      .catch((error) => {
+        reportPersistFailure(addToastRef.current, 'project collab meta listener queued bootstrap drain', error, {
+          channel: 'listener',
+          ...getActiveProjectNotificationMeta(),
+        });
+      })
+      .finally(() => {
+        drainingBootstrapMetaRef.current = false;
+      });
+  }, [getActiveProjectNotificationMeta, markSharedAuthoritativeKey, reloadCanonicalStateFromCloud]);
 
   const hasOwnedActiveOperationLock = useCallback((): boolean => {
     if (lockHeartbeatLostRef.current) return false;
@@ -1537,8 +1669,11 @@ export function useProjectPersistence(options: {
     ) {
       return 'canonical-unresolved';
     }
+    if (!hasFullSharedAuthoritativeReadiness(activeProjectIdRef.current)) {
+      return 'canonical-unresolved';
+    }
     return 'unknown';
-  }, [canonicalIdentity]);
+  }, [canonicalIdentity, hasFullSharedAuthoritativeReadiness]);
 
   const queueV2Write = useCallback((
     label: string,
@@ -1685,6 +1820,10 @@ export function useProjectPersistence(options: {
       addToastRef.current(`Shared state is still syncing to a newer canonical version. ${actionLabel} is temporarily read-only.`, 'warning');
       return false;
     }
+    if (!hasFullSharedAuthoritativeReadiness(activeProjectIdRef.current)) {
+      addToastRef.current(`Shared state is not fully connected yet. ${actionLabel} is temporarily read-only until sync is authoritative.`, 'warning');
+      return false;
+    }
     if (
       activeOperationRef.current &&
       activeOperationRef.current.ownerId !== clientIdRef.current &&
@@ -1695,7 +1834,7 @@ export function useProjectPersistence(options: {
       return false;
     }
     return true;
-  }, [canonicalIdentity]);
+  }, [canonicalIdentity, hasFullSharedAuthoritativeReadiness]);
 
   const ensureOwnedBulkMutationAllowed = useCallback((actionLabel: string): boolean => {
     if (!ensureV2MutationAllowed(actionLabel)) return false;
@@ -2135,7 +2274,10 @@ export function useProjectPersistence(options: {
   const setActiveProjectId = useCallback((id: string | null) => {
     activeProjectIdRef.current = id;
     projectStorageModeResolvedRef.current = false;
+    pendingBootstrapMetaRef.current = null;
     if (!id) {
+      sharedAuthoritativeReadyRef.current = false;
+      setSharedAuthoritativeReadyState(false);
       clearWritableCanonical();
       setCanonicalReloading(false);
       setWriteUnsafe(false);
@@ -2146,6 +2288,7 @@ export function useProjectPersistence(options: {
   const loadProject = useCallback(async (projectId: string, projectList: Project[]) => {
     projectLoadingRef.current = true;
     projectStorageModeResolvedRef.current = false;
+    pendingBootstrapMetaRef.current = null;
     clearWritableCanonical();
     setCanonicalReloading(false);
     setWriteUnsafe(false);
@@ -2161,6 +2304,8 @@ export function useProjectPersistence(options: {
     if (sharedProject) {
       resetSharedAuthoritativeTracking(projectId, idbData ? 'local-cache' : 'empty');
     } else {
+      sharedAuthoritativeReadyRef.current = false;
+      setSharedAuthoritativeReadyState(false);
       clearSharedProjectSyncState(projectId);
     }
     traceRuntimeEvent({
@@ -2230,6 +2375,7 @@ export function useProjectPersistence(options: {
     const legacyFallbackMeta = canonical.mode === 'legacy' && canonical.entities.meta?.readMode === 'v2'
       ? canonical.entities.meta
       : null;
+    const hasAuthoritativeV2Canonical = hasAuthoritativeCanonicalState(canonical);
 
     if (canonical.mode === 'v2' || legacyFallbackMeta || sharedProject) {
       setStorageMode('v2');
@@ -2237,9 +2383,13 @@ export function useProjectPersistence(options: {
       projectStorageModeResolvedRef.current = true;
       if (canonical.mode === 'v2') {
         applyCanonicalState(canonical);
+        if (hasAuthoritativeCanonicalState(canonical)) {
+          requestV2ListenerAttach();
+        }
       } else {
         collabMetaRef.current = legacyFallbackMeta;
         baseSnapshotRef.current = null;
+        baseSnapshotAuthorityRef.current = null;
         groupDocsRef.current = [];
         blockedTokenDocsRef.current = [];
         manualBlockedKeywordDocsRef.current = [];
@@ -2263,7 +2413,9 @@ export function useProjectPersistence(options: {
         const viewState = toProjectViewState(canonical.resolved, project);
         applyViewState(viewState);
         loadFenceRef.current = countGroupedPages(viewState);
-        const cacheMeta = canonical.mode === 'v2' ? canonical.entities.meta : legacyFallbackMeta;
+        const cacheMeta = canonical.mode === 'v2' && hasAuthoritativeV2Canonical
+          ? canonical.entities.meta
+          : legacyFallbackMeta;
         if (cacheMeta) {
           updateCanonicalCache(canonical.resolved, cacheMeta);
         }
@@ -2277,6 +2429,7 @@ export function useProjectPersistence(options: {
       const warnStuckShared = sharedProject
         ? (
           !canonical.resolved ||
+          !hasAuthoritativeV2Canonical ||
           canonical.entities.meta?.readMode !== 'v2' ||
           canonical.entities.meta?.commitState !== 'ready' ||
           canonical.entities.meta?.migrationState !== 'complete'
@@ -2303,6 +2456,7 @@ export function useProjectPersistence(options: {
       }
     } else {
       collabMetaRef.current = null;
+      baseSnapshotAuthorityRef.current = null;
       setLegacyWritesBlocked(false);
       setStorageMode('legacy');
       storageModeRef.current = 'legacy';
@@ -2340,9 +2494,10 @@ export function useProjectPersistence(options: {
     } finally {
       if (activeProjectIdRef.current === projectId) {
         projectLoadingRef.current = false;
+        drainQueuedBootstrapMeta();
       }
     }
-  }, [applyCanonicalState, applyViewState, clearWritableCanonical, setCanonicalReloading, setLegacyWritesBlocked, setStorageMode, setWriteUnsafe, updateCanonicalCache]);
+  }, [applyCanonicalState, applyViewState, clearWritableCanonical, drainQueuedBootstrapMeta, requestV2ListenerAttach, setCanonicalReloading, setLegacyWritesBlocked, setStorageMode, setWriteUnsafe, updateCanonicalCache]);
 
   const clearProject = useCallback(() => {
     // Cancel any pending flushes so stale mutations from the previous project
@@ -2350,7 +2505,10 @@ export function useProjectPersistence(options: {
     needsPersistFlushRef.current = false;
     pendingV2WriteRef.current = Promise.resolve();
     pendingV2LocalRef.current = Promise.resolve();
+    pendingBootstrapMetaRef.current = null;
+    drainingBootstrapMetaRef.current = false;
     baseSnapshotRef.current = null;
+    baseSnapshotAuthorityRef.current = null;
     collabMetaRef.current = null;
     activeEpochRef.current = null;
     epochLoadGenerationRef.current += 1;
@@ -2380,6 +2538,8 @@ export function useProjectPersistence(options: {
     lastV2LocalErrorRef.current = null;
     sharedAuthoritativeConfirmedKeysRef.current.clear();
     sharedBootstrapSourceRef.current = 'empty';
+    sharedAuthoritativeReadyRef.current = false;
+    setSharedAuthoritativeReadyState(false);
     clearSharedProjectSyncState(activeProjectIdRef.current);
     clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     if (lockHeartbeatTimerRef.current) {
@@ -2645,6 +2805,8 @@ export function useProjectPersistence(options: {
       resetSharedAuthoritativeTracking(listenerProjectId, sharedBootstrapSourceRef.current, {
         preserveMeta: true,
         preserveOperation: true,
+        preserveEntities: sharedBootstrapSourceRef.current === 'server-authoritative' &&
+          sharedAuthoritativeReadyRef.current,
       });
       const listenerGeneration = epochLoadGenerationRef.current;
       const isEntityListenerCurrent = () =>
@@ -2880,9 +3042,7 @@ export function useProjectPersistence(options: {
     const initialMeta = collabMetaRef.current;
     if (
       initialMeta &&
-      initialMeta.readMode === 'v2' &&
-      initialMeta.commitState === 'ready' &&
-      initialMeta.migrationState === 'complete'
+      hasLoadedCanonicalBaseForMeta(initialMeta, baseSnapshotRef.current)
     ) {
       attachEpochListeners(initialMeta.datasetEpoch, initialMeta);
     }
@@ -2914,12 +3074,17 @@ export function useProjectPersistence(options: {
           !projectStorageModeResolvedRef.current;
         const nextMeta = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
         if (sharedBootstrapInFlight) {
+          pendingBootstrapMetaRef.current = {
+            projectId: listenerProjectId,
+            meta: nextMeta,
+            fromCache: Boolean(snap.metadata?.fromCache),
+          };
           traceV2RuntimeEvent(
             'v2:listener-bootstrap-skip',
             'useProjectPersistence.v2MetaListener',
             {
               listener: `${PROJECT_COLLAB_META_COLLECTION}/${PROJECT_COLLAB_META_DOC}`,
-              reason: 'initial-shared-bootstrap-in-flight',
+              reason: 'initial-shared-bootstrap-queued',
               currentGeneration: epochLoadGenerationRef.current,
               hasMeta: Boolean(nextMeta),
               readMode: nextMeta?.readMode ?? null,
@@ -2927,7 +3092,16 @@ export function useProjectPersistence(options: {
             },
             listenerProjectId,
           );
+          queueMicrotask(() => {
+            drainQueuedBootstrapMeta();
+          });
           return;
+        }
+        if (
+          pendingBootstrapMetaRef.current &&
+          pendingBootstrapMetaRef.current.projectId === listenerProjectId
+        ) {
+          drainQueuedBootstrapMeta();
         }
         const previousMeta = collabMetaRef.current;
         collabMetaRef.current = nextMeta;
@@ -2952,6 +3126,7 @@ export function useProjectPersistence(options: {
           optimisticOverlayByDocKeyRef.current.clear();
           lastAckedMutationByDocKeyRef.current.clear();
           baseSnapshotRef.current = null;
+          baseSnapshotAuthorityRef.current = null;
           groupDocsRef.current = [];
           blockedTokenDocsRef.current = [];
           manualBlockedKeywordDocsRef.current = [];
@@ -3037,7 +3212,12 @@ export function useProjectPersistence(options: {
           previousMeta.revision === nextMeta.revision &&
           previousMeta.datasetEpoch === nextMeta.datasetEpoch &&
           previousMeta.baseCommitId === nextMeta.baseCommitId &&
-          previousMeta.commitState === nextMeta.commitState
+          previousMeta.commitState === nextMeta.commitState &&
+          hasAuthoritativeCanonicalBaseForMeta(
+            nextMeta,
+            baseSnapshotRef.current,
+            baseSnapshotAuthorityRef.current,
+          )
         ) {
           return;
         }
@@ -3202,6 +3382,8 @@ export function useProjectPersistence(options: {
       entityListenersCleanupRef.current = null;
       metaUnsub();
       operationUnsub();
+      sharedAuthoritativeReadyRef.current = false;
+      setSharedAuthoritativeReadyState(false);
       clearSharedProjectSyncState(listenerProjectId);
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
@@ -3211,6 +3393,7 @@ export function useProjectPersistence(options: {
     applyViewState,
     clearPendingForEpoch,
     clearWritableCanonical,
+    drainQueuedBootstrapMeta,
     getActiveProjectNotificationMeta,
     isProjectSharedById,
     recomposeFromCanonicalRefs,
@@ -3225,6 +3408,7 @@ export function useProjectPersistence(options: {
     traceV2RuntimeEvent,
     updateCanonicalCache,
     v2DocKey,
+    v2ListenerAttachNonce,
   ]);
 
   // ── Atomic mutation functions ─────────────────────────────────────────
@@ -3775,26 +3959,33 @@ export function useProjectPersistence(options: {
     isCanonicalReloading &&
     currentCanonicalIdentity !== lastKnownGoodWritableState
   );
+  const isSharedAuthoritativeReadinessBlocked = storageMode === 'v2' && (
+    isProjectSharedById(activeProjectId) &&
+    !sharedAuthoritativeReadyState
+  );
   const effectiveWriteBlockReason = writeBlockReason ?? (
-    isCanonicalReloadWriteBlocked
+    (isCanonicalReloadWriteBlocked || isSharedAuthoritativeReadinessBlocked)
       ? 'canonical-unresolved'
       : null
   );
   const isSharedProjectReadOnly = storageMode === 'v2' && (
     legacyWritesBlocked ||
     isWriteUnsafe ||
-    isCanonicalReloadWriteBlocked
+    isCanonicalReloadWriteBlocked ||
+    isSharedAuthoritativeReadinessBlocked
   );
   const isRoutineSharedEditBlocked = storageMode === 'v2' && (
     legacyWritesBlocked ||
     isWriteUnsafe ||
     isCanonicalReloadWriteBlocked ||
+    isSharedAuthoritativeReadinessBlocked ||
     isProjectBusy
   );
   const isBulkSharedEditBlocked = storageMode === 'v2' && (
     legacyWritesBlocked ||
     isWriteUnsafe ||
     isCanonicalReloadWriteBlocked ||
+    isSharedAuthoritativeReadinessBlocked ||
     isProjectBusy
   );
 
