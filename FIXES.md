@@ -230,6 +230,14 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 
 ---
 
+### [x] 1.17 Shift+1 still missed real Keyword Management input paths
+**Date fixed:** 2026-04-01
+**Files:** `src/GroupDataView.tsx`, `src/GroupDataView.shortcutWiring.test.ts`
+**Root cause:** The prior Shift+1 fix used explicit input opt-in (`groupingShortcutTargetProps`) but only wired a subset of real controls. Two production single-line inputs remained untagged, so keyboard behavior changed based on focus and appeared inconsistent.
+**All instances fixed:**
+- `src/GroupDataView.tsx` now tags both missing shortcut origins: `Group name...` and `Search tokens (comma-separated)...`.
+- `src/GroupDataView.shortcutWiring.test.ts` now locks those exact callsites so either input losing the opt-in fails CI immediately.
+
 ## Tier 2 — CORRECTNESS (bugs that produce wrong results)
 
 ### [ ] 2.1 `||` vs `??` in reconciliation response parsing

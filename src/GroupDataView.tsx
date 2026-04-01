@@ -869,6 +869,7 @@ export default function GroupDataView(props: any) {
                     {(activeTab === 'pages' || activeTab === 'grouped') && (
                       <input
                         type="text"
+                        {...groupingShortcutTargetProps}
                         placeholder="Group name..."
                         value={groupNameInput}
                         onChange={(e) => setGroupNameInput(e.target.value)}
@@ -1433,6 +1434,7 @@ export default function GroupDataView(props: any) {
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
                       <input
                         type="text"
+                        {...groupingShortcutTargetProps}
                         placeholder="Search tokens (comma-separated)..."
                         value={tokenMgmtSearch}
                         onChange={(e) => { setTokenMgmtSearch(e.target.value); setTokenMgmtPage(1); }}
