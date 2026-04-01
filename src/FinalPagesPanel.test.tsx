@@ -4,19 +4,14 @@ import FinalPagesPanel from './FinalPagesPanel';
 
 const testState = vi.hoisted(() => ({
   cachedByIdbKey: {} as Record<string, unknown>,
-  mockLoadChunkedAppSettingsRows: vi.fn(),
-  mockLoadCachedState: vi.fn(),
+  mockLoadAppSettingsRows: vi.fn(),
 }));
 const PROJECT_PREFIX = 'project_proj-1__';
-
-vi.mock('./appSettingsDocStore', () => ({
-  loadChunkedAppSettingsRows: testState.mockLoadChunkedAppSettingsRows,
-}));
 
 vi.mock('./appSettingsPersistence', () => ({
   APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT: 'kwg:app-settings-local-rows-updated',
   appSettingsIdbKey: (docId: string) => `__app_settings__:${docId}`,
-  loadCachedState: testState.mockLoadCachedState,
+  loadAppSettingsRows: testState.mockLoadAppSettingsRows,
   subscribeAppSettingsDoc: vi.fn(() => () => undefined),
 }));
 
@@ -104,11 +99,14 @@ function makeReadyRows() {
 describe('FinalPagesPanel', () => {
   beforeEach(() => {
     testState.cachedByIdbKey = {};
-    testState.mockLoadChunkedAppSettingsRows.mockReset();
-    testState.mockLoadCachedState.mockReset();
-    testState.mockLoadCachedState.mockImplementation(async ({ idbKey }: { idbKey: string }) => testState.cachedByIdbKey[idbKey] ?? null);
+    testState.mockLoadAppSettingsRows.mockReset();
     const readyRows = makeReadyRows();
-    testState.mockLoadChunkedAppSettingsRows.mockImplementation(async (docId: string) => readyRows[docId as keyof typeof readyRows] ?? []);
+    testState.mockLoadAppSettingsRows.mockImplementation(async ({ docId, loadMode }: { docId: string; loadMode?: 'remote' | 'local-preferred' }) => {
+      if (loadMode === 'local-preferred') {
+        return testState.cachedByIdbKey[`__app_settings__:${docId}`] ?? readyRows[docId as keyof typeof readyRows] ?? [];
+      }
+      return readyRows[docId as keyof typeof readyRows] ?? [];
+    });
   });
 
   afterEach(() => {
@@ -157,7 +155,10 @@ describe('FinalPagesPanel', () => {
   });
 
   it('refreshes from local cached rows before remote snapshots catch up', async () => {
-    testState.mockLoadChunkedAppSettingsRows.mockImplementation(async (docId: string) => {
+    testState.mockLoadAppSettingsRows.mockImplementation(async ({ docId, loadMode }: { docId: string; loadMode?: 'remote' | 'local-preferred' }) => {
+      if (loadMode === 'local-preferred') {
+        return testState.cachedByIdbKey[`__app_settings__:${docId}`] ?? [];
+      }
       if (docId === `${PROJECT_PREFIX}generate_rows_page_names`) {
         return [{
           id: 'page-1',
@@ -187,13 +188,13 @@ describe('FinalPagesPanel', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText('0 rows missing required fields')).toBeTruthy();
+      expect(screen.getByText('Meta description text.')).toBeTruthy();
     });
-    expect(screen.getByText('Meta description text.')).toBeTruthy();
+    expect(screen.queryByText('1 rows missing required fields')).toBeNull();
   });
 
   it('exports CSV with proper escaping', async () => {
-    testState.mockLoadChunkedAppSettingsRows.mockImplementation(async (docId: string) => {
+    testState.mockLoadAppSettingsRows.mockImplementation(async ({ docId }: { docId: string }) => {
       const readyRows = makeReadyRows();
       if (docId === `${PROJECT_PREFIX}generate_rows_metas_slug_ctas`) {
         return [
@@ -233,7 +234,7 @@ describe('FinalPagesPanel', () => {
   });
 
   it('renders a load error state when final pages cannot be loaded', async () => {
-    testState.mockLoadChunkedAppSettingsRows.mockRejectedValueOnce(new Error('load failed'));
+    testState.mockLoadAppSettingsRows.mockRejectedValueOnce(new Error('load failed'));
 
     render(<FinalPagesPanel activeProjectId="proj-1" />);
 
@@ -244,7 +245,7 @@ describe('FinalPagesPanel', () => {
   });
 
   it('renders the empty state cleanly when there are no rows', async () => {
-    testState.mockLoadChunkedAppSettingsRows.mockResolvedValue([]);
+    testState.mockLoadAppSettingsRows.mockResolvedValue([]);
 
     render(<FinalPagesPanel activeProjectId="proj-1" />);
 

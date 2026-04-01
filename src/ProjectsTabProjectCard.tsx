@@ -1,9 +1,6 @@
 import React from 'react';
 import { Calendar, FileText, Folder, Trash2 } from 'lucide-react';
-import { doc, setDoc } from 'firebase/firestore';
-import { db } from './firebase';
 import type { Project, ProjectFolder } from './types';
-import { reportPersistFailure } from './persistenceErrors';
 
 export const PROJECT_DRAG_MIME = 'application/x-kwg-project-id';
 
@@ -15,7 +12,7 @@ export interface ProjectsTabProjectCardProps {
   projectFolders: ProjectFolder[];
   selectProject: (id: string) => void | Promise<void>;
   deleteProject: (id: string) => void | Promise<void>;
-  setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
+  renameProject: (projectId: string, newName: string) => Promise<void>;
   moveProjectToFolder: (projectId: string, folderId: string | null) => void | Promise<void>;
   addToast: (msg: string, type?: 'error' | 'success' | 'info') => void;
 }
@@ -27,9 +24,8 @@ export default function ProjectsTabProjectCard({
   projectFolders,
   selectProject,
   deleteProject,
-  setProjects,
+  renameProject,
   moveProjectToFolder,
-  addToast,
 }: ProjectsTabProjectCardProps) {
   const isActive = activeProjectId === project.id;
   const moveValue = effectiveFolderId ?? '';
@@ -75,19 +71,22 @@ export default function ProjectsTabProjectCard({
                 range.selectNodeContents(el);
                 window.getSelection()?.removeAllRanges();
                 window.getSelection()?.addRange(range);
-                const finish = () => {
+                const finish = async () => {
                   el.contentEditable = 'false';
                   const newName = el.textContent?.trim();
                   if (newName && newName !== project.name) {
-                    setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, name: newName } : p)));
-                    setDoc(doc(db, 'projects', project.id), { name: newName }, { merge: true }).catch((err) =>
-                      reportPersistFailure(addToast, 'rename project', err),
-                    );
+                    try {
+                      await renameProject(project.id, newName);
+                    } catch {
+                      el.textContent = project.name;
+                    }
                   } else {
                     el.textContent = project.name;
                   }
                 };
-                el.onblur = finish;
+                el.onblur = () => {
+                  void finish();
+                };
                 el.onkeydown = (ev: KeyboardEvent) => {
                   if (ev.key === 'Enter') {
                     ev.preventDefault();

@@ -9,6 +9,7 @@ import {
   preferExistingSelectedModel,
   resolveRequestApiKey,
   resolveHydratedSelectedModel,
+  shouldPersistSharedGenerateApiKey,
   shouldAutoSelectDefaultModel,
   shouldApplySharedSelectedModel,
   withScopedSelectedModel,
@@ -59,6 +60,16 @@ describe('resolveRequestApiKey', () => {
   it('falls back to the current in-memory key when no shared key exists', () => {
     localStorage.removeItem('kwg_generate_cache:apiKeyShared');
     expect(resolveRequestApiKey('  local-key  ', '_page_names')).toBe('local-key');
+  });
+});
+
+describe('shouldPersistSharedGenerateApiKey', () => {
+  it('persists the first edited API key instead of treating it like an initial render no-op', () => {
+    expect(shouldPersistSharedGenerateApiKey('qa-shared-openrouter-key', 'sk-shared-qa-key')).toBe(true);
+  });
+
+  it('skips redundant writes when the API key has not changed', () => {
+    expect(shouldPersistSharedGenerateApiKey('shared-key', 'shared-key')).toBe(false);
   });
 });
 

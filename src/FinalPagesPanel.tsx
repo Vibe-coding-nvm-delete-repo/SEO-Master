@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Download, ExternalLink, FileSpreadsheet } from 'lucide-react';
-import { loadChunkedAppSettingsRows } from './appSettingsDocStore';
-import { APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, appSettingsIdbKey, loadCachedState, subscribeAppSettingsDoc } from './appSettingsPersistence';
+import { APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, loadAppSettingsRows, subscribeAppSettingsDoc } from './appSettingsPersistence';
 import { type OverviewRow } from './contentOverview';
 import { buildFinalPagesViewModel, type FinalPagesInputs } from './contentFinalPages';
 import {
@@ -90,15 +89,11 @@ export default function FinalPagesPanel({
 
   const loadInputs = useCallback(async (mode: 'remote' | 'local-preferred' = 'remote') => {
     setLoadError(null);
-    const loadRows = async (docId: string) => {
-      if (mode === 'local-preferred') {
-        const cached = await loadCachedState<OverviewRow[]>({
-          idbKey: appSettingsIdbKey(docId),
-        });
-        if (Array.isArray(cached)) return cached;
-      }
-      return loadChunkedAppSettingsRows<OverviewRow>(docId);
-    };
+    const loadRows = async (docId: string) => loadAppSettingsRows<OverviewRow>({
+      docId,
+      loadMode: mode,
+      registryKind: 'rows',
+    });
 
     const [pages, h2Html, h1Html, quickAnswerHtml, metasSlugCtas, tipsRedflags] = await Promise.all([
       loadRows(finalPagesDocIds.pages),

@@ -24,12 +24,12 @@ import { db } from './firebase';
 import {
   saveProjectDataToFirestore,
   saveToIDB,
-  saveProjectToFirestore,
   buildProjectDataPayloadFromChunkDocs,
   countGroupedPages,
   groupedPageMass,
   type ProjectDataPayload,
 } from './projectStorage';
+import { persistProjectMetadata } from './projectMetadataCollab';
 import {
   loadProjectDataForView,
   loadProjectDataFromIDBOnly,
@@ -3548,13 +3548,13 @@ export function useProjectPersistence(options: {
       // Also update project metadata
       const projectId = activeProjectIdRef.current;
       if (projectId && data.fileName && metadataWriteAllowed) {
-        const updatedProjects = projects.map(p =>
+        const updatedProjects = projectsRef.current.map(p =>
           p.id === projectId ? { ...p, fileName: data.fileName! } : p
         );
         setProjects(updatedProjects);
         const proj = updatedProjects.find(p => p.id === projectId);
         if (proj) {
-          saveProjectToFirestore(proj).catch((err) => {
+          persistProjectMetadata(proj).catch((err) => {
             reportPersistFailure(addToastRef.current, 'project metadata save', err, {
               channel: 'write',
               ...getActiveProjectNotificationMeta(),
@@ -3574,7 +3574,7 @@ export function useProjectPersistence(options: {
     }
     mutateAndSave(() => changes);
     return SHARED_MUTATION_ACCEPTED;
-  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, getActiveProjectNotificationMeta, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, projects, setProjects]);
+  }, [applyViewState, buildPayload, ensureOwnedBulkMutationAllowed, getActiveProjectNotificationMeta, getLegacyPersistBlockReason, mutateAndSave, persistCanonicalPayloadV2, setProjects]);
 
   // ── Return ────────────────────────────────────────────────────────────
   const isProjectBusy = Boolean(

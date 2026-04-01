@@ -92,6 +92,8 @@ All keyword management tabs share a single `TableHeader` component:
 - **Do not** grow monolith files when the change can be a hook (`src/hooks/`) or engine module; respect the file-size guidelines above.
 - **Do not** duplicate `TableHeader`, label dropdowns, or column definitions — extend `tableConstants.ts` and shared components.
 - **Do not** skip tests for new logic “because it’s simple”; trivial helpers still regress when others edit them.
+- **Do not** add raw `firebase/firestore` reads, writes, or listeners in app-facing UI/hooks without first classifying the callsite and routing it through the shared collaboration contract.
+- Run `npm run collab:gate` before release work or any shared-persistence refactor; it is the Firestore census/audit barrier that prevents unclassified collaboration touchpoints from slipping in.
 
 ### State & Persistence (Critical Rule)
 **ALL user-facing state MUST be persisted.** Follow the 3-tier pattern:

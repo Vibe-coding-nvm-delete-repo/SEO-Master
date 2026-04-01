@@ -12,6 +12,8 @@ import {
   recordSharedCloudWriteOk,
   resetCloudSyncStateForTests,
 } from './cloudSyncStatus';
+import { performSharedMutation, trackSharedListenerApply } from './sharedCollabContract';
+import { getSharedActionRegistryEntry } from './sharedCollaboration';
 
 vi.mock('./changelogStorage', () => ({
   subscribeBuildName: (onName: (name: string) => void) => {
@@ -92,7 +94,8 @@ describe('AppStatusBar', () => {
       fireEvent.click(screen.getByTestId('cloud-status-chip'));
     });
 
-    expect(await screen.findByText('This tab only — the headline prioritizes the open project when one is selected.')).toBeTruthy();
+    expect(await screen.findByText('Connection diagnostics')).toBeTruthy();
+    expect(screen.getByText(/headline prioritizes the open project/i)).toBeTruthy();
     expect(screen.getByText('Last project cloud sync')).toBeTruthy();
     expect(screen.getByText('Last shared-doc sync')).toBeTruthy();
 
@@ -101,7 +104,21 @@ describe('AppStatusBar', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getAllByText('Project sync problem — check status').length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/Project sync problem/).length).toBeGreaterThan(0);
     });
+  });
+
+  it('surfaces per-channel collaboration health in the tooltip', async () => {
+    await performSharedMutation(getSharedActionRegistryEntry('project.metadata'), async () => undefined);
+    trackSharedListenerApply(getSharedActionRegistryEntry('project.collection'));
+
+    render(<AppStatusBar activeProjectId="proj_1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cloud-status-chip'));
+    });
+
+    expect(await screen.findByText('Shared collaboration channels')).toBeTruthy();
+    expect(screen.getByTestId('collab-health-project.metadata')).toBeTruthy();
+    expect(screen.getByTestId('collab-health-project.collection')).toBeTruthy();
   });
 });

@@ -602,6 +602,6 @@ describe('loadGeneratePrimaryPrompt', () => {
 
   it('returns undefined when doc missing', async () => {
     getDocMock.mockResolvedValue({ exists: () => false });
-    await expect(loadGeneratePrimaryPrompt('x')).resolves.toBeUndefined();
+    await expect(loadGeneratePrimaryPrompt('generate_settings_h2_content')).resolves.toBeUndefined();
   });
 });

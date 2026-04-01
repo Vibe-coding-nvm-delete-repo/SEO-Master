@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
-import { doc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
 import {
   clearListenerError,
   CLOUD_SYNC_CHANNELS,
   markListenerError,
-  markListenerSnapshot,
 } from '../cloudSyncStatus';
 import { reportPersistFailure, type PersistToastFn } from '../persistenceErrors';
-import { saveAppPrefsToFirestore, saveAppPrefsToIDB } from '../projectStorage';
+import {
+  cacheStateLocallyBestEffort,
+  persistAppSettingsDoc,
+  subscribeAppSettingsDoc,
+} from '../appSettingsPersistence';
 
 export function useWorkspacePrefsSync(activeProjectId: string | null, addToast?: PersistToastFn) {
   const [savedClusters, setSavedClusters] = useState<any[]>([]);
   const savedClustersHashRef = useRef('');
+  const lastPersistedPrefsRef = useRef('');
 
   useEffect(() => {
     try {
@@ -23,8 +25,10 @@ export function useWorkspacePrefsSync(activeProjectId: string | null, addToast?:
   }, [savedClusters]);
 
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, 'app_settings', 'user_preferences'), (snap) => {
-      markListenerSnapshot(CLOUD_SYNC_CHANNELS.userPreferences, snap);
+    const unsub = subscribeAppSettingsDoc({
+      docId: 'user_preferences',
+      channel: CLOUD_SYNC_CHANNELS.userPreferences,
+      onData: (snap) => {
       if (!snap.exists()) return;
       const data = snap.data() as any;
       const remoteSavedClusters = Array.isArray(data?.savedClusters) ? data.savedClusters : [];
@@ -38,9 +42,23 @@ export function useWorkspacePrefsSync(activeProjectId: string | null, addToast?:
       if (remoteHash !== savedClustersHashRef.current) {
         setSavedClusters(remoteSavedClusters);
       }
-    }, (err) => {
-      markListenerError(CLOUD_SYNC_CHANNELS.userPreferences);
-      reportPersistFailure(addToast, 'user preferences sync', err);
+      lastPersistedPrefsRef.current = JSON.stringify({
+        activeProjectId: data?.activeProjectId ?? null,
+        savedClusters: remoteSavedClusters,
+      });
+      cacheStateLocallyBestEffort({
+        idbKey: '__app_prefs__',
+        value: {
+          activeProjectId: data?.activeProjectId ?? null,
+          savedClusters: remoteSavedClusters,
+          updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
+        },
+      });
+      },
+      onError: (err) => {
+        markListenerError(CLOUD_SYNC_CHANNELS.userPreferences);
+        reportPersistFailure(addToast, 'user preferences sync', err);
+      },
     });
 
     return () => {
@@ -50,16 +68,21 @@ export function useWorkspacePrefsSync(activeProjectId: string | null, addToast?:
   }, [addToast]);
 
   useEffect(() => {
-    try {
-      saveAppPrefsToFirestore(activeProjectId, savedClusters)?.catch(() => undefined);
-    } catch {
-      /* ignore preference mirror failures */
-    }
-    try {
-      saveAppPrefsToIDB(activeProjectId, savedClusters)?.catch(() => undefined);
-    } catch {
-      /* ignore preference mirror failures */
-    }
+    const payloadJson = JSON.stringify({ activeProjectId, savedClusters });
+    if (payloadJson === lastPersistedPrefsRef.current) return;
+    lastPersistedPrefsRef.current = payloadJson;
+    void persistAppSettingsDoc({
+      docId: 'user_preferences',
+      data: {
+        activeProjectId,
+        savedClusters,
+        updatedAt: new Date().toISOString(),
+      },
+      addToast,
+      idbKey: '__app_prefs__',
+      localContext: 'workspace preferences',
+      cloudContext: 'workspace preferences',
+    });
   }, [activeProjectId, savedClusters]);
 
   return { savedClusters, setSavedClusters };

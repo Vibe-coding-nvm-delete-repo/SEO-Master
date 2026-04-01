@@ -45,8 +45,6 @@ import {
 import { runCosineSimilarity, trimCosineClusterMismatchPages, DEFAULT_EMBEDDING_MODEL } from './CosineEngine';
 import type { SimilarityPair, CosineCluster, CosineProgress } from './CosineEngine';
 import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest } from './GroupReviewEngine';
-import { db } from './firebase';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
 import InlineHelpHint from './InlineHelpHint';
 import { useToast } from './ToastContext';
 import {

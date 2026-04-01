@@ -5,6 +5,7 @@ import { appSettingsIdbKey } from '../appSettingsPersistence';
 import { deleteFromIDB } from '../projectStorage';
 import {
   getContentPipelineQaScenario,
+  getQaScenarioInitKey,
   QA_PROJECT_ID,
   getQaSharedApiKey,
   resetContentPipelineQaRuntime,
@@ -57,12 +58,16 @@ export default function ContentPipelineQaHarness() {
   useEffect(() => {
     let alive = true;
     const bootstrap = async () => {
-      resetContentPipelineQaRuntime(scenario);
-      const localKeys = Object.keys(localStorage).filter(
-        (key) => key.startsWith('kwg_generate_cache:') || key.startsWith('__app_settings__:'),
-      );
-      for (const key of localKeys) localStorage.removeItem(key);
-      await Promise.all(QA_DOC_IDS.map((docId) => deleteFromIDB(appSettingsIdbKey(docId)).catch(() => undefined)));
+      const scenarioInitKey = getQaScenarioInitKey(scenario);
+      const shouldResetScenario = !localStorage.getItem(scenarioInitKey);
+      if (shouldResetScenario) {
+        resetContentPipelineQaRuntime(scenario);
+        const localKeys = Object.keys(localStorage).filter(
+          (key) => key.startsWith('kwg_generate_cache:') || key.startsWith('__app_settings__:'),
+        );
+        for (const key of localKeys) localStorage.removeItem(key);
+        await Promise.all(QA_DOC_IDS.map((docId) => deleteFromIDB(appSettingsIdbKey(docId)).catch(() => undefined)));
+      }
       localStorage.setItem(SHARED_API_KEY_CACHE_KEY, getQaSharedApiKey());
       if (alive) setReady(true);
     };

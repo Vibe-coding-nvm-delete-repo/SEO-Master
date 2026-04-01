@@ -1036,3 +1036,11 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 - Filtered Auto Group now keeps only the latest pending queued run instead of stacking stale jobs behind an in-flight run, which prevents spam-click bursts from replaying outdated filter intents.
 - Bulk Auto Group actions now reject overlapping same-client runs cleanly instead of silently racing within one browser tab.
 - Failed non-conflict V2 entity writes now roll back their optimistic overlays and reload canonical state, preventing local-only ghost state after a rejected shared write.
+
+### 2026-04-01: Zero-Unknown Collaboration Guardrails
+
+- Added a shared collaboration registry and contract layer for project metadata, shared `app_settings`, and shared project V2 lanes, so app-facing shared writes now register scope/channel metadata and record accepted, blocked, failed, and listener-apply diagnostics in one place.
+- Project create, rename, folder moves, folder edits, and workspace preferences now wait for accepted shared persistence before exposing success locally, removing the remaining obvious UI-first Firestore bypasses that could create local-only state on failure.
+- Added `npm run collab:census` and `npm run collab:audit`, backed by a checked-in Firestore callsite classification manifest, so every raw Firestore touchpoint in `src/` is now classified and new unknown callsites fail the collaboration gate by default.
+- Release scripts now run the collaboration gate before preview/live release checks, and maintainer docs now explicitly forbid new raw app-facing Firestore callsites without classification and contract registration.
+- The collaboration gate now also includes a two-session QA browser flow whose cross-page storage sync correctly follows the actual scenario id, so Generate/Content shared settings, rows, and logs are validated against real cross-page convergence instead of a broken harness parser.

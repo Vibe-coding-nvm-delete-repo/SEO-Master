@@ -476,7 +476,7 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(firestoreMocks.listeners.has('projects/project-1/collab/meta')).toBe(true);
   });
 
-  it('propagates a shared V2 edit from client A to client B without any legacy listener', async () => {
+  it('[project-v2-listener-converges] propagates a shared V2 edit from client A to client B without any legacy listener', async () => {
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
     let echoedTokenDoc: Record<string, unknown> | null = null;
 
@@ -570,7 +570,7 @@ describe('useProjectPersistence V2 hardening', () => {
     await waitFor(() => expect(Array.from(clientB.result.current.blockedTokens)).toEqual(['Alpha']));
   });
 
-  it('propagates a successful shared grouping edit from client A to client B through the groups listener', async () => {
+  it('[project-v2-entity-converges] propagates a successful shared grouping edit from client A to client B through the groups listener', async () => {
     const alpha = makeCluster('alpha', 'Alpha');
     const canonical = makeCanonical(1);
     canonical.base.clusterSummary = [alpha];
@@ -983,7 +983,7 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(collabMocks.releaseProjectOperationLock).toHaveBeenCalledTimes(2);
   });
 
-  it('propagates a successful token merge from client A to client B through the canonical epoch barrier', async () => {
+  it('[project-v2-canonical-converges] propagates a successful token merge from client A to client B through the canonical epoch barrier', async () => {
     const alpha = makeCluster('alpha', 'Alpha');
     const beta = makeCluster('beta', 'Beta');
     const canonical = makeCanonical(1);

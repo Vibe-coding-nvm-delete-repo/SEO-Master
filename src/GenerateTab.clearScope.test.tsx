@@ -1,9 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const testState = vi.hoisted(() => ({
   cachedByIdbKey: {} as Record<string, unknown>,
   remoteRowsByDocId: {} as Record<string, unknown[]>,
+  remoteRowsDeferredByDocId: {} as Record<string, Promise<unknown[]> | undefined>,
   addToast: vi.fn(),
   subscriptions: new Map<string, (snap: { exists: () => boolean; data: () => Record<string, unknown>; metadata: { fromCache: boolean } }) => void>(),
 }));
@@ -18,7 +19,15 @@ vi.mock('./appSettingsPersistence', () => ({
   APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT: 'kwg:app-settings-local-rows-updated',
   appSettingsIdbKey: (docId: string) => `__app_settings__:${docId}`,
   cacheStateLocallyBestEffort: vi.fn(),
+  deleteAppSettingsDocFieldsRemote: vi.fn(async () => ({ status: 'accepted' })),
   emitLocalAppSettingsRowsUpdated: vi.fn(),
+  loadAppSettingsRows: vi.fn(async ({ docId }: { docId: string }) => {
+    const deferred = testState.remoteRowsDeferredByDocId[docId];
+    if (deferred) {
+      return await deferred;
+    }
+    return testState.remoteRowsByDocId[docId] ?? [];
+  }),
   loadCachedState: vi.fn(async ({ idbKey }: { idbKey: string }) => testState.cachedByIdbKey[idbKey] ?? null),
   persistAppSettingsDoc: vi.fn(async () => undefined),
   persistLocalCachedState: vi.fn(async () => undefined),
@@ -33,12 +42,7 @@ vi.mock('./appSettingsPersistence', () => ({
       testState.subscriptions.delete(docId);
     };
   }),
-}));
-
-vi.mock('./appSettingsDocStore', () => ({
-  deleteAppSettingsDocFields: vi.fn(async () => undefined),
-  loadChunkedAppSettingsRows: vi.fn(async (docId: string) => testState.remoteRowsByDocId[docId] ?? []),
-  writeChunkedAppSettingsRows: vi.fn(async () => undefined),
+  writeAppSettingsRowsRemote: vi.fn(async () => ({ status: 'accepted' })),
 }));
 
 import {
@@ -78,10 +82,33 @@ async function emitRemoteRowsSnapshot(docId: string): Promise<void> {
   });
 }
 
+async function emitRemoteRowsSnapshotAt(docId: string, updatedAt: string): Promise<void> {
+  await waitFor(() => {
+    expect(testState.subscriptions.has(docId)).toBe(true);
+  });
+
+  const onData = testState.subscriptions.get(docId);
+  if (!onData) {
+    throw new Error(`Missing subscription for ${docId}`);
+  }
+
+  await act(async () => {
+    await onData({
+      exists: () => true,
+      data: () => ({
+        updatedAt,
+        totalRows: (testState.remoteRowsByDocId[docId] ?? []).length,
+      }),
+      metadata: { fromCache: false },
+    });
+  });
+}
+
 describe('GenerateTab clear scoping', () => {
   beforeEach(() => {
     testState.cachedByIdbKey = {};
     testState.remoteRowsByDocId = {};
+    testState.remoteRowsDeferredByDocId = {};
     testState.addToast.mockReset();
     testState.subscriptions.clear();
     window.localStorage.clear();
@@ -427,7 +454,9 @@ describe('GenerateTab clear scoping', () => {
       expect(screen.getByText('Primary output')).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByTestId('shared-log-tab'));
+    act(() => {
+      fireEvent.click(screen.getByTestId('shared-log-tab'));
+    });
     expect(onGenSubTabChange).toHaveBeenCalledWith('log');
   });
 

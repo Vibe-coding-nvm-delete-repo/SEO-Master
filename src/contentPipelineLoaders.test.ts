@@ -7,15 +7,21 @@ const testState = vi.hoisted(() => ({
   loadCachedState: vi.fn(),
 }));
 
-vi.mock('./appSettingsDocStore', () => ({
-  getAppSettingsDocData: testState.getAppSettingsDocData,
-  loadChunkedAppSettingsRows: testState.loadChunkedAppSettingsRows,
-  loadChunkedAppSettingsRowsLocalPreferred: testState.loadChunkedAppSettingsRowsLocalPreferred,
-}));
-
 vi.mock('./appSettingsPersistence', () => ({
   appSettingsIdbKey: (docId: string) => `__app_settings__:${docId}`,
   loadCachedState: testState.loadCachedState,
+  loadAppSettingsRows: vi.fn(async ({ docId, loadMode }: { docId: string; loadMode?: 'remote' | 'local-preferred' }) => (
+    loadMode === 'local-preferred'
+      ? testState.loadChunkedAppSettingsRowsLocalPreferred(docId)
+      : testState.loadChunkedAppSettingsRows(docId)
+  )),
+  loadAppSettingsDoc: vi.fn(async ({ docId, localPreferred }: { docId: string; localPreferred?: boolean }) => {
+    if (localPreferred) {
+      const cached = await testState.loadCachedState({ idbKey: `__app_settings__:${docId}` });
+      if (cached != null) return cached;
+    }
+    return testState.getAppSettingsDocData(docId);
+  }),
 }));
 
 import {

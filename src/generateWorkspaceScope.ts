@@ -1,4 +1,9 @@
-import { getAppSettingsDocData, loadChunkedAppSettingsRows, setAppSettingsDocData, writeChunkedAppSettingsRows } from './appSettingsDocStore';
+import {
+  loadAppSettingsDoc,
+  loadAppSettingsRows,
+  writeAppSettingsDocRemote,
+  writeAppSettingsRowsRemote,
+} from './appSettingsPersistence';
 
 export const GENERATE_WORKSPACE_META_BASE_DOC_ID = 'generate_workspace_meta';
 const PROJECT_DOC_PREFIX = 'project_';
@@ -62,20 +67,41 @@ export function resolveGenerateScopedDocIds<T extends Record<string, string>>(
 }
 
 async function cloneLegacyWorkspaceDoc(projectId: string, baseDocId: string): Promise<boolean> {
-  const legacyDoc = await getAppSettingsDocData(baseDocId);
+  const legacyDoc = await loadAppSettingsDoc<Record<string, unknown>>({
+    docId: baseDocId,
+    registryKind: isRowsDocId(baseDocId) ? 'rows' : 'settings',
+  });
   if (!legacyDoc) return false;
 
   const scopedDocId = scopeGenerateWorkspaceDocId(projectId, baseDocId);
   if (isRowsDocId(baseDocId)) {
-    const rows = await loadChunkedAppSettingsRows<Record<string, unknown>>(baseDocId);
-    await writeChunkedAppSettingsRows(scopedDocId, rows, {
+    const rows = await loadAppSettingsRows<Record<string, unknown>>({
+      docId: baseDocId,
+      registryKind: 'rows',
+    });
+    const result = await writeAppSettingsRowsRemote({
+      docId: scopedDocId,
+      rows,
+      cloudContext: 'project generate workspace migration',
       updatedAt: typeof legacyDoc.updatedAt === 'string' ? legacyDoc.updatedAt : undefined,
       totalRows: typeof legacyDoc.totalRows === 'number' ? legacyDoc.totalRows : rows.length,
+      registryKind: 'rows',
     });
+    if (result.status !== 'accepted') {
+      throw new Error(`project generate workspace migration blocked: ${result.reason}`);
+    }
     return true;
   }
 
-  await setAppSettingsDocData(scopedDocId, legacyDoc);
+  const result = await writeAppSettingsDocRemote({
+    docId: scopedDocId,
+    data: legacyDoc,
+    cloudContext: 'project generate workspace migration',
+    registryKind: 'settings',
+  });
+  if (result.status !== 'accepted') {
+    throw new Error(`project generate workspace migration blocked: ${result.reason}`);
+  }
   return true;
 }
 
@@ -90,13 +116,19 @@ export async function ensureProjectGenerateWorkspace(projectId: string | null): 
 
   const ensurePromise = (async () => {
     const metaDocId = getGenerateWorkspaceMetaDocId(projectId);
-    const existingMeta = await getAppSettingsDocData(metaDocId);
+    const existingMeta = await loadAppSettingsDoc<Record<string, unknown>>({
+      docId: metaDocId,
+      registryKind: 'settings',
+    });
     if (existingMeta) return;
 
     let importedLegacyAt = '';
     for (const baseDocId of GENERATE_WORKSPACE_SHARED_BASE_DOC_IDS) {
       const scopedDocId = scopeGenerateWorkspaceDocId(projectId, baseDocId);
-      const scopedDoc = await getAppSettingsDocData(scopedDocId);
+      const scopedDoc = await loadAppSettingsDoc<Record<string, unknown>>({
+        docId: scopedDocId,
+        registryKind: isRowsDocId(baseDocId) ? 'rows' : 'settings',
+      });
       if (scopedDoc) continue;
       const migrated = await cloneLegacyWorkspaceDoc(projectId, baseDocId);
       if (migrated && !importedLegacyAt) {
@@ -104,11 +136,19 @@ export async function ensureProjectGenerateWorkspace(projectId: string | null): 
       }
     }
 
-    await setAppSettingsDocData(metaDocId, {
+    const result = await writeAppSettingsDocRemote({
+      docId: metaDocId,
+      data: {
       version: 1,
       importedLegacyAt,
       source: LEGACY_WORKSPACE_SOURCE,
+      },
+      cloudContext: 'project generate workspace meta',
+      registryKind: 'settings',
     });
+    if (result.status !== 'accepted') {
+      throw new Error(`project generate workspace meta blocked: ${result.reason}`);
+    }
   })().finally(() => {
     pendingWorkspaceEnsures.delete(projectId);
   });

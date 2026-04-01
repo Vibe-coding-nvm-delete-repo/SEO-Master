@@ -521,7 +521,7 @@ describe('App shared project visibility', () => {
     expect(await screen.findByText('Initial Group')).toBeTruthy();
   }, 30_000);
 
-  it('applies live V2 group and project metadata updates for the active shared project', async () => {
+  it('[projects-collection-two-session][project-metadata-two-session][project-v2-two-session] applies live V2 group and project metadata updates for the active shared project', async () => {
     render(<App />);
 
     await waitFor(() => {
@@ -600,7 +600,7 @@ describe('App shared project visibility', () => {
     expect(screen.queryAllByText('Keyword Management', { exact: true })).toHaveLength(0);
   }, 30_000);
 
-  it('user_preferences activeProjectId changes from another user do NOT hijack the local session', async () => {
+  it('[workspace-preferences-two-session] user_preferences activeProjectId changes from another user do NOT hijack the local session', async () => {
     mockProjectBootstrap([
       {
         id: 'proj-1',

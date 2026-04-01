@@ -7,9 +7,8 @@ import * as XLSX from 'xlsx';
 import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check, DollarSign, Inbox, Bell } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr, getLabelColor } from './processing';
-import { auth, db, googleProvider } from './firebase';
+import { auth, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
 import GenerateTab from './GenerateTab';
 import ContentTab from './ContentTab';
 import FeedbackTab from './FeedbackTab';
@@ -45,10 +44,6 @@ import {
   formatKeywordRatingDuration,
 } from './KeywordRatingEngine';
 import {
-  saveAppPrefsToFirestore,
-  saveAppPrefsToIDB,
-  saveToIDB,
-  type ProjectDataPayload,
 } from './projectStorage';
 import {
   createEmptyProjectViewState,
@@ -58,11 +53,6 @@ import {
 } from './projectWorkspace';
 import { useProjectPersistence } from './useProjectPersistence';
 import {
-  appSettingsIdbKey,
-  cacheStateLocallyBestEffort,
-  loadCachedState,
-  persistAppSettingsDoc,
-  subscribeAppSettingsDoc,
 } from './appSettingsPersistence';
 import { parseTokenMgmtSearchTerms, tokenIncludesAnyTerm } from './tokenMgmtSearch';
 import { parseSubClusterKey } from './subClusterKeys';
@@ -1860,7 +1850,4 @@ export default function App() {
     </div>
   );
 }
-
-
-
 

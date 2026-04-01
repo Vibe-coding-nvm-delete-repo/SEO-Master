@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   AlertCircle,
+  ArrowRightLeft,
   CheckCircle2,
   Clock,
   Cloud,
@@ -12,10 +13,11 @@ import {
   RefreshCw,
   Server,
   ShieldCheck,
+  ShieldAlert,
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import type { CloudSyncDerived, CloudStatusTone } from './cloudSyncStatus';
+import type { CloudSyncDerived, CloudStatusTone, CollaborationChannelHealth } from './cloudSyncStatus';
 import { WORKSPACE_FIRESTORE_DATABASE_ID } from './firestoreDbConfig';
 
 /** Panel wrapper for `InlineHelpHint` — matches app cards; no inner padding (body handles layout). */
@@ -72,6 +74,7 @@ function formatTimestamp(value: number | null): string {
 export type CloudStatusTooltipBodyProps = {
   browserOnline: boolean;
   snap: CloudSyncDerived;
+  collaborationHealth: readonly CollaborationChannelHealth[];
   hasActiveProject: boolean;
   activeProjectId: string | null;
   statusLabel: string;
@@ -82,6 +85,7 @@ export type CloudStatusTooltipBodyProps = {
 export default function CloudStatusTooltipBody({
   browserOnline,
   snap,
+  collaborationHealth,
   hasActiveProject,
   activeProjectId,
   statusLabel,
@@ -108,6 +112,12 @@ export default function CloudStatusTooltipBody({
 
   const projectWritesPending = Math.max(snap.project.flushDepth, snap.project.cloudWritePendingCount);
   const sharedWritesPending = snap.shared.cloudWritePendingCount;
+  const activeCollaborationChannels = collaborationHealth.filter((channel) =>
+    channel.lastAcceptedWriteAtMs != null ||
+    channel.lastListenerApplyAtMs != null ||
+    channel.lastBlockedReason != null ||
+    channel.lastFailedReason != null,
+  );
 
   return (
     <div className="text-left">
@@ -340,6 +350,45 @@ export default function CloudStatusTooltipBody({
               <span className={valueToneClass('ok')}>No auxiliary listener errors</span>
             )}
           </Row>
+        </div>
+
+        <div className="rounded-lg border border-zinc-200/80 bg-white px-2.5 py-2 shadow-sm space-y-2.5">
+          <Row
+            icon={activeCollaborationChannels.some((channel) => channel.lastBlockedReason || channel.lastFailedReason) ? ShieldAlert : ArrowRightLeft}
+            label="Shared collaboration channels"
+            iconClass={activeCollaborationChannels.some((channel) => channel.lastBlockedReason || channel.lastFailedReason) ? 'text-amber-600' : 'text-indigo-500'}
+          >
+            {activeCollaborationChannels.length > 0 ? (
+              <span className="text-zinc-700">
+                {activeCollaborationChannels.length} channel(s) with recorded shared activity in this tab.
+              </span>
+            ) : (
+              <span className="text-zinc-500">No shared mutations or listener applies recorded in this tab yet.</span>
+            )}
+          </Row>
+
+          {activeCollaborationChannels.map((channel) => (
+            <div
+              key={channel.actionId}
+              className="rounded-md border border-zinc-200 bg-zinc-50/70 px-2 py-1.5 text-[10px] leading-snug text-zinc-700"
+              data-testid={`collab-health-${channel.actionId}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-zinc-900">{channel.label}</span>
+                <span className="rounded-full border border-zinc-200 bg-white px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-zinc-500">
+                  {channel.scope.replace(/_/g, ' ')}
+                </span>
+              </div>
+              <div className="mt-1 text-zinc-600">Accepted write: {formatTimestamp(channel.lastAcceptedWriteAtMs)}</div>
+              <div className="text-zinc-600">Listener apply: {formatTimestamp(channel.lastListenerApplyAtMs)}</div>
+              {channel.lastBlockedReason ? (
+                <div className="text-amber-800">Last blocked: {channel.lastBlockedReason}</div>
+              ) : null}
+              {channel.lastFailedReason ? (
+                <div className="text-rose-700">Last failed: {channel.lastFailedReason}</div>
+              ) : null}
+            </div>
+          ))}
         </div>
       </div>
     </div>

@@ -329,6 +329,16 @@ useEffect(() => {
 
 ## Execution Notes
 
+- [x] (2026-04-01) Added zero-unknown collaboration guardrails in `src/sharedCollaboration.ts`, `src/sharedCollabContract.ts`, `src/projectMetadataCollab.ts`, `src/appSettingsPersistence.ts`, `src/hooks/useProjectLifecycle.ts`, `src/ProjectsTab.tsx`, `src/ProjectsTabProjectCard.tsx`, `src/hooks/useWorkspacePrefsSync.ts`, and the new `scripts/collab/*` audit tooling.
+  Root cause: the app still had multiple shared-data paths with different safety guarantees, plus several app-facing raw Firestore bypasses in project lifecycle, project rename/folder flows, and workspace preferences. That meant collaboration correctness depended on which tab or helper path a feature happened to use.
+  Instances fixed: project create now waits for accepted metadata persistence before exposing the new project locally, project rename/folder edits and folder membership moves no longer do optimistic local-only updates ahead of shared acceptance, workspace preferences now use the shared app-settings contract, and the repo now keeps a classified Firestore census plus audit/signoff artifact that fails on unknown or unscoped collaboration paths.
+  Prevention rule: every Firestore callsite in `src/` must be classified, every app-facing shared write/listener must route through the shared collaboration contract, and `npm run collab:gate` must stay clean before release work.
+
+- [x] (2026-04-01) Fixed QA two-session collaboration false negatives in `src/qa/contentPipelineQaRuntime.ts` and added regression coverage in `src/qa/contentPipelineQaRuntime.test.ts`.
+  Root cause: the QA cross-page storage sync parser assumed only two prefix segments before the scenario id, but the real QA storage prefixes are multi-segment (`kwg:qa:content-pipeline:doc` / `cache`). Storage events from the other browser page were therefore classified under the wrong scenario and ignored, so the second page could miss shared row/settings/log updates even though the underlying shared doc had changed.
+  Instances fixed: QA doc storage event parsing, QA cache storage event parsing, and the two-session browser collaboration gate that depends on those events for cross-page convergence in the QA harness.
+  Prevention rule: QA storage keys must be parsed by removing the exact configured prefix and splitting the remaining `scenario:name` payload once; regression tests must cover both doc and cache prefixes so browser collaboration failures reflect real product behavior instead of harness bugs.
+
 - [x] (2026-03-31) Fixed sticky shared V2 read-only gating in `src/useProjectPersistence.ts`, `src/App.tsx`, `src/GroupDataView.tsx`, `src/hooks/useFilteredAutoGroupFlow.ts`, and `src/hooks/useGroupReviewAutoProcessor.ts`.
   Root cause: the persistence boundary used one broad recovery flag for both background canonical reloads and true unsafe write states, and the Group UI consumed that same signal as blanket `isSharedProjectReadOnly`. A benign `collab/meta` / epoch reload could therefore freeze routine grouping, filtered auto-group orchestration, and review processing even when the last known canonical shared state was still safe.
   Instances fixed: persistence write gating, routine-vs-bulk editability derivation, grouped/approved row disablement, filtered Auto Group read-only gating, and Group Review auto-processor abort behavior.

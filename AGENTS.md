@@ -18,9 +18,11 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 - **Bootstrap guards:** Any feature that combines async local fallback (IndexedDB/localStorage) with a Firestore listener must use an explicit “Firestore is authoritative” guard so an initial empty/missing snapshot cannot wipe good local state during startup.
 - **Multi-user:** Treat Firestore as source of truth for shared projects; design for concurrent editors.
 - **Shared-project V2:** Before touching shared-project persistence, read `SHARED_PROJECT_COLLAB_V2.md` and preserve the commit-barrier model. Do not reintroduce whole-project mutable snapshot semantics or legacy fallback reads in V2 mode.
+- **Shared collaboration contract:** New app-facing Firestore listeners/writes must be classified by the Firestore census and routed through the shared collaboration contract. Raw `firebase/firestore` primitives belong only in approved infrastructure modules.
 - **No mixed-mode bootstrap writes:** Shared-project bootstrap must not allow legacy whole-project writes before storage mode resolves. Preserve the startup write barrier in `useProjectPersistence.ts`.
 - **No hidden idle shared-runtime work:** Mounted-but-hidden Generate/Content surfaces must not perform shared listeners, upstream auto-sync, model metadata fetches, or persistence work unless visible or actively busy.
 - **Verification before “done”:** `npx tsc --noEmit`, `npx vitest run`, `npx vite build` — zero new errors/failures.
+- **Collaboration gate before release work:** `npm run collab:gate` must stay clean; do not add or ship unknown Firestore callsites.
 - **FEATURES.md:** Update when user-visible behavior changes ([`FEATURES.md`](./FEATURES.md)).
 
 ## Technical debt prevention

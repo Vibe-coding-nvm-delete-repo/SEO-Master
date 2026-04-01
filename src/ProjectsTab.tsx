@@ -1,14 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Folder, FolderPlus, Loader2, Plus, RotateCcw, Trash2 } from 'lucide-react';
-import { doc, onSnapshot } from 'firebase/firestore';
-import { db } from './firebase';
 import type { Project, ProjectFolder } from './types';
 import {
-  batchSetProjectsFolderId,
   LS_PROJECT_FOLDERS_KEY,
   PROJECT_FOLDERS_FS_DOC,
-  saveProjectFoldersToFirestore,
-  saveProjectToFirestore,
 } from './projectStorage';
 import {
   effectiveProjectFolderId,
@@ -19,10 +14,19 @@ import {
   clearListenerError,
   CLOUD_SYNC_CHANNELS,
   markListenerError,
-  markListenerSnapshot,
 } from './cloudSyncStatus';
 import { reportPersistFailure } from './persistenceErrors';
 import ProjectsTabProjectCard, { PROJECT_DRAG_MIME } from './ProjectsTabProjectCard';
+import {
+  appSettingsIdbKey,
+  cacheStateLocallyBestEffort,
+  subscribeAppSettingsDoc,
+} from './appSettingsPersistence';
+import {
+  assignProjectsToFolder,
+  persistProjectFolders,
+  persistProjectMetadata,
+} from './projectMetadataCollab';
 
 type ToastFn = (msg: string, type?: 'error' | 'success' | 'info') => void;
 
@@ -86,22 +90,28 @@ export default function ProjectsTab({
   }, [projects]);
 
   useEffect(() => {
-    const unsub = onSnapshot(
-      doc(db, 'app_settings', PROJECT_FOLDERS_FS_DOC),
-      (snap) => {
-        markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectFolders, snap);
+    const unsub = subscribeAppSettingsDoc({
+      docId: PROJECT_FOLDERS_FS_DOC,
+      channel: CLOUD_SYNC_CHANNELS.projectFolders,
+      onData: (snap) => {
         if (!snap.exists()) {
           setProjectFolders([]);
           return;
         }
         const data = snap.data();
-        setProjectFolders(parseProjectFoldersFromFirestore(data?.folders));
+        const nextFolders = parseProjectFoldersFromFirestore(data?.folders);
+        cacheStateLocallyBestEffort({
+          idbKey: appSettingsIdbKey(PROJECT_FOLDERS_FS_DOC),
+          value: { folders: nextFolders, updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString() },
+          localStorageKey: LS_PROJECT_FOLDERS_KEY,
+        });
+        setProjectFolders(nextFolders);
       },
-      (err) => {
+      onError: (err) => {
         markListenerError(CLOUD_SYNC_CHANNELS.projectFolders);
         reportPersistFailure(addToast, 'project folders sync', err);
       },
-    );
+    });
     return () => {
       clearListenerError(CLOUD_SYNC_CHANNELS.projectFolders);
       if (typeof unsub === 'function') unsub();
@@ -130,11 +140,24 @@ export default function ProjectsTab({
     const proj = projectsRef.current.find((p) => p.id === projectId);
     if (!proj || proj.deletedAt) return;
     const next: Project = { ...proj, folderId };
-    setProjects((prev) => prev.map((p) => (p.id === projectId ? next : p)));
     try {
-      await saveProjectToFirestore(next);
+      await persistProjectMetadata(next);
+      setProjects((prev) => prev.map((p) => (p.id === projectId ? next : p)));
     } catch (err) {
       reportPersistFailure(addToast, 'move project to folder', err);
+    }
+  };
+
+  const renameProject = async (projectId: string, name: string) => {
+    const proj = projectsRef.current.find((p) => p.id === projectId);
+    if (!proj || proj.deletedAt) return;
+    const next: Project = { ...proj, name };
+    try {
+      await persistProjectMetadata(next);
+      setProjects((prev) => prev.map((p) => (p.id === projectId ? next : p)));
+    } catch (err) {
+      reportPersistFailure(addToast, 'rename project', err);
+      throw err;
     }
   };
 
@@ -144,9 +167,9 @@ export default function ProjectsTab({
     const id = newFolderId();
     const order = projectFolders.length === 0 ? 0 : Math.max(...projectFolders.map((f) => f.order)) + 1;
     const next = [...projectFolders, { id, name, order }];
-    setProjectFolders(next);
     try {
-      await saveProjectFoldersToFirestore(next);
+      await persistProjectFolders(next);
+      setProjectFolders(next);
     } catch (err) {
       reportPersistFailure(addToast, 'create folder', err);
     }
@@ -157,9 +180,9 @@ export default function ProjectsTab({
     const trimmed = name.trim();
     if (!trimmed) return;
     const next = projectFolders.map((f) => (f.id === folderId ? { ...f, name: trimmed } : f));
-    setProjectFolders(next);
     try {
-      await saveProjectFoldersToFirestore(next);
+      await persistProjectFolders(next);
+      setProjectFolders(next);
     } catch (err) {
       reportPersistFailure(addToast, 'rename folder', err);
     }
@@ -174,10 +197,10 @@ export default function ProjectsTab({
       return;
     const ids = projects.filter((p) => !p.deletedAt && p.folderId === folderId).map((p) => p.id);
     const nextFolders = projectFolders.filter((f) => f.id !== folderId);
-    setProjectFolders(nextFolders);
     try {
-      await saveProjectFoldersToFirestore(nextFolders);
-      await batchSetProjectsFolderId(ids, null);
+      await persistProjectFolders(nextFolders);
+      await assignProjectsToFolder(ids, null);
+      setProjectFolders(nextFolders);
       setProjects((prev) =>
         prev.map((p) => (p.folderId === folderId && !p.deletedAt ? { ...p, folderId: null } : p)),
       );
@@ -216,7 +239,7 @@ export default function ProjectsTab({
       projectFolders={projectFolders}
       selectProject={selectProject}
       deleteProject={deleteProject}
-      setProjects={setProjects}
+      renameProject={renameProject}
       moveProjectToFolder={moveProjectToFolder}
       addToast={addToast}
     />

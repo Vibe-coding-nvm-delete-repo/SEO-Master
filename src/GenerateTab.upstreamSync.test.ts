@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { awaitPersistWithTimeout, classifyRowsSnapshotHandling, getExtraColumnValue, hasActiveGeneration, resolveGenerateControlModeFromPhase, shouldDiscardGenerationResult, shouldSkipUpstreamEmptyApply, waitForDelayOrAbort } from './GenerateTab';
+import { awaitPersistWithTimeout, classifyRowsSnapshotHandling, getExtraColumnValue, hasActiveGeneration, resolveGenerateControlModeFromPhase, shouldDiscardGenerationResult, shouldSkipEquivalentUpstreamApply, shouldSkipUpstreamEmptyApply, waitForDelayOrAbort } from './GenerateTab';
 
 function makeRow(partial: Partial<{ id: string; input: string; output: string; status: string }> = {}) {
   return {
@@ -18,6 +18,27 @@ describe('GenerateTab upstream empty guards', () => {
 
   it('allows empty upstream when local rows are truly empty', () => {
     expect(shouldSkipUpstreamEmptyApply([], [makeRow(), makeRow({ id: 'r2' })] as any)).toBe(false);
+  });
+
+  it('skips equivalent upstream inputs when current rows already contain accepted output', () => {
+    expect(shouldSkipEquivalentUpstreamApply(
+      [makeRow({ id: 'r1', input: 'same prompt', status: 'pending' })] as any,
+      [makeRow({ id: 'r1', input: 'same prompt', status: 'generated', output: 'accepted output' })] as any,
+    )).toBe(true);
+  });
+
+  it('does not skip equivalent upstream inputs when current rows are still plain pending rows', () => {
+    expect(shouldSkipEquivalentUpstreamApply(
+      [makeRow({ id: 'r1', input: 'same prompt', status: 'pending' })] as any,
+      [makeRow({ id: 'r1', input: 'same prompt', status: 'pending', output: '' })] as any,
+    )).toBe(false);
+  });
+
+  it('does not skip upstream apply when the derived input changed', () => {
+    expect(shouldSkipEquivalentUpstreamApply(
+      [makeRow({ id: 'r1', input: 'new prompt', status: 'pending' })] as any,
+      [makeRow({ id: 'r1', input: 'old prompt', status: 'generated', output: 'accepted output' })] as any,
+    )).toBe(false);
   });
 });
 
@@ -88,7 +109,19 @@ describe('GenerateTab row snapshot handling', () => {
       latestKnownUpdatedAt: '2026-03-30T00:00:02.000Z',
       isPrimaryGenerating: false,
       slotGeneratingState: {},
+      hasResolvedCurrentRows: true,
     })).toBe('ignore');
+  });
+
+  it('still applies a stale-looking snapshot when local rows only contain pending derived input', () => {
+    expect(classifyRowsSnapshotHandling({
+      incomingUpdatedAt: '2026-03-30T00:00:00.000Z',
+      lastWrittenAt: '2026-03-30T00:00:02.000Z',
+      latestKnownUpdatedAt: '2026-03-30T00:00:02.000Z',
+      isPrimaryGenerating: false,
+      slotGeneratingState: {},
+      hasResolvedCurrentRows: false,
+    })).toBe('apply');
   });
 
   it('defers foreign row snapshots while any generation is active', () => {
@@ -98,6 +131,7 @@ describe('GenerateTab row snapshot handling', () => {
       latestKnownUpdatedAt: '',
       isPrimaryGenerating: true,
       slotGeneratingState: {},
+      hasResolvedCurrentRows: false,
     })).toBe('defer');
   });
 
@@ -108,6 +142,7 @@ describe('GenerateTab row snapshot handling', () => {
       latestKnownUpdatedAt: '2026-03-30T00:00:01.500Z',
       isPrimaryGenerating: false,
       slotGeneratingState: { summary: false },
+      hasResolvedCurrentRows: false,
     })).toBe('apply');
   });
 });

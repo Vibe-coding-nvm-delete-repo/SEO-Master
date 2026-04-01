@@ -7,6 +7,8 @@
 
 import { WORKSPACE_FIRESTORE_DATABASE_ID } from './firestoreDbConfig';
 import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
+import type { SharedChannelKind, SharedScope } from './sharedCollaboration';
+import type { SharedMutationResult } from './sharedMutation';
 
 const subscribers = new Set<() => void>();
 
@@ -317,6 +319,7 @@ export function resolveCloudSyncChannel(id: CloudSyncChannelId): CloudSyncChanne
 }
 
 const listenerErrorChannels = new Set<CloudSyncChannelId>();
+const collaborationChannelHealth = new Map<string, CollaborationChannelHealth>();
 
 let revision = 0;
 let projectServerReachable = false;
@@ -335,6 +338,38 @@ let sharedLastCloudWriteOkAtMs: number | null = null;
 let localWritePendingCount = 0;
 let localWriteFailed = false;
 let localLastWriteOkAtMs: number | null = null;
+
+export type CollaborationChannelHealth = {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+  lastAcceptedWriteAtMs: number | null;
+  lastListenerApplyAtMs: number | null;
+  lastBlockedReason: string | null;
+  lastFailedReason: string | null;
+};
+
+function ensureCollaborationChannelHealth(seed: {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+}): CollaborationChannelHealth {
+  const existing = collaborationChannelHealth.get(seed.actionId);
+  if (existing) return existing;
+  const next: CollaborationChannelHealth = {
+    ...seed,
+    lastAcceptedWriteAtMs: null,
+    lastListenerApplyAtMs: null,
+    lastBlockedReason: null,
+    lastFailedReason: null,
+  };
+  collaborationChannelHealth.set(seed.actionId, next);
+  return next;
+}
 
 function sortChannels(channels: readonly CloudSyncChannel[]): readonly CloudSyncChannel[] {
   return [...channels].sort((a, b) => a.label.localeCompare(b.label));
@@ -558,6 +593,60 @@ export function recordSharedCloudWriteError(): void {
   if (changed) markStateChanged();
 }
 
+export function recordCollaborationMutationResult(args: {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+  result: SharedMutationResult;
+}): void {
+  const channel = ensureCollaborationChannelHealth(args);
+  let changed = false;
+  if (args.result.status === 'accepted') {
+    const now = Date.now();
+    if (channel.lastAcceptedWriteAtMs !== now) {
+      channel.lastAcceptedWriteAtMs = now;
+      changed = true;
+    }
+    if (channel.lastBlockedReason !== null) {
+      channel.lastBlockedReason = null;
+      changed = true;
+    }
+    if (channel.lastFailedReason !== null) {
+      channel.lastFailedReason = null;
+      changed = true;
+    }
+  } else if (args.result.status === 'blocked') {
+    if (channel.lastBlockedReason !== args.result.reason) {
+      channel.lastBlockedReason = args.result.reason;
+      changed = true;
+    }
+  } else if (channel.lastFailedReason !== args.result.reason) {
+    channel.lastFailedReason = args.result.reason;
+    changed = true;
+  }
+  if (changed) markStateChanged();
+}
+
+export function recordCollaborationListenerApply(args: {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+}): void {
+  const channel = ensureCollaborationChannelHealth(args);
+  const now = Date.now();
+  if (channel.lastListenerApplyAtMs === now) return;
+  channel.lastListenerApplyAtMs = now;
+  markStateChanged();
+}
+
+export function getCollaborationHealthSnapshot(): readonly CollaborationChannelHealth[] {
+  return [...collaborationChannelHealth.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /** Call when switching projects so a prior failure does not stick to a new workspace. */
 export function clearProjectPersistErrorFlag(): void {
   if (!projectDataWriteFailed) return;
@@ -567,6 +656,7 @@ export function clearProjectPersistErrorFlag(): void {
 
 export function resetCloudSyncStateForTests(): void {
   listenerErrorChannels.clear();
+  collaborationChannelHealth.clear();
   revision = 0;
   projectServerReachable = false;
   sharedServerReachable = false;

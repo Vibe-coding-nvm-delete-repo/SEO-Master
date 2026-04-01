@@ -4,29 +4,37 @@ import { useProjectLifecycle } from './useProjectLifecycle';
 import type { Project } from '../types';
 import * as projectStorage from '../projectStorage';
 import * as projectWorkspace from '../projectWorkspace';
+import * as projectMetadataCollab from '../projectMetadataCollab';
 
-const softDeleteProjectInFirestore = vi.spyOn(projectStorage, 'softDeleteProjectInFirestore');
+const softDeleteProjectMetadata = vi.spyOn(projectMetadataCollab, 'softDeleteProjectMetadata');
+const persistProjectMetadata = vi.spyOn(projectMetadataCollab, 'persistProjectMetadata');
 const firestoreListeners = vi.hoisted(() => ({
-  handlers: new Map<string, (snap: any) => void>(),
+  handlers: new Map<string, (projects: Project[], metadata?: { fromCache?: boolean; hasPendingWrites?: boolean }) => void>(),
 }));
 
-vi.mock('firebase/firestore', () => ({
-  collection: vi.fn(() => ({ path: 'projects' })),
-  onSnapshot: vi.fn((ref: { path: string }, onNext: (snap: any) => void) => {
-    firestoreListeners.handlers.set(ref.path, onNext);
-    return () => {
-      firestoreListeners.handlers.delete(ref.path);
-    };
-  }),
-}));
-
-vi.mock('../firebase', () => ({ db: {} }));
+vi.mock('../projectMetadataCollab', async () => {
+  const actual = await vi.importActual<typeof import('../projectMetadataCollab')>('../projectMetadataCollab');
+  return {
+    ...actual,
+    subscribeProjectsCollection: vi.fn(({ onProjects }: { onProjects: (projects: Project[], metadata?: { fromCache?: boolean; hasPendingWrites?: boolean }) => void }) => {
+      firestoreListeners.handlers.set('projects', onProjects);
+      return () => {
+        firestoreListeners.handlers.delete('projects');
+      };
+    }),
+    persistProjectMetadata: vi.fn(async () => ({ status: 'accepted' })),
+    softDeleteProjectMetadata: vi.fn(async () => ({ status: 'accepted' })),
+    reviveProjectMetadata: vi.fn(async () => ({ status: 'accepted' })),
+    deleteProjectMetadata: vi.fn(async () => ({ status: 'accepted' })),
+  };
+});
 
 describe('useProjectLifecycle project actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     firestoreListeners.handlers.clear();
-    softDeleteProjectInFirestore.mockResolvedValue(undefined);
+    softDeleteProjectMetadata.mockResolvedValue({ status: 'accepted' });
+    persistProjectMetadata.mockResolvedValue({ status: 'accepted' });
     vi.spyOn(projectStorage, 'loadProjectsBootstrapState').mockResolvedValue({
       projects: [],
       source: 'empty',
@@ -89,7 +97,7 @@ describe('useProjectLifecycle project actions', () => {
       await result.current.deleteProject('p1');
     });
 
-    expect(softDeleteProjectInFirestore).toHaveBeenCalledWith('p1');
+    expect(softDeleteProjectMetadata).toHaveBeenCalledWith('p1');
     expect(input.setProjects).toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
@@ -171,13 +179,55 @@ describe('useProjectLifecycle project actions', () => {
     expect(input.setProjects).toHaveBeenCalledWith(cachedProjects);
 
     await act(async () => {
-      firestoreListeners.handlers.get('projects')?.({
-        forEach: () => {},
-        metadata: { fromCache: false, hasPendingWrites: false },
-      });
+      firestoreListeners.handlers.get('projects')?.([], { fromCache: false, hasPendingWrites: false });
     });
 
     expect(input.setProjects).toHaveBeenCalledTimes(1);
     expect(input.clearProject).not.toHaveBeenCalled();
+  });
+
+  it('createProject waits for accepted shared persistence before exposing the project locally', async () => {
+    const deferred = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    })();
+    persistProjectMetadata.mockImplementationOnce(async () => {
+      await deferred.promise;
+      return { status: 'accepted' };
+    });
+    const input = makeInput({
+      projects: [],
+      newProjectName: 'Shared Project',
+      newProjectDescription: 'Desc',
+    });
+    const { result } = renderHook(() => useProjectLifecycle(input));
+    (input.setProjects as Mock).mockClear();
+
+    let createPromise: Promise<void> | undefined;
+    await act(async () => {
+      createPromise = result.current.createProject();
+      await Promise.resolve();
+    });
+
+    expect(
+      (input.setProjects as Mock).mock.calls.some(([projectsArg]) =>
+        Array.isArray(projectsArg) && projectsArg.some((project: Project) => project.name === 'Shared Project'),
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      deferred.resolve();
+      await createPromise;
+    });
+
+    expect(persistProjectMetadata).toHaveBeenCalledTimes(1);
+    expect(
+      (input.setProjects as Mock).mock.calls.some(([projectsArg]) =>
+        Array.isArray(projectsArg) && projectsArg.some((project: Project) => project.name === 'Shared Project'),
+      ),
+    ).toBe(true);
   });
 });
