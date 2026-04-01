@@ -8,6 +8,8 @@
 
 **Research notes:** Inventory built from full read of [`firestore.rules`](./firestore.rules), repo-wide grep of `src/**/*.ts(x)`, and targeted exploration of persistence modules (March 2026). Re-run greps before large refactors; paths like `.deploy/KWG/` may mirror `src/` and are **not** source of truth.
 
+**Status:** Shared-project runtime cutover work described here is **complete for the shipped shared runtime**. This file now serves as both the implementation inventory and the postmortem/prevention record for the dual-path desync class.
+
 ### Foundation position (read first)
 
 **The dominant structural cause of collaborator desync here is not “unknowable sync magic” — it is maintaining two live collaboration architectures** (legacy chunk snapshots vs V2 `collab/meta` + commits + entities) **for one product**, with **mode switches** (`storageMode` / `readMode`), **duplicate write and listen paths**, and **rules forks** (`hasV2Meta`). Every class of bug that looks like “A and B disagree” ultimately ties back to **which pipe ran**, **whether rules and client agreed**, and **whether a write was real**.
@@ -433,6 +435,50 @@ With the shared cutover in place, remaining issues should **not** be “wrong mo
 - Future shared-project data migration should use `npm run migrate:shared:v2` before expecting any old legacy chunk-only shared project to satisfy the stricter no-legacy-read runtime contract.
 - Runtime tracing is opt-in: set `localStorage['kwg.runtimeTrace.enabled'] = '1'` to emit structured traces, and optionally set `localStorage['kwg.runtimeTrace.endpoint']` to a collector URL or `console-only`.
 - Keep this file updated if shared rules, bootstrap, or migration mechanics change again.
+
+---
+
+## 18. Postmortem and future prevention
+
+### What most likely happened
+
+This issue likely grew out of a **reasonable migration strategy that stayed alive too long**:
+
+- The app introduced **V2** to solve real multi-user problems, but kept the **legacy chunk pipeline** alive so older data and flows would keep working during transition.
+- Over time, shared-project runtime behavior still had to account for **both** pipelines, so the client, rules, tests, and operator expectations were all carrying **mode-dependent logic**.
+- That meant a shared project could still hit the wrong branch during **bootstrap**, **recovery**, **listener attachment**, or **rules evaluation**, even when V2 was the intended long-term truth.
+- Once that happens, collaborator desync stops looking like one bug and starts appearing as a family of “sometimes A sees it, B does not” failures.
+
+### Root cause in one sentence
+
+The likely root cause was **allowing transition architecture to remain in the shared runtime contract**, so shared collaboration never fully collapsed to one authoritative persistence path until this cutover.
+
+### Why this was dangerous
+
+- Two systems meant **two write stories**, **two listen stories**, **two recovery stories**, and **two rule branches** for one product promise.
+- The code could be locally “defensive” in each branch and still be globally wrong because the **wrong branch** ran.
+- Teams naturally debugged symptoms at the edge, while the real structural problem was the **continued existence of both live paths**.
+
+### What we must do instead from now on
+
+1. **Shared projects stay V2-only at runtime.** Do not reintroduce runtime reads, listeners, or writes that treat legacy chunk payloads as live shared truth.
+2. **Migration stays explicit and out-of-band.** If old shared data must be upgraded, do it with `npm run migrate:shared:v2`, not with silent runtime fallback.
+3. **Fail closed, not sideways.** If shared V2 state is incomplete or invalid, keep the project read-only with diagnostics; do not silently downgrade shared runtime behavior to legacy.
+4. **Rules and client move together.** Any shared persistence contract change must ship as one coordinated rules + client change, with deploy order respected.
+5. **Every shared sync change needs A→B proof.** New shared-runtime behavior is not done until a regression test proves client A writes converge on client B.
+6. **No hidden branch resurrection.** Do not add new helpers, comments, loaders, or “temporary” fallback code that recreates a second shared runtime path.
+7. **Document the boundary immediately.** If a future change touches shared bootstrap, recovery, migration, or listeners, update this inventory and [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) in the same PR.
+
+### Practical prevention checklist
+
+- Before merging shared-runtime persistence work, grep for `storageMode`, `readMode`, `hasV2Meta`, `saveProjectDataToFirestore`, `loadProjectDataForView`, and `loadCanonicalProjectState`.
+- Treat any new shared-runtime reference to `projects/{projectId}/chunks` as a regression unless it is isolated migration tooling.
+- Prefer **one hard invariant** over “smart” coercion. Shared runtime should reject non-V2 canonical state instead of pretending it is V2.
+- Keep runtime tracing available for sync investigations, but use it to debug the **single path**, not to justify reintroducing multiple live paths.
+
+### Final takeaway
+
+The fix here is not “we finally handled enough edge cases.” The fix is that **shared collaboration now has one runtime foundation**. Future work should extend that one path, not recreate compatibility behavior inside the live shared runtime.
 
 ---
 
