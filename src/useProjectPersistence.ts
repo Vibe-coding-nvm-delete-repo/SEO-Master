@@ -2859,6 +2859,21 @@ export function useProjectPersistence(options: {
           previousMeta.baseCommitId === nextMeta.baseCommitId &&
           previousMeta.commitState === nextMeta.commitState
         ) {
+          // Meta is unchanged — normally a no-op.  But guard against the race
+          // where loadProject() called applyCanonicalState() (setting
+          // collabMetaRef) *before* this listener delivered its first snapshot.
+          // In that case the initial-meta check at effect-startup saw null and
+          // skipped attachEpochListeners, leaving no real-time entity listeners
+          // active at all.  If cleanup ref is still null the listeners were never
+          // created — attach them now so remote changes are visible immediately.
+          if (
+            !entityListenersCleanupRef.current &&
+            nextMeta.readMode === 'v2' &&
+            nextMeta.commitState === 'ready' &&
+            nextMeta.migrationState === 'complete'
+          ) {
+            attachEpochListeners(nextMeta.datasetEpoch, nextMeta);
+          }
           return;
         }
 
