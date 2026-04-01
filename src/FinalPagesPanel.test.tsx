@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as appSettingsPersistence from './appSettingsPersistence';
 import FinalPagesPanel from './FinalPagesPanel';
 
 const testState = vi.hoisted(() => ({
@@ -14,6 +15,8 @@ vi.mock('./appSettingsPersistence', () => ({
   loadAppSettingsRows: testState.mockLoadAppSettingsRows,
   subscribeAppSettingsDoc: vi.fn(() => () => undefined),
 }));
+
+const appSettingsMocks = vi.mocked(appSettingsPersistence);
 
 function makeReadyRows() {
   return {
@@ -100,6 +103,7 @@ describe('FinalPagesPanel', () => {
   beforeEach(() => {
     testState.cachedByIdbKey = {};
     testState.mockLoadAppSettingsRows.mockReset();
+    appSettingsMocks.subscribeAppSettingsDoc.mockClear();
     const readyRows = makeReadyRows();
     testState.mockLoadAppSettingsRows.mockImplementation(async ({ docId, loadMode }: { docId: string; loadMode?: 'remote' | 'local-preferred' }) => {
       if (loadMode === 'local-preferred') {
@@ -254,5 +258,16 @@ describe('FinalPagesPanel', () => {
     });
 
     expect(screen.queryByText('Ready')).toBeNull();
+  });
+
+  it('stays idle while runtime effects are disabled', async () => {
+    render(<FinalPagesPanel activeProjectId="proj-1" runtimeEffectsActive={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('final-pages-panel')).toBeTruthy();
+    });
+
+    expect(appSettingsMocks.loadAppSettingsRows).not.toHaveBeenCalled();
+    expect(appSettingsMocks.subscribeAppSettingsDoc).not.toHaveBeenCalled();
   });
 });

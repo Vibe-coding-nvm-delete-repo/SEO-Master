@@ -9,6 +9,7 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 3. [`CONTRIBUTING.md`](./CONTRIBUTING.md) — workflow, file layout, testing requirements, technical debt prevention.
 4. [`ARCHITECTURE.md`](./ARCHITECTURE.md) — data flow, storage shape, where logic should live.
 5. [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) — authoritative shared-project persistence contract, recovery limits, and rollout rules.
+6. Local Codex skill `bug-fixing` (if installed at `$CODEX_HOME/skills/bug-fixing`) — mandatory for bug investigation / debugging / repair sessions.
 
 ## Non‑negotiables (summary)
 
@@ -52,6 +53,8 @@ If a feature touches **Firestore chunk layout** or **IDB schema**, you must upda
 ## Bug Fix Protocol (mandatory for all bug fixes)
 
 **Every bug fix must follow this protocol. Jumping straight to code is not allowed.**
+
+**Skill requirement:** If the local Codex skill `bug-fixing` is available, invoke it for every bug/debug/regression investigation before making changes. Treat the skill and this protocol as cumulative requirements.
 
 This protocol exists because the natural tendency — see symptom, patch the line, move on — produces shallow fixes that leave the root cause intact and miss sibling instances of the same bug. Each phase counters a specific failure mode:
 

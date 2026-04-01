@@ -176,6 +176,30 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 
 **Files:** `src/groupingShortcutTargets.ts`, `src/GroupDataView.tsx`, `src/TableHeader.tsx`, `src/hooks/useGlobalGroupingShortcuts.ts`, `src/hooks/useGlobalGroupingShortcuts.test.tsx`, `FEATURES.md`
 
+### [x] 1.14 Shared-project CSV bootstrap raced the collab/meta listener
+
+**Date fixed:** 2026-04-01
+
+**Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FEATURES.md`
+
+**Root cause:** Opening a shared project with missing or still-writing `collab/meta` could start two bootstrap flows at once. `loadProject()` was already running the initial V2 canonical/bootstrap load, but the live `collab/meta` listener reacted to the same empty or half-written meta state and launched a second canonical recovery/bootstrap path. Those concurrent bootstrap attempts raced on the same project and surfaced `meta-conflict`/lock failures before CSV import could start cleanly.
+
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now treats the initial shared-project bootstrap as single-owner work: while `loadProject()` is still resolving storage mode for a shared project, the `collab/meta` listener ignores empty and in-progress bootstrap snapshots instead of starting a second canonical load or recovery pass.
+- `src/useProjectPersistence.v2.test.tsx` now covers the exact regression by proving that both `null` meta snapshots and `readMode:'v2'` + `commitState:'writing'` bootstrap echoes do not trigger a second `loadCanonicalProjectState()` call during the initial shared load.
+
+### [x] 1.15 Shared V2 convergence still had cache/status/wrapper loopholes
+**Date fixed:** 2026-04-01
+**Files:** `src/useProjectPersistence.ts`, `src/cloudSyncStatus.ts`, `src/appSettingsPersistence.ts`, `src/contentPipelineLoaders.ts`, `src/generateWorkspaceScope.ts`, `src/ContentOverviewPanel.tsx`, `src/FinalPagesPanel.tsx`, `src/ContentTab.tsx`, `src/GenerateTab.tsx`, `src/cloudSyncStatus.test.ts`, `src/AppStatusBar.test.tsx`, `src/appSettingsPersistence.test.ts`, `src/generateWorkspaceScope.test.ts`, `src/ContentOverviewPanel.test.tsx`, `src/FinalPagesPanel.test.tsx`, `src/ContentTab.test.tsx`, `e2e/collaboration-two-session.spec.ts`
+**Root cause:** Shared `collab` projects were mostly on the V2 architecture, but the enforcement boundary still had escape hatches. The runtime could show `Cloud: synced` after a single server snapshot, first authoritative V2 entity snapshots still used incremental merge semantics, project-scoped Content/Generate shared-doc loaders still exposed cache-first local-preferred paths without an explicit provisional-state contract, and nested Content surfaces could keep shared listeners alive while hidden.
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now tracks authoritative readiness for `collab/meta`, `project_operations/current`, and every active-epoch V2 entity collection, and the first server-authoritative snapshot for each entity collection now replaces the whole in-memory collection before steady-state incremental merges resume.
+- `src/cloudSyncStatus.ts` now carries explicit shared-project convergence state, so the status bar distinguishes `Connecting…`, cached provisional state, server convergence, and true authoritative sync instead of treating any `fromCache === false` snapshot as healthy.
+- `src/appSettingsPersistence.ts` and `src/contentPipelineLoaders.ts` now fail closed for project-scoped `local-preferred` loads unless the caller explicitly opts into provisional-cache behavior.
+- `src/ContentOverviewPanel.tsx`, `src/FinalPagesPanel.tsx`, and `src/ContentTab.tsx` now respect `runtimeEffectsActive` for project-scoped shared listeners and local-preferred refreshes, so hidden nested Content surfaces do not freeload on shared runtime work.
+- `src/generateWorkspaceScope.ts`, `src/ContentTab.tsx`, and `src/GenerateTab.tsx` now surface structured workspace-ensure results instead of collapsing blocked bootstrap writes into raw thrown errors.
+- Regression coverage now locks in the stricter status semantics, fail-closed project-scoped cache reads, hidden-surface idle behavior, and shared workspace ensure handling.
+
 **Root cause:** `src/hooks/useGlobalGroupingShortcuts.ts` treated every editable target as either globally allowed or globally blocked, instead of distinguishing between dataset-defining filter/search controls and arbitrary editors. That meant `Shift+1` could silently no-op when focus stayed inside the pages/token-management filters that define the visible list, while the same hook also let `Tab` grouping shortcuts fire during input focus. The bug lived in the shared shortcut boundary, not in Auto Group itself.
 
 **Instances fixed:**
@@ -221,7 +245,7 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 ### [x] 2.6 Project deep links could open the last active project instead of the requested project
 **Date fixed:** 2026-04-01
 **Files:** `src/hooks/useProjectLifecycle.ts`, `src/hooks/useProjectLifecycle.actions.test.ts`
-**Root cause:** `useProjectLifecycle` resolved `/seo-magic/group/data/:projectKey` only once during bootstrap. If the initial project list was empty/stale and did not contain that key, mount restore immediately fell back to `prefs.activeProjectId`, and the later live `projects` snapshot never retried the URL target. The URL sync effect could also strip the unresolved key before the live snapshot arrived.
+**Root cause:** `useProjectLifecycle` resolved `/seo-magic/group/data/:projectKey` only once during bootstrap. If the initial project list was empty/stale and did not contain that key, mount restore immediately fell back to `prefs.activeProjectId` (`src/hooks/useProjectLifecycle.ts` mount restore path), and the later live `projects` snapshot never retried the URL target. The URL sync effect could also strip the unresolved key before the live snapshot arrived. That produced the visible symptom: opening one project link loaded a different project from prior workspace prefs.
 **All instances fixed:**
 - Mount restore now treats an unresolved data-route key as a pending URL target instead of falling back to workspace prefs.
 - Group/data URL sync now preserves the unresolved deep link while resolution is pending.

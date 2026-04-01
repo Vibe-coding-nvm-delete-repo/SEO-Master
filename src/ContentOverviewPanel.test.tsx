@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as appSettingsPersistence from './appSettingsPersistence';
 import ContentOverviewPanel from './ContentOverviewPanel';
 
 let cachedRowsByDocId: Record<string, unknown[] | null> = {};
@@ -26,6 +27,8 @@ vi.mock('./appSettingsPersistence', () => ({
   }),
   subscribeAppSettingsDoc: vi.fn(() => () => undefined),
 }));
+
+const appSettingsMocks = vi.mocked(appSettingsPersistence);
 
 describe('ContentOverviewPanel', () => {
   afterEach(() => {
@@ -83,5 +86,16 @@ describe('ContentOverviewPanel', () => {
     await waitFor(() => {
       expect(screen.getAllByText('2/2').length).toBeGreaterThan(0);
     });
+  });
+
+  it('stays idle while runtime effects are disabled', async () => {
+    render(<ContentOverviewPanel activeProjectId="proj-1" runtimeEffectsActive={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('content-overview-panel')).toBeTruthy();
+    });
+
+    expect(appSettingsMocks.loadAppSettingsRows).not.toHaveBeenCalled();
+    expect(appSettingsMocks.subscribeAppSettingsDoc).not.toHaveBeenCalled();
   });
 });

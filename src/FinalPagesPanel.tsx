@@ -75,9 +75,11 @@ function formatLastUpdated(value: string): string {
 export default function FinalPagesPanel({
   activeProjectId,
   onSourceSelect,
+  runtimeEffectsActive = true,
 }: {
   activeProjectId: string | null;
   onSourceSelect?: (subtab: ContentSubtabId) => void;
+  runtimeEffectsActive?: boolean;
 }) {
   const [inputs, setInputs] = useState<FinalPagesInputs | null>(null);
   const [loading, setLoading] = useState(true);
@@ -93,6 +95,7 @@ export default function FinalPagesPanel({
       docId,
       loadMode: mode,
       registryKind: 'rows',
+      allowProjectScopedLocalCache: mode === 'local-preferred',
     });
 
     const [pages, h2Html, h1Html, quickAnswerHtml, metasSlugCtas, tipsRedflags] = await Promise.all([
@@ -116,8 +119,15 @@ export default function FinalPagesPanel({
 
   useEffect(() => {
     let active = true;
+    if (!runtimeEffectsActive) {
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
 
     const refresh = async () => {
+      setLoading(true);
       setLoadError(null);
       try {
         await loadInputs();
@@ -161,7 +171,7 @@ export default function FinalPagesPanel({
       unsubscribers.forEach((unsubscribe) => unsubscribe());
       window.removeEventListener(APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, handleLocalRowsUpdated as EventListener);
     };
-  }, [finalPagesDocIds, loadInputs]);
+  }, [finalPagesDocIds, loadInputs, runtimeEffectsActive]);
 
   const viewModel = useMemo(() => buildFinalPagesViewModel(inputs ?? EMPTY_INPUTS), [inputs]);
   const { rows, summary } = viewModel;

@@ -322,7 +322,8 @@ Current state:
 - unit and hook regression coverage is strong
 
 What is left:
-- optional multi-client browser-level verification for lock/epoch transitions if we want end-to-end smoke coverage beyond the current test suite
+- browser-level multi-client verification is required release-gate coverage for user-visible shared state; one-runtime integration tests are not enough for cross-profile convergence bugs
+- the current QA browser harness still uses per-context local state for some shared-doc simulations, so true separate-profile/browser-cache verification remains an explicit follow-up harness limitation, not an optional nice-to-have
 
 ---
 
@@ -336,6 +337,9 @@ The current implementation is intended to guarantee the following within the lim
 - same-client rapid V2 writes do not depend on listener timing to use the right revision
 - V2 write paths reject mutation attempts during foreign bulk locks
 - V2 projects do not accept legacy whole-project writes from this client code path once schema cutover is active
+- shared project health does not count as authoritative until `collab/meta`, `project_operations/current`, and each required active-epoch entity collection have seen their first server-authoritative apply
+- first server-authoritative entity snapshots replace stale cached collection state before incremental `docChanges()` merges resume
+- project-scoped Generate/Content shared docs may use local cache only as provisional bootstrap; hidden idle surfaces must not own shared listeners or bootstrap writes
 
 ---
 

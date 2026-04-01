@@ -1,6 +1,6 @@
 # Contributing Guide
 
-**AI agents / automation:** start with [`AGENTS.md`](./AGENTS.md) (persistence, testing, and technical-debt rules), then this file.
+**AI agents / automation:** start with [`AGENTS.md`](./AGENTS.md) (persistence, testing, and technical-debt rules), then this file. For bug/debug/regression work, also invoke the local Codex `bug-fixing` skill when it is installed.
 
 ## Development Workflow
 
@@ -78,6 +78,7 @@ All keyword management tabs share a single `TableHeader` component:
 ### Testing
 - Every new feature must include tests appropriate to the change (see [`AGENTS.md`](./AGENTS.md))
 - Every bug fix must include a regression test
+- Every bug/debug session must follow the `bug-fixing` skill workflow plus the `AGENTS.md` bug-fix protocol before code changes start
 - Test files: `src/<name>.test.ts` or `src/<name>.test.tsx`
 - Use Vitest (`describe`, `it`, `expect`)
 - Run tests: `npm test` or `npm run test:watch`

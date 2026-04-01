@@ -66,6 +66,7 @@ import { parseSubClusterKey } from './subClusterKeys';
 import { getPersistErrorInfo, logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
 import { withPersistTimeout } from './persistTimeout';
 import {
+  clearSharedProjectSyncState,
   clearListenerError,
   CLOUD_SYNC_CHANNELS,
   markListenerError,
@@ -79,6 +80,9 @@ import {
   recordProjectFlushEnter,
   recordProjectFlushExit,
   isLocalWriteFailed,
+  setProjectAuthoritativeSyncState,
+  setSharedProjectSyncState,
+  type SharedAuthoritativeBootstrapSource,
 } from './cloudSyncStatus';
 import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
 import {
@@ -135,6 +139,16 @@ import type {
 
 export const PROJECT_LOCAL_WRITE_TIMEOUT_MS = 15_000;
 export const PROJECT_CLOUD_WRITE_TIMEOUT_MS = 30_000;
+const SHARED_AUTHORITATIVE_KEYS = [
+  'collab/meta',
+  'project_operations/current',
+  PROJECT_GROUPS_SUBCOLLECTION,
+  PROJECT_BLOCKED_TOKENS_SUBCOLLECTION,
+  PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION,
+  PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION,
+  PROJECT_LABEL_SECTIONS_SUBCOLLECTION,
+  PROJECT_ACTIVITY_LOG_SUBCOLLECTION,
+] as const;
 
 /** Matches App.tsx remove-from-approved row shape (cluster-level location). */
 function appendResultRowsRemoveFromApproved(
@@ -571,6 +585,74 @@ export function useProjectPersistence(options: {
     lastKnownGoodWritableStateRef.current = null;
     setLastKnownGoodWritableState(null);
   }, []);
+  const sharedAuthoritativeConfirmedKeysRef = useRef<Set<string>>(new Set());
+  const sharedBootstrapSourceRef = useRef<SharedAuthoritativeBootstrapSource>('empty');
+  const syncSharedProjectStatus = useCallback((projectId: string | null) => {
+    if (!projectId) {
+      setProjectAuthoritativeSyncState({
+        enabled: false,
+        ready: false,
+        phase: 'idle',
+        pendingTargets: [],
+      });
+      clearSharedProjectSyncState();
+      return;
+    }
+    const pendingKeys = SHARED_AUTHORITATIVE_KEYS.filter((key) => !sharedAuthoritativeConfirmedKeysRef.current.has(key));
+    const phase =
+      pendingKeys.length === 0
+        ? 'synced'
+        : sharedBootstrapSourceRef.current === 'local-cache'
+          ? 'provisional-cache'
+          : activeProjectIdRef.current === projectId && !isCanonicalReloadingRef.current && storageModeRef.current === 'v2'
+            ? 'converging'
+            : 'connecting';
+    setProjectAuthoritativeSyncState({
+      enabled: true,
+      ready: pendingKeys.length === 0,
+      phase,
+      pendingTargets: pendingKeys,
+    });
+    setSharedProjectSyncState({
+      activeProjectId: projectId,
+      bootstrapSource: sharedBootstrapSourceRef.current,
+      authoritativeReady: pendingKeys.length === 0,
+      pendingKeys,
+    });
+  }, []);
+  const resetSharedAuthoritativeTracking = useCallback((
+    projectId: string | null,
+    bootstrapSource: SharedAuthoritativeBootstrapSource,
+    options?: { preserveMeta?: boolean; preserveOperation?: boolean },
+  ) => {
+    sharedBootstrapSourceRef.current = bootstrapSource;
+    const next = new Set<string>();
+    if (options?.preserveMeta && sharedAuthoritativeConfirmedKeysRef.current.has('collab/meta')) {
+      next.add('collab/meta');
+    }
+    if (
+      options?.preserveOperation &&
+      sharedAuthoritativeConfirmedKeysRef.current.has('project_operations/current')
+    ) {
+      next.add('project_operations/current');
+    }
+    sharedAuthoritativeConfirmedKeysRef.current = next;
+    syncSharedProjectStatus(projectId);
+  }, [syncSharedProjectStatus]);
+  const markSharedAuthoritativeKey = useCallback((
+    projectId: string | null,
+    key: typeof SHARED_AUTHORITATIVE_KEYS[number],
+    bootstrapSource?: SharedAuthoritativeBootstrapSource,
+  ) => {
+    if (!projectId) return;
+    if (bootstrapSource) {
+      sharedBootstrapSourceRef.current = bootstrapSource;
+    } else if (sharedBootstrapSourceRef.current !== 'server-authoritative') {
+      sharedBootstrapSourceRef.current = 'server-authoritative';
+    }
+    sharedAuthoritativeConfirmedKeysRef.current.add(key);
+    syncSharedProjectStatus(projectId);
+  }, [syncSharedProjectStatus]);
 
   // ── Consolidated "latest" ref — always in sync, never stale ──────────
   const latest = useRef<PersistedState>({ ...EMPTY });
@@ -1340,6 +1422,12 @@ export function useProjectPersistence(options: {
       setWriteUnsafe(true, recoveryReason);
     }
     setCanonicalReloading(false);
+    if (isSharedProject(projectsRef.current.find((item) => item.id === activeProjectIdRef.current))) {
+      if (sharedBootstrapSourceRef.current === 'empty' && canonical.resolved) {
+        sharedBootstrapSourceRef.current = 'server-authoritative';
+      }
+      syncSharedProjectStatus(activeProjectIdRef.current);
+    }
     if (!canonical.resolved) {
       return;
     }
@@ -2070,6 +2158,11 @@ export function useProjectPersistence(options: {
     try {
     const canonicalCache = await loadCanonicalCacheFromIDB(projectId);
     const idbData = canonicalCache?.payload ?? await loadProjectDataFromIDBOnly(projectId);
+    if (sharedProject) {
+      resetSharedAuthoritativeTracking(projectId, idbData ? 'local-cache' : 'empty');
+    } else {
+      clearSharedProjectSyncState(projectId);
+    }
     traceRuntimeEvent({
       traceId: loadTraceId,
       event: 'load:idb-stage-finished',
@@ -2285,6 +2378,9 @@ export function useProjectPersistence(options: {
     lastV2WriteErrorRef.current = null;
     lastV2LocalErrorRef.current = null;
     lastV2LocalErrorRef.current = null;
+    sharedAuthoritativeConfirmedKeysRef.current.clear();
+    sharedBootstrapSourceRef.current = 'empty';
+    clearSharedProjectSyncState(activeProjectIdRef.current);
     clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     if (lockHeartbeatTimerRef.current) {
       clearInterval(lockHeartbeatTimerRef.current);
@@ -2503,9 +2599,53 @@ export function useProjectPersistence(options: {
       }
       return { docs: Array.from(next.values()), changed };
     };
+    const replaceRevisionedDocsFromSnapshot = <T extends { id: string; revision?: number; lastMutationId?: string | null }>(
+      current: T[],
+      docs: Array<{ id: string; data: () => unknown }>,
+      subcollection: string,
+      datasetEpoch: number,
+    ): { docs: T[]; changed: boolean } => {
+      for (const existing of current) {
+        const docKey = v2DocKey(datasetEpoch, subcollection, existing.id);
+        serverRevisionByDocKeyRef.current.delete(docKey);
+        pendingMutationByDocKeyRef.current.delete(docKey);
+        optimisticOverlayByDocKeyRef.current.delete(docKey);
+      }
+      const nextDocs = docs.map((snapshotDoc) => {
+        const raw = snapshotDoc.data() as Record<string, unknown>;
+        const logicalId = typeof raw.id === 'string'
+          ? raw.id
+          : snapshotDoc.id.includes('::')
+            ? snapshotDoc.id.slice(snapshotDoc.id.lastIndexOf('::') + 2)
+            : snapshotDoc.id;
+        const incoming = { id: logicalId, ...(raw as object) } as T;
+        const docKey = v2DocKey(datasetEpoch, subcollection, logicalId);
+        const incomingRevision = typeof incoming.revision === 'number' ? incoming.revision : 0;
+        serverRevisionByDocKeyRef.current.set(docKey, incomingRevision);
+        pendingMutationByDocKeyRef.current.delete(docKey);
+        optimisticOverlayByDocKeyRef.current.delete(docKey);
+        if (typeof incoming.lastMutationId !== 'undefined') {
+          lastAckedMutationByDocKeyRef.current.set(docKey, incoming.lastMutationId ?? null);
+        }
+        return incoming;
+      });
+      const changed =
+        current.length !== nextDocs.length ||
+        current.some((doc, index) => {
+          const nextDoc = nextDocs[index];
+          return !nextDoc || nextDoc.id !== doc.id || nextDoc.revision !== doc.revision || nextDoc.lastMutationId !== doc.lastMutationId;
+        });
+      return { docs: nextDocs, changed };
+    };
+    const hasAuthoritativeEntitySnapshot = (subcollection: typeof SHARED_AUTHORITATIVE_KEYS[number]) =>
+      sharedAuthoritativeConfirmedKeysRef.current.has(subcollection);
 
     const attachEpochListeners = (datasetEpoch: number, listenerMeta: ProjectCollabMetaDoc) => {
       entityListenersCleanupRef.current?.();
+      resetSharedAuthoritativeTracking(listenerProjectId, sharedBootstrapSourceRef.current, {
+        preserveMeta: true,
+        preserveOperation: true,
+      });
       const listenerGeneration = epochLoadGenerationRef.current;
       const isEntityListenerCurrent = () =>
         activeProjectIdRef.current === listenerProjectId &&
@@ -2543,6 +2683,19 @@ export function useProjectPersistence(options: {
           updateCanonicalCache(payload, currentMeta);
         }
       };
+      const applyEntitySnapshot = <T extends { id: string; revision?: number; lastMutationId?: string | null }>(
+        subcollection: typeof SHARED_AUTHORITATIVE_KEYS[number],
+        current: T[],
+        snap: { docs: Array<{ id: string; data: () => unknown }>; docChanges: () => Array<{ type: string; doc: { id: string; data: () => unknown } }>; metadata?: { fromCache?: boolean; hasPendingWrites?: boolean } },
+      ): { docs: T[]; changed: boolean } => {
+        if (!snap.metadata?.fromCache && !hasAuthoritativeEntitySnapshot(subcollection)) {
+          const replaced = replaceRevisionedDocsFromSnapshot(current, snap.docs, subcollection, datasetEpoch);
+          markSharedAuthoritativeKey(listenerProjectId, subcollection, 'server-authoritative');
+          traceEntityListenerEvent('v2:listener-authoritative-replace', subcollection, snap.docs.length);
+          return replaced;
+        }
+        return mergeRevisionedDocs(current, snap.docChanges() as any, subcollection, datasetEpoch);
+      };
 
       const listeners = [
         onSnapshot(
@@ -2560,7 +2713,7 @@ export function useProjectPersistence(options: {
               traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_GROUPS_SUBCOLLECTION, changes.length);
               return;
             }
-            const merged = mergeRevisionedDocs(groupDocsRef.current, changes as any, PROJECT_GROUPS_SUBCOLLECTION, datasetEpoch);
+            const merged = applyEntitySnapshot(PROJECT_GROUPS_SUBCOLLECTION, groupDocsRef.current, snap as any);
             if (!merged.changed) return;
             groupDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2588,7 +2741,7 @@ export function useProjectPersistence(options: {
               traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, changes.length);
               return;
             }
-            const merged = mergeRevisionedDocs(blockedTokenDocsRef.current, changes as any, PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, datasetEpoch);
+            const merged = applyEntitySnapshot(PROJECT_BLOCKED_TOKENS_SUBCOLLECTION, blockedTokenDocsRef.current, snap as any);
             if (!merged.changed) return;
             blockedTokenDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2616,7 +2769,7 @@ export function useProjectPersistence(options: {
               traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, changes.length);
               return;
             }
-            const merged = mergeRevisionedDocs(manualBlockedKeywordDocsRef.current, changes as any, PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, datasetEpoch);
+            const merged = applyEntitySnapshot(PROJECT_MANUAL_BLOCKED_KEYWORDS_SUBCOLLECTION, manualBlockedKeywordDocsRef.current, snap as any);
             if (!merged.changed) return;
             manualBlockedKeywordDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2644,7 +2797,7 @@ export function useProjectPersistence(options: {
               traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, changes.length);
               return;
             }
-            const merged = mergeRevisionedDocs(tokenMergeRuleDocsRef.current, changes as any, PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, datasetEpoch);
+            const merged = applyEntitySnapshot(PROJECT_TOKEN_MERGE_RULES_SUBCOLLECTION, tokenMergeRuleDocsRef.current, snap as any);
             if (!merged.changed) return;
             tokenMergeRuleDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2672,7 +2825,7 @@ export function useProjectPersistence(options: {
               traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_LABEL_SECTIONS_SUBCOLLECTION, changes.length);
               return;
             }
-            const merged = mergeRevisionedDocs(labelSectionDocsRef.current, changes as any, PROJECT_LABEL_SECTIONS_SUBCOLLECTION, datasetEpoch);
+            const merged = applyEntitySnapshot(PROJECT_LABEL_SECTIONS_SUBCOLLECTION, labelSectionDocsRef.current, snap as any);
             if (!merged.changed) return;
             labelSectionDocsRef.current = merged.docs;
             cacheCanonicalView();
@@ -2700,7 +2853,11 @@ export function useProjectPersistence(options: {
               traceEntityListenerEvent('v2:listener-skip-pending-writes', PROJECT_ACTIVITY_LOG_SUBCOLLECTION, changes.length);
               return;
             }
-            const merged = mergeRevisionedDocs(activityLogDocsRef.current as Array<ProjectActivityLogDoc & { revision?: number; lastMutationId?: string | null }>, changes as any, PROJECT_ACTIVITY_LOG_SUBCOLLECTION, datasetEpoch);
+            const merged = applyEntitySnapshot(
+              PROJECT_ACTIVITY_LOG_SUBCOLLECTION,
+              activityLogDocsRef.current as Array<ProjectActivityLogDoc & { revision?: number; lastMutationId?: string | null }>,
+              snap as any,
+            );
             if (!merged.changed) return;
             activityLogDocsRef.current = merged.docs as ProjectActivityLogDoc[];
             cacheCanonicalView();
@@ -2750,16 +2907,39 @@ export function useProjectPersistence(options: {
           );
           return;
         }
+        const sharedProject = isProjectSharedById(pid);
+        const sharedBootstrapInFlight =
+          sharedProject &&
+          projectLoadingRef.current &&
+          !projectStorageModeResolvedRef.current;
         const nextMeta = snap.exists() ? (snap.data() as ProjectCollabMetaDoc) : null;
+        if (sharedBootstrapInFlight) {
+          traceV2RuntimeEvent(
+            'v2:listener-bootstrap-skip',
+            'useProjectPersistence.v2MetaListener',
+            {
+              listener: `${PROJECT_COLLAB_META_COLLECTION}/${PROJECT_COLLAB_META_DOC}`,
+              reason: 'initial-shared-bootstrap-in-flight',
+              currentGeneration: epochLoadGenerationRef.current,
+              hasMeta: Boolean(nextMeta),
+              readMode: nextMeta?.readMode ?? null,
+              commitState: nextMeta?.commitState ?? null,
+            },
+            listenerProjectId,
+          );
+          return;
+        }
         const previousMeta = collabMetaRef.current;
         collabMetaRef.current = nextMeta;
+        if (snap.metadata?.fromCache === false) {
+          markSharedAuthoritativeKey(listenerProjectId, 'collab/meta', 'server-authoritative');
+        }
         setLegacyWritesBlocked(Boolean(
           nextMeta &&
           nextMeta.readMode === 'v2' &&
           (nextMeta.requiredClientSchema ?? CLIENT_SCHEMA_VERSION) > CLIENT_SCHEMA_VERSION,
         ));
         if (!nextMeta || nextMeta.readMode !== 'v2') {
-          const sharedProject = isProjectSharedById(pid);
           setCanonicalReloading(false);
           setWriteUnsafe(false);
           epochLoadGenerationRef.current += 1;
@@ -2998,6 +3178,9 @@ export function useProjectPersistence(options: {
           rawOperation.status !== 'releasing' &&
           Date.parse(rawOperation.expiresAt || '0') > Date.now()
         ) ? rawOperation : null;
+        if (snap.metadata?.fromCache === false) {
+          markSharedAuthoritativeKey(listenerProjectId, 'project_operations/current', 'server-authoritative');
+        }
         activeOperationRef.current = nextOperation;
         setActiveOperation(nextOperation);
       },
@@ -3019,6 +3202,7 @@ export function useProjectPersistence(options: {
       entityListenersCleanupRef.current = null;
       metaUnsub();
       operationUnsub();
+      clearSharedProjectSyncState(listenerProjectId);
       clearListenerError(CLOUD_SYNC_CHANNELS.projectChunks);
     };
   }, [
