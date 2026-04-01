@@ -40,6 +40,7 @@
 - Same-browser bulk-operation spam is now rejected before a second project lock attempt starts, so repeated clicks cannot start overlapping shared bulk jobs from one client while the first lock is still active.
 - Group row selection now uses the maintained extracted row components for Pages, Grouped, and Approved tables, so checkbox selection consistently drives the real grouping handlers instead of drifting behind stale inline callback signatures in `App.tsx`.
 - When shared V2 state is incomplete, project open can still show the last available local snapshot in read-only mode, but the client now immediately retries the V2 bootstrap path and never falls back to reading legacy Firestore chunk payloads as the active shared runtime view surface.
+- Project deep links under `/seo-magic/group/data/:projectKey` now fail closed while the target metadata is still unresolved instead of silently opening the last workspace-preference project; the app preserves the pending URL key and resolves it again when the live `projects` snapshot arrives, so stale bootstrap project lists no longer hijack one project link into another project.
 
 ---
 
@@ -1047,3 +1048,8 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 - Added `npm run collab:census` and `npm run collab:audit`, backed by a checked-in Firestore callsite classification manifest, so every raw Firestore touchpoint in `src/` is now classified and new unknown callsites fail the collaboration gate by default.
 - Release scripts now run the collaboration gate before preview/live release checks, and maintainer docs now explicitly forbid new raw app-facing Firestore callsites without classification and contract registration.
 - The collaboration gate now also includes a two-session QA browser flow whose cross-page storage sync correctly follows the actual scenario id, so Generate/Content shared settings, rows, and logs are validated against real cross-page convergence instead of a broken harness parser.
+
+### 2026-04-01: Project Deep-Link Resolution Guard
+
+- Direct `Group > Data` project URLs now keep their requested `projectKey` pending during bootstrap instead of falling back to the last saved `activeProjectId` when the initial project list is stale or empty.
+- The live projects snapshot now retries that pending URL resolution and opens the intended project as soon as its metadata is present, preventing one project link from loading a different project out of workspace preferences.

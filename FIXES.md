@@ -218,6 +218,16 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 **Problem:** `parseFloat(a.pricing.prompt)` without NaN guard. Malformed pricing data breaks sort.
 **Fix:** `const price = (s: string) => { const n = parseFloat(s); return isNaN(n) ? Infinity : n; };`
 
+### [x] 2.6 Project deep links could open the last active project instead of the requested project
+**Date fixed:** 2026-04-01
+**Files:** `src/hooks/useProjectLifecycle.ts`, `src/hooks/useProjectLifecycle.actions.test.ts`
+**Root cause:** `useProjectLifecycle` resolved `/seo-magic/group/data/:projectKey` only once during bootstrap. If the initial project list was empty/stale and did not contain that key, mount restore immediately fell back to `prefs.activeProjectId`, and the later live `projects` snapshot never retried the URL target. The URL sync effect could also strip the unresolved key before the live snapshot arrived.
+**All instances fixed:**
+- Mount restore now treats an unresolved data-route key as a pending URL target instead of falling back to workspace prefs.
+- Group/data URL sync now preserves the unresolved deep link while resolution is pending.
+- The live `projects` snapshot path now retries pending URL-key resolution and loads the requested project as soon as authoritative metadata contains it.
+- Regression coverage now proves that an unresolved deep link does not hijack to `prefs.activeProjectId` and that the correct project opens once the live snapshot includes it.
+
 ### ~~[ ] 2.5 Token set created inside similarity loop~~ VERIFIED: NOT A BUG
 **File:** `src/CosineEngine.ts` ~line 185
 **Status:** Already correctly implemented. Token sets ARE pre-computed outside the loop: `const tokenSets = pages.map(page => new Set(page.tokenArr));`. No fix needed.
