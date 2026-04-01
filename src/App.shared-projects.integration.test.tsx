@@ -61,6 +61,17 @@ const storageMocks = vi.hoisted(() => ({
   deleteFromIDB: vi.fn(),
 }));
 
+const collabMocks = vi.hoisted(() => ({
+  loadCanonicalProjectState: vi.fn(),
+  loadCanonicalEpoch: vi.fn(),
+  loadCanonicalCacheFromIDB: vi.fn(async () => null),
+  saveCanonicalCacheToIDB: vi.fn(() => Promise.resolve()),
+  commitRevisionedDocChanges: vi.fn(),
+  acquireProjectOperationLock: vi.fn(),
+  releaseProjectOperationLock: vi.fn(() => Promise.resolve()),
+  heartbeatProjectOperationLock: vi.fn(),
+}));
+
 const firestoreListeners = vi.hoisted(() => ({
   handlers: new Map<string, (snap: any) => void>(),
 }));
@@ -159,6 +170,21 @@ vi.mock('./projectWorkspace', () => {
         fileName: (data.fileName as string | null) ?? null,
       };
     },
+  };
+});
+
+vi.mock('./projectCollabV2', async () => {
+  const actual = await import('./projectCollabV2');
+  return {
+    ...actual,
+    loadCanonicalProjectState: collabMocks.loadCanonicalProjectState,
+    loadCanonicalEpoch: collabMocks.loadCanonicalEpoch,
+    loadCanonicalCacheFromIDB: collabMocks.loadCanonicalCacheFromIDB,
+    saveCanonicalCacheToIDB: collabMocks.saveCanonicalCacheToIDB,
+    commitRevisionedDocChanges: collabMocks.commitRevisionedDocChanges,
+    acquireProjectOperationLock: collabMocks.acquireProjectOperationLock,
+    releaseProjectOperationLock: collabMocks.releaseProjectOperationLock,
+    heartbeatProjectOperationLock: collabMocks.heartbeatProjectOperationLock,
   };
 });
 
@@ -298,6 +324,89 @@ function makeStats(overrides: Partial<Stats> = {}): Stats {
   };
 }
 
+function makeCanonical(groupName = 'Initial Group', tokens = 'initial tokens') {
+  const meta = {
+    schemaVersion: 2,
+    migrationState: 'complete' as const,
+    datasetEpoch: 1,
+    baseCommitId: 'commit_1',
+    commitState: 'ready' as const,
+    lastMigratedAt: '2026-03-25T00:00:00.000Z',
+    migrationOwnerClientId: null,
+    migrationStartedAt: null,
+    migrationHeartbeatAt: null,
+    migrationExpiresAt: null,
+    readMode: 'v2' as const,
+    requiredClientSchema: 2,
+    revision: 1,
+    updatedAt: '2026-03-25T00:00:00.000Z',
+    updatedByClientId: 'client-a',
+    lastMutationId: null,
+  };
+
+  return {
+    mode: 'v2' as const,
+    base: {
+      results: [],
+      clusterSummary: [],
+      tokenSummary: [] as TokenSummary[],
+      stats: makeStats(),
+      datasetStats: null,
+      autoGroupSuggestions: [],
+      autoMergeRecommendations: [],
+      groupMergeRecommendations: [],
+      updatedAt: '2026-03-25T00:00:00.000Z',
+      datasetEpoch: 1,
+    },
+    entities: {
+      meta,
+      groups: [
+        {
+          id: 'group-initial-group',
+          groupName,
+          status: 'grouped' as const,
+          clusterTokens: [tokens],
+          datasetEpoch: 1,
+          lastWriterClientId: 'client-a',
+          revision: 1,
+          updatedAt: '2026-03-25T00:00:00.000Z',
+          updatedByClientId: 'client-a',
+          lastMutationId: null,
+          pageCount: 1,
+          totalVolume: 1000,
+          keywordCount: 1,
+          avgKd: 20,
+        },
+      ],
+      blockedTokens: [],
+      manualBlockedKeywords: [],
+      tokenMergeRules: [],
+      labelSections: [],
+      activityLog: [],
+      activeOperation: null,
+    },
+    resolved: {
+      results: [makeRow(`${groupName} page`, `${groupName} keyword`, tokens)],
+      clusterSummary: [makeCluster(`${groupName} page`, tokens)],
+      tokenSummary: [] as TokenSummary[],
+      groupedClusters: [makeGroup(groupName, tokens)],
+      approvedGroups: [],
+      stats: makeStats(),
+      datasetStats: null,
+      blockedTokens: [],
+      blockedKeywords: [],
+      labelSections: [],
+      activityLog: [],
+      tokenMergeRules: [],
+      autoGroupSuggestions: [],
+      autoMergeRecommendations: [],
+      groupMergeRecommendations: [],
+      updatedAt: '2026-03-25T00:00:00.000Z',
+      lastSaveId: 1,
+    },
+  };
+}
+
 function makeProjectSnapshot(projects: Project[]) {
   return {
     forEach(cb: (docSnap: { id: string; data: () => Record<string, unknown> }) => void) {
@@ -314,67 +423,6 @@ function makeProjectSnapshot(projects: Project[]) {
         });
       });
     },
-  };
-}
-
-function makeChunksSnapshot(payload: {
-  results?: ProcessedRow[];
-  clusterSummary?: ClusterSummary[];
-  groupedClusters?: GroupedCluster[];
-  approvedGroups?: GroupedCluster[];
-  tokenSummary?: TokenSummary[];
-  blockedTokens?: string[];
-  blockedKeywords?: Array<{ keyword: string; volume: number; kd: number | null; reason: string }>;
-  labelSections?: any[];
-  activityLog?: any[];
-  tokenMergeRules?: any[];
-  autoGroupSuggestions?: any[];
-  stats?: Stats | null;
-  datasetStats?: unknown | null;
-}) {
-  const results = payload.results || [];
-  const clusters = payload.clusterSummary || [];
-  const blockedKeywords = payload.blockedKeywords || [];
-  const suggestions = payload.autoGroupSuggestions || [];
-
-  const docs: Array<{ data: () => any }> = [
-    {
-      data: () => ({
-        type: 'meta',
-        stats: payload.stats || null,
-        datasetStats: payload.datasetStats || null,
-        tokenSummary: payload.tokenSummary || [],
-        groupedClusters: payload.groupedClusters || [],
-        approvedGroups: payload.approvedGroups || [],
-        blockedTokens: payload.blockedTokens || [],
-        labelSections: payload.labelSections || [],
-        activityLog: payload.activityLog || [],
-        tokenMergeRules: payload.tokenMergeRules || [],
-        resultChunkCount: results.length > 0 ? 1 : 0,
-        clusterChunkCount: clusters.length > 0 ? 1 : 0,
-        blockedChunkCount: blockedKeywords.length > 0 ? 1 : 0,
-        suggestionChunkCount: suggestions.length > 0 ? 1 : 0,
-      }),
-    },
-  ];
-
-  if (results.length > 0) {
-    docs.push({ data: () => ({ type: 'results', index: 0, data: results }) });
-  }
-  if (clusters.length > 0) {
-    docs.push({ data: () => ({ type: 'clusters', index: 0, data: clusters }) });
-  }
-  if (blockedKeywords.length > 0) {
-    docs.push({ data: () => ({ type: 'blocked', index: 0, data: blockedKeywords }) });
-  }
-  if (suggestions.length > 0) {
-    docs.push({ data: () => ({ type: 'suggestions', index: 0, data: suggestions }) });
-  }
-
-  return {
-    empty: docs.length === 0,
-    docs,
-    metadata: { hasPendingWrites: false, fromCache: false },
   };
 }
 
@@ -424,6 +472,8 @@ describe('App shared project visibility', () => {
     resetCloudSyncStateForTests();
     vi.clearAllMocks();
     firestoreListeners.handlers.clear();
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical());
+    collabMocks.loadCanonicalEpoch.mockResolvedValue(makeCanonical());
 
     mockProjectBootstrap([
       {
@@ -471,12 +521,13 @@ describe('App shared project visibility', () => {
     expect(await screen.findByText('Initial Group')).toBeTruthy();
   }, 30_000);
 
-  it('applies live chunk and project metadata updates for the active shared project', async () => {
+  it('[projects-collection-two-session][project-metadata-two-session][project-v2-two-session] applies live V2 group and project metadata updates for the active shared project', async () => {
     render(<App />);
 
     await waitFor(() => {
       expect(firestoreListeners.handlers.has('projects')).toBe(true);
-      expect(firestoreListeners.handlers.has('projects/proj-1/chunks')).toBe(true);
+      expect(firestoreListeners.handlers.has('projects/proj-1/collab/meta')).toBe(true);
+      expect(firestoreListeners.handlers.has('projects/proj-1/groups')).toBe(true);
     });
 
     await findFileNameInUi('shared.csv');
@@ -502,22 +553,54 @@ describe('App shared project visibility', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Grouped\b/i }));
 
     await act(async () => {
-      firestoreListeners.handlers.get('projects/proj-1/chunks')?.(
-        makeChunksSnapshot({
-          results: [makeRow('Updated Page', 'updated kw', 'updated tokens')],
-          clusterSummary: [],
-          groupedClusters: [makeGroup('Updated Group', 'updated tokens')],
-          approvedGroups: [],
-          tokenSummary: [] as TokenSummary[],
-          stats: makeStats(),
-          blockedTokens: [],
-          blockedKeywords: [],
-          labelSections: [],
-          activityLog: [],
-          tokenMergeRules: [],
-          autoGroupSuggestions: [],
-        }),
-      );
+      firestoreListeners.handlers.get('projects/proj-1/groups')?.({
+        metadata: { hasPendingWrites: false },
+        docs: [
+          {
+            id: '1::group-initial-group',
+            data: () => ({
+              id: 'group-initial-group',
+              groupName: 'Updated Group',
+              status: 'grouped',
+              clusterTokens: ['initial tokens'],
+              datasetEpoch: 1,
+              lastWriterClientId: 'client-a',
+              revision: 2,
+              updatedAt: '2026-03-25T00:00:00.000Z',
+              updatedByClientId: 'client-a',
+              lastMutationId: null,
+              pageCount: 1,
+              totalVolume: 1000,
+              keywordCount: 1,
+              avgKd: 20,
+            }),
+          },
+        ],
+        docChanges: () => [
+          {
+            type: 'modified',
+            doc: {
+              id: '1::group-initial-group',
+              data: () => ({
+                id: 'group-initial-group',
+                groupName: 'Updated Group',
+                status: 'grouped',
+                clusterTokens: ['initial tokens'],
+                datasetEpoch: 1,
+                lastWriterClientId: 'client-a',
+                revision: 2,
+                updatedAt: '2026-03-25T00:00:00.000Z',
+                updatedByClientId: 'client-a',
+                lastMutationId: null,
+                pageCount: 1,
+                totalVolume: 1000,
+                keywordCount: 1,
+                avgKd: 20,
+              }),
+            },
+          },
+        ],
+      });
     });
 
     expect(await screen.findByText('Updated Group')).toBeTruthy();
@@ -538,7 +621,7 @@ describe('App shared project visibility', () => {
     expect(screen.queryAllByText('Keyword Management', { exact: true })).toHaveLength(0);
   }, 30_000);
 
-  it('user_preferences activeProjectId changes from another user do NOT hijack the local session', async () => {
+  it('[workspace-preferences-two-session] user_preferences activeProjectId changes from another user do NOT hijack the local session', async () => {
     mockProjectBootstrap([
       {
         id: 'proj-1',

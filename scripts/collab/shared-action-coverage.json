@@ -1,0 +1,130 @@
+{
+  "actions": [
+    {
+      "actionId": "project.collection",
+      "contract": { "id": "projects-collection-converges", "file": "src/projectMetadataCollab.test.ts" },
+      "browser": { "id": "projects-collection-two-session", "file": "src/App.shared-projects.integration.test.tsx" },
+      "rules": { "status": "not_required", "rationale": "Project collection and metadata remain open-access in firestore.rules; protected V2 rules are covered separately." }
+    },
+    {
+      "actionId": "project.metadata",
+      "contract": { "id": "project-metadata-converges", "file": "src/projectMetadataCollab.test.ts" },
+      "browser": { "id": "project-metadata-two-session", "file": "src/App.shared-projects.integration.test.tsx" },
+      "rules": { "status": "not_required", "rationale": "Project collection and metadata remain open-access in firestore.rules; protected V2 rules are covered separately." }
+    },
+    {
+      "actionId": "project.folders",
+      "contract": { "id": "project-folders-converges", "file": "src/projectMetadataCollab.test.ts" },
+      "browser": { "id": "project-folders-two-session", "file": "src/ProjectsTab.test.tsx" },
+      "rules": { "status": "not_required", "rationale": "Project folder docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "workspace.preferences",
+      "contract": { "id": "workspace-preferences-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "workspace-preferences-two-session", "file": "src/App.shared-projects.integration.test.tsx" },
+      "rules": { "status": "not_required", "rationale": "Workspace preference docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "settings.group_review",
+      "contract": { "id": "group-review-settings-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "group-review-settings-two-session", "file": "src/appSettingsCollab.integration.test.ts" },
+      "rules": { "status": "not_required", "rationale": "Shared app_settings docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "settings.autogroup",
+      "contract": { "id": "autogroup-settings-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "autogroup-settings-two-session", "file": "src/appSettingsCollab.integration.test.ts" },
+      "rules": { "status": "not_required", "rationale": "Shared app_settings docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "settings.topics_loans",
+      "contract": { "id": "topics-library-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "topics-library-two-session", "file": "src/appSettingsCollab.integration.test.ts" },
+      "rules": { "status": "not_required", "rationale": "Shared app_settings docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "settings.starred_models",
+      "contract": { "id": "starred-models-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "starred-models-two-session", "file": "src/appSettingsCollab.integration.test.ts" },
+      "rules": { "status": "not_required", "rationale": "Shared app_settings docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "settings.universal_blocked",
+      "contract": { "id": "universal-blocked-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "universal-blocked-two-session", "file": "src/appSettingsCollab.integration.test.ts" },
+      "rules": { "status": "not_required", "rationale": "Shared app_settings docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "generate.rows",
+      "contract": { "id": "generate-rows-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "generate-rows-two-session", "file": "e2e/collaboration-two-session.spec.ts" },
+      "rules": { "status": "not_required", "rationale": "Project generate/content app_settings rows remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "generate.logs",
+      "contract": { "id": "generate-logs-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "generate-logs-two-session", "file": "e2e/collaboration-two-session.spec.ts" },
+      "rules": { "status": "not_required", "rationale": "Project generate/content log docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "generate.settings",
+      "contract": { "id": "generate-settings-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "generate-settings-two-session", "file": "e2e/collaboration-two-session.spec.ts" },
+      "rules": { "status": "not_required", "rationale": "Project generate/content settings docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "generate.pipeline_settings",
+      "contract": { "id": "generate-pipeline-settings-converges", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "generate-pipeline-settings-two-session", "file": "e2e/collaboration-two-session.spec.ts" },
+      "rules": { "status": "not_required", "rationale": "Project generate/content pipeline settings remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "autogroup.cosine_cache",
+      "contract": { "id": "cosine-cache-converges", "file": "src/sharedCollaborationCoverage.test.ts" },
+      "browser": { "status": "not_required", "rationale": "Cosine cache is auxiliary and not user-visible shared product state." },
+      "rules": { "status": "not_required", "rationale": "Cosine cache docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "project_v2.canonical",
+      "contract": { "id": "project-v2-canonical-converges", "file": "src/useProjectPersistence.v2.test.tsx" },
+      "browser": { "id": "project-v2-two-session", "file": "src/App.shared-projects.integration.test.tsx" },
+      "rules": { "id": "project-v2-canonical-rules", "file": "src/firestore.rules.emulator.test.ts" }
+    },
+    {
+      "actionId": "project_v2.entity",
+      "contract": { "id": "project-v2-entity-converges", "file": "src/useProjectPersistence.v2.test.tsx" },
+      "browser": { "id": "project-v2-two-session", "file": "src/App.shared-projects.integration.test.tsx" },
+      "rules": { "id": "project-v2-entity-rules", "file": "src/firestore.rules.emulator.test.ts" }
+    },
+    {
+      "actionId": "project_v2.listener",
+      "contract": { "id": "project-v2-listener-converges", "file": "src/useProjectPersistence.v2.test.tsx" },
+      "browser": { "id": "project-v2-two-session", "file": "src/App.shared-projects.integration.test.tsx" },
+      "rules": { "id": "project-v2-listener-rules", "file": "src/firestore.rules.emulator.test.ts" }
+    },
+    {
+      "actionId": "support.feedback",
+      "contract": { "id": "feedback-channel-covered", "file": "src/sharedCollaborationCoverage.test.ts" },
+      "browser": { "status": "not_required", "rationale": "Feedback is auxiliary support state, not collaborative product state." },
+      "rules": { "status": "not_required", "rationale": "Feedback docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "support.notifications",
+      "contract": { "id": "notifications-channel-covered", "file": "src/sharedCollaborationCoverage.test.ts" },
+      "browser": { "status": "not_required", "rationale": "Notifications are auxiliary support state, not collaborative product state." },
+      "rules": { "status": "not_required", "rationale": "Notification docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "support.changelog",
+      "contract": { "id": "changelog-channel-covered", "file": "src/sharedCollaborationCoverage.test.ts" },
+      "browser": { "status": "not_required", "rationale": "Changelog is auxiliary support state, not collaborative product state." },
+      "rules": { "status": "not_required", "rationale": "Changelog docs remain open-access in firestore.rules." }
+    },
+    {
+      "actionId": "support.build_info",
+      "contract": { "id": "build-info-channel-covered", "file": "src/sharedCollaborationCoverage.test.ts" },
+      "browser": { "status": "not_required", "rationale": "Build info is auxiliary support state, not collaborative product state." },
+      "rules": { "status": "not_required", "rationale": "Build-info docs remain open-access in firestore.rules." }
+    }
+  ]
+}

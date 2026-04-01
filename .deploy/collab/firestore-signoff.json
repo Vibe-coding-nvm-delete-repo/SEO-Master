@@ -1,0 +1,16 @@
+{
+  "generatedAt": "2026-04-01T21:23:49.876Z",
+  "summary": {
+    "callsiteCount": 125,
+    "unknownCount": 0,
+    "toMigrateCount": 0,
+    "unscopedGenerateDocLiteralCount": 0,
+    "lowLevelCollabBypassCount": 0
+  },
+  "inScopeContractManagedCount": 84,
+  "outOfScopeOrSupportCount": 41,
+  "unknown": [],
+  "toMigrate": [],
+  "unscopedGenerateDocLiterals": [],
+  "lowLevelCollabBypasses": []
+}

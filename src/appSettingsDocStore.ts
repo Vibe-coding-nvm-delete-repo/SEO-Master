@@ -14,7 +14,6 @@ import {
   deleteQaAppSettingsFields,
   getQaAppSettingsDoc,
   isContentPipelineQaMode,
-  loadQaLocalCache,
   setQaAppSettingsDoc,
   subscribeQaAppSettingsDoc,
 } from './qa/contentPipelineQaRuntime';
@@ -145,11 +144,6 @@ export function subscribeAppSettingsDocData({
 }
 
 export async function loadChunkedAppSettingsRows<T>(docId: string): Promise<T[]> {
-  if (isContentPipelineQaMode()) {
-    const cached = await loadQaLocalCache<CachedRowsRecord<T>>('__app_settings__:' + docId);
-    const cachedRows = getCachedRowsValue(cached);
-    if (cachedRows && hasMeaningfulCachedRows(cachedRows)) return cachedRows;
-  }
   const data = await getAppSettingsDocData(docId);
   if (!data) return [];
   if (data.chunked && Number(data.chunkCount) > 0) {

@@ -30,14 +30,19 @@
 - Meta-listener recovery now uses the same recovery-capable canonical reload path as bootstrap/conflict reloads whenever a lightweight epoch load is null or unresolved, so transient/stuck `collab/meta` or base-commit states do not leave the client stranded in read-only without re-running recovery.
 - IndexedDB caches only server-acknowledged V2 canonical state and tags that cache with `schemaVersion`, `datasetEpoch`, and `baseCommitId`, so refreshes cannot reopen on optimistic shared edits that Firestore never accepted.
 - V2 mutation handling is epoch-scoped and centralized: revision-sensitive shared edits go through one compare-and-set path, reuse canonical doc-id helpers, update local acked revisions immediately on success, and reload canonical state on conflicts instead of leaving optimistic drift behind.
-- Legacy projects lazily migrate to the V2 collaboration model on open, V2 readers prefer entity overlays over legacy blob fields, and permanent delete clears both legacy chunk docs and V2 collaboration docs.
-- Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, auto-merge apply, and Auto Group runs acquire a temporary project operation lock before writing shared data.
+- Shared `collab` projects now stay on a single V2 persistence path: opening a shared project never reattaches the legacy chunk listener or reads legacy chunk payloads as runtime state, missing/legacy `collab/meta` no longer downgrades shared edits back to legacy chunk writes, and explicit legacy-to-V2 migration is available through `npm run migrate:shared:v2`.
+- Shared project UI surfaces a project-busy banner/read-only state during exclusive operations, and multi-user-sensitive actions such as keyword rating, token merge/unmerge, token auto-merge recommendation generation/review (`run`, `apply`, `decline`, `undo`, `Merge All`), and Auto Group runs acquire a temporary project operation lock before writing shared data.
+- Shared project exclusive-operation cleanup is now exception-safe: failed lock acquire/release attempts report through the persistence error channel without leaving the browser-local operation gate or busy banner pinned until reload.
 - Grouping and related group actions now only clear selection/input and show success toasts after the persistence boundary actually accepts the mutation; if shared state is read-only/recovering, the action preserves the current selection and surfaces only the blocking warning.
 - Shared V2 editability now distinguishes **background canonical reload** from **true write-unsafe state**: transient `collab/meta` or epoch reloads no longer blanket-freeze routine grouping when the last known canonical state is still safe, while schema/rules/canonical-integrity failures still fail closed.
+- Shared V2 editability now also fail-closes the unsafe reload edge: if `collab/meta` has already advanced to a different `datasetEpoch/baseCommitId` than the last acknowledged writable canonical base, routine and bulk edits pause until that newer canonical state finishes loading instead of letting one browser keep writing stale old-epoch entity docs that collaborators will never see.
+- Shared V2 convergence now has an explicit authoritative-readiness contract: the first server-authoritative snapshot for each active-epoch entity collection replaces stale local cached docs, `collab/meta` plus `project_operations/current` are part of the readiness barrier, and the status bar no longer reports `Cloud: synced` until the open shared project has actually converged.
 - Routine Group edits and bulk Group operations now use separate gating semantics: manual grouping/approve/ungroup/block actions follow routine write safety, while filtered Auto Group, Auto Group panel runs, keyword rating, and token-merge cascades stay on the bulk-operation lock path.
 - Same-browser bulk-operation spam is now rejected before a second project lock attempt starts, so repeated clicks cannot start overlapping shared bulk jobs from one client while the first lock is still active.
 - Group row selection now uses the maintained extracted row components for Pages, Grouped, and Approved tables, so checkbox selection consistently drives the real grouping handlers instead of drifting behind stale inline callback signatures in `App.tsx`.
-- Project open now keeps bootstrap read-only when collab meta is missing a usable V2 base commit, so local project loads fall back to the legacy payload immediately instead of attempting recovery writes to `project_operations/current` / `collab/meta` and tripping Firestore permission errors during refresh/open.
+- When shared V2 state is incomplete, project open can still show the last available local snapshot in read-only mode, but the client now immediately retries the V2 bootstrap path and never falls back to reading legacy Firestore chunk payloads as the active shared runtime view surface.
+- Shared V2 fallback payloads are now explicitly provisional: if the immutable base commit is not loaded yet, the browser stays read-only, the fallback view is not written back into the canonical IndexedDB cache, and identical `collab/meta` listener snapshots still retry canonical recovery instead of silently accepting stale local state as shared truth.
+- Project deep links under `/seo-magic/group/data/:projectKey` now fail closed while the target metadata is still unresolved instead of silently opening the last workspace-preference project; the app preserves the pending URL key and resolves it again when the live `projects` snapshot arrives, so stale bootstrap project lists no longer hijack one project link into another project.
 
 ---
 
@@ -45,7 +50,7 @@
 
 - Persistence hardening: stalled project cloud saves now time out and recover instead of leaving the status pill stuck on `Saving... don't refresh`, project IDB saves no longer pay for an extra full JSON deep-clone before the timed write path starts, and timed-out IndexedDB project writes now abort and reopen the cached DB connection before retrying so local durability does not keep hammering a poisoned transaction handle.
 - Shared **app settings** local durability (Generate/Content row caches, UI prefs, etc.) now has an outer time bound as well: if IndexedDB never settles, the local-write pending counter clears and the status bar can recover instead of staying on “Saving… don’t refresh” with stacked pending counts after refresh.
-- Runtime diagnostics hardening: persistence, snapshot-guard, and project lifecycle paths now emit structured correlation traces (`traceId` + ordered `hop`) through a shared `runtimeTrace` utility so save/snapshot loop causality can be proven from one session trace.
+- Runtime diagnostics hardening: persistence, snapshot-guard, and project lifecycle paths now emit structured correlation traces (`traceId` + ordered `hop`) through a shared `runtimeTrace` utility, with opt-in `localStorage` controls for enabling traces and overriding the ingest endpoint when a local collector is not being used.
 
 - Renderer-stability hardening pass for Generate/Content:
   - Per-instance `onBusyStateChange` wiring now uses stable callbacks and ref-forwarded parent notification so aggregate busy state does not thrash (avoids update-depth loops when the shell tracks Generate/Content busy).
@@ -78,6 +83,7 @@
 - `H2 Body` pipeline sync now ignores execution-only setting edits like concurrency, so changing concurrent request count no longer forces an unnecessary upstream row reload or clobbers the active table state.
 - Generate settings now preserve local concurrency edits through hydration races, so `Concurrent Requests` changes in shared generate subtabs no longer snap back to `5` when Firestore or cache snapshots arrive late.
 - Derived content subtabs now react to local upstream row updates with a local-preferred reload before Firestore catches up, so finishing `Pages`, `H2s`, `Page Guide`, `H2 Body`, or other upstream stages populates the next content subtab immediately instead of leaving it blank until a later remote snapshot lands.
+- Project-scoped Generate/Content cache reads are now explicitly provisional only: app-facing code must opt in before using `local-preferred` for project-scoped shared docs, hidden nested Content panels stay idle while invisible, and blocked shared workspace bootstrap writes now surface as structured workspace errors instead of generic raw failures.
 - `H2 Content` includes a top-level bulk `Redo Rated 3/4` action that resets only the H2 answers currently rated `3` or `4` back to pending for rewrite.
 - Shared Generate/Content instances now scope the header `Clear` button to the active visible subtab:
   - clearing a slot subtab only wipes that slot’s own generated state
@@ -192,6 +198,8 @@
   - Review recommendation rows with canonical token, merge tokens, confidence, and impacted keyword/page counts.
   - Apply one merge, decline one recommendation, or bulk `Merge All` pending recommendations.
 - Approved recommendations remain visible with `Undo`, which reverses the applied merge via the existing merge undo cascade.
+- `Shift+1` is now context-aware: it still runs Pages Auto Group on the `Pages` tab, and it runs `Auto Merge KWs` only when the Token Management `auto-merge` view is active outside Pages.
+- `Shift+1` now still works when focus remains in the Pages search/filter inputs or Token Management auto-merge form controls, so the shortcut does not require clicking out first.
 - Auto-merge recommendations persist to IndexedDB + Firestore and sync across users/projects.
 
 ## Group Auto Merge (Grouped)
@@ -212,12 +220,15 @@
 - After creation, the app runs the same `loadProject` path as **Select Project** so workspace refs (save id, load fence) match the new empty project instead of inheriting the previous session’s guards.
 
 ### CSV import (cross-project safety)
+- Shared-project CSV import now waits for the async canonical `bulkSet` result before leaving the import flow, so the UI does not switch to `Pages` or clear the processing state until the shared save is actually accepted; blocked/failed shared writes now surface as import errors instead of false success.
+- Shared-project CSV bootstrap no longer races the live `collab/meta` listener on first open. When a shared project is still bootstrapping its initial V2 canonical state, the listener now stands down instead of launching a second recovery/bootstrap path that could hit `meta-conflict` before import.
 - Large CSVs parse in chunks; import is **pinned to the project that was active when the file was chosen**. If you switch projects before parsing finishes, the import is **cancelled** (warning toast) and no data is written, preventing the previous bug where persistence used the **current** project ref while the UI branch used a **stale** project id and could save one project’s file into another’s storage.
 
-### Projects tab (folders & deleted)
-- **Folders:** Create named folders (Firestore `app_settings/project_folders` + localStorage + IndexedDB cache). Drag project cards onto **Unassigned** or a folder to set `folderId` on the project doc, or use the **Move to folder** control on each card (keyboard-accessible). Rename a folder by clicking its title; remove a folder with the trash control — projects in that folder move back to **Unassigned** (nothing is deleted).
-- **Delete project (soft):** Trash on a card moves the project to **Deleted projects**; keyword data stays in IDB + Firestore until **Delete forever**. Removing a folder never deletes projects.
-- **Restore / permanent delete:** Deleted list shows **Restore** (clears `deletedAt`) or **Delete forever** (same as legacy hard delete: metadata doc, chunks, IDB).
+### Projects tab (compact row layout, folders & deleted)
+- **Compact row layout:** Projects display as single-line rows (not cards) inside rounded list containers with `divide-y` separators. Each row shows: drag grip handle (hover), project name (inline-editable), date, CSV badge, Active badge, folder select, and delete button (hover). Active project has a left indigo border accent.
+- **Folders:** Create named folders via toggled inline input (click "Folder" button in header). Firestore `app_settings/project_folders` + localStorage + IndexedDB cache. Drag project rows onto **Unassigned** or a folder to set `folderId` on the project doc, or use the **Move to folder** dropdown on each row (keyboard-accessible). Rename a folder by clicking its title; remove a folder with the trash control — projects in that folder move back to **Unassigned** (nothing is deleted). Folders are **collapsible** via chevron toggle; collapsed folders still accept drag-and-drop.
+- **Delete project (soft):** Trash on a row moves the project to **Deleted** section; keyword data stays in IDB + Firestore until **Delete forever**. Removing a folder never deletes projects.
+- **Deleted section:** Collapsed by default with disclosure toggle showing count. Expand to see **Restore** (clears `deletedAt`) or **Delete forever** (same as legacy hard delete: metadata doc, chunks, IDB).
 - If the active project is deleted or soft-deleted, the workspace clears and the app returns to the Projects sub-tab.
 - **Startup safety:** when Firestore initially reports an empty project collection but the local project cache still has projects, the app now keeps the cached project list visible during bootstrap instead of wiping the Projects tab to blank before the shared list catches up.
 - **Shared-settings bootstrap hardening:** Group Review settings, Auto Group settings, starred models, and universal blocked tokens now use the same guarded cache/bootstrap pattern so cache-only empty/missing Firestore snapshots cannot silently reset visible shared state during startup.
@@ -673,7 +684,9 @@
 | 2026-03-27 | Generate tab refresh durability: guarded against cached-empty Firestore snapshots; added immediate local cache fallback for Generate 1/2 rows, settings, logs, and active sub-tab; persisted per-tab Generate view state (Table/Log + status filter); and made unload flush use chunked row writes so large in-progress tables are not lost on refresh/close |
 | 2026-03-27 | Keyword management tables: `<colgroup>` aligns header, filter row, and body columns; resize widths are **clamped** to a viewport-safe max; drag updates are **rAF-coalesced**; **IndexedDB persists once on mouseup** (per browser, not shared to collaborators); filter cells use **min-width / shrink** so min–max inputs stay inside their columns |
 | 2026-03-27 | Collaboration: Generate rail (1/2), Generate view chrome (table/log + row-status filter), and table column widths no longer sync via Firestore — each browser keeps its own UI; shared settings and project/workspace data unchanged |
-| 2026-03-26 | Auto-Group: `Shift+1` now requires active filters and supports 1 matching page |
+| 2026-04-01 | Keyboard shortcuts: `Shift+1` now works directly from Pages dataset controls (including `Search...` and `Group name...`) and Token Management `auto-merge` controls (including `Search tokens (comma-separated)...`), while arbitrary editors remain protected. `Tab` no longer hijacks focus navigation while typing in editable fields. |
+| 2026-03-31 | **Pages Auto Group** (`Shift+1`): runs on the **current visible ungrouped page list** without requiring search/token/geo/column filters first; when no extra filters apply, the prompt uses an explicit full-table scope line. Disabled **Group** / **Auto Group** buttons show **tooltips** (shared read-only or busy, missing Group Review API key/model, or select rows + group name for manual group). |
+| 2026-03-26 | Auto-Group: `Shift+1` previously required at least one active table filter (superseded by 2026-03-31 — full visible list is always in scope) |
 | 2026-03-25 | Feedback modal ARIA (dialog, fieldsets, labels, radiogroup); queue: legacy rating “—” + sort/filter; firebase.ts module note |
 | 2026-03-25 | Feedback modal: mandatory area dropdown, severity/impact with color ramp, structured Q&A body; queue shows Area column |
 | 2026-03-25 | Feedback screenshots: upload-then-single Firestore write + Storage cleanup on failure; Storage rules (auth + path limits); optional App Check env; anonymous sign-in for uploads; modal file validation outside setState |
@@ -1031,3 +1044,34 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 - Filtered Auto Group now keeps only the latest pending queued run instead of stacking stale jobs behind an in-flight run, which prevents spam-click bursts from replaying outdated filter intents.
 - Bulk Auto Group actions now reject overlapping same-client runs cleanly instead of silently racing within one browser tab.
 - Failed non-conflict V2 entity writes now roll back their optimistic overlays and reload canonical state, preventing local-only ghost state after a rejected shared write.
+
+### 2026-04-01: Zero-Unknown Collaboration Guardrails
+
+- Added a shared collaboration registry and contract layer for project metadata, shared `app_settings`, and shared project V2 lanes, so app-facing shared writes now register scope/channel metadata and record accepted, blocked, failed, and listener-apply diagnostics in one place.
+- Project create, rename, folder moves, folder edits, and workspace preferences now wait for accepted shared persistence before exposing success locally, removing the remaining obvious UI-first Firestore bypasses that could create local-only state on failure.
+- Added `npm run collab:census` and `npm run collab:audit`, backed by a checked-in Firestore callsite classification manifest, so every raw Firestore touchpoint in `src/` is now classified and new unknown callsites fail the collaboration gate by default.
+- Release scripts now run the collaboration gate before preview/live release checks, and maintainer docs now explicitly forbid new raw app-facing Firestore callsites without classification and contract registration.
+- The collaboration gate now also includes a two-session QA browser flow whose cross-page storage sync correctly follows the actual scenario id, so Generate/Content shared settings, rows, and logs are validated against real cross-page convergence instead of a broken harness parser.
+
+### 2026-04-01: Project Deep-Link Resolution Guard
+
+- Direct `Group > Data` project URLs now keep their requested `projectKey` pending during bootstrap instead of falling back to the last saved `activeProjectId` when the initial project list is stale or empty.
+- The live projects snapshot now retries that pending URL resolution and opens the intended project as soon as its metadata is present, preventing one project link from loading a different project out of workspace preferences.
+
+### 2026-04-01: Shared V2 Convergence Hardening
+
+- Shared project V2 bootstrap now queues initial `collab/meta` snapshots received during bootstrap and drains them deterministically after bootstrap resolves, so listener activation no longer depends on a second meta event.
+- Shared write gating now fails closed until authoritative shared readiness is reached, preventing editable-but-desynced windows during shared convergence.
+- Authoritative readiness now survives listener reattach after authoritative canonical activation, and convergence remains deterministic across reloads/project switches.
+
+### 2026-04-01: Mandatory Collab Convergence Gate
+
+- Collaboration gating now includes runtime convergence validation, not only static Firestore census/audit checks.
+- `npm run collab:gate` now executes a convergence matrix covering shared app settings, project metadata, shared-project V2 persistence, Firestore rules, and two-session browser collaboration flows.
+- `npm run collab:release-gate` now starts with that stricter collab gate, then runs full typecheck/tests/build.
+
+### 2026-04-01: Durable Collaboration Diagnostics Journal
+
+- Added a bounded browser-local collaboration diagnostics journal that records authoritative-sync transitions, shared-project phase changes, listener server snapshots/errors, listener-apply events, and shared mutation outcomes.
+- Each entry is stamped with runtime `sessionId` and `runId` correlation context to improve cross-client incident timeline reconstruction.
+- Exposed support helpers on `window.__kwgCollabDiagnostics` (`read(limit)`, `clear()`) for quick incident export in production sessions.

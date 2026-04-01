@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   deriveCloudStatusLine,
+  getCollaborationHealthSnapshot,
   getCloudSyncSnapshot,
   resetServerReachOnBrowserOnline,
   subscribeCloudSync,
@@ -369,6 +370,7 @@ export default function AppStatusBar({ activeProjectId }: Props) {
       <CloudStatusTooltipBody
         browserOnline={browserOnline}
         snap={cloudSnap}
+        collaborationHealth={getCollaborationHealthSnapshot()}
         hasActiveProject={Boolean(activeProjectId)}
         activeProjectId={activeProjectId}
         statusLabel={label}

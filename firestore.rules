@@ -32,6 +32,11 @@ service cloud.firestore {
       return hasMeta(projectId) && currentMeta(projectId).readMode == 'v2';
     }
 
+    function isSharedCollabProject(projectId) {
+      return exists(/databases/$(database)/documents/projects/$(projectId))
+        && get(/databases/$(database)/documents/projects/$(projectId)).data.description == 'collab';
+    }
+
     function activeEpoch(projectId) {
       return currentMeta(projectId).datasetEpoch;
     }
@@ -117,7 +122,10 @@ service cloud.firestore {
           // Allow V2→legacy recovery when migration failed.
           // This unblocks projects stuck in V2 with incomplete migration data
           // (missing commitState/baseCommitId) so the legacy save path works.
-          || request.resource.data.migrationState == 'failed'
+          || (
+            request.resource.data.migrationState == 'failed'
+            && !isSharedCollabProject(projectId)
+          )
         )
         && (
           request.resource.data.readMode != 'v2'
@@ -307,13 +315,13 @@ service cloud.firestore {
 
       match /chunks/{chunkId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId);
+        allow create, update: if !isSharedCollabProject(projectId) && !hasV2Meta(projectId);
         allow delete: if true;
       }
 
       match /base_chunks/{chunkId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId);
+        allow create, update: if !isSharedCollabProject(projectId) && !hasV2Meta(projectId);
         allow delete: if true;
       }
 
@@ -344,43 +352,43 @@ service cloud.firestore {
 
       match /groups/{groupId} {
         allow read: if true;
-        allow create: if !hasV2Meta(projectId) || (validGroupDoc(projectId) && validRevisionedCreate(projectId));
-        allow update: if !hasV2Meta(projectId) || (validGroupDoc(projectId) && validRevisionedUpdate(projectId));
-        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
+        allow create: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validGroupDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validGroupDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /blocked_tokens/{tokenId} {
         allow read: if true;
-        allow create: if !hasV2Meta(projectId) || (validBlockedTokenDoc(projectId) && validRevisionedCreate(projectId));
-        allow update: if !hasV2Meta(projectId) || (validBlockedTokenDoc(projectId) && validRevisionedUpdate(projectId));
-        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
+        allow create: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validBlockedTokenDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validBlockedTokenDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /manual_blocked_keywords/{keywordId} {
         allow read: if true;
-        allow create: if !hasV2Meta(projectId) || (validBlockedKeywordDoc(projectId) && validRevisionedCreate(projectId));
-        allow update: if !hasV2Meta(projectId) || (validBlockedKeywordDoc(projectId) && validRevisionedUpdate(projectId));
-        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
+        allow create: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validBlockedKeywordDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validBlockedKeywordDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /token_merge_rules/{ruleId} {
         allow read: if true;
-        allow create: if !hasV2Meta(projectId) || (validTokenMergeRuleDoc(projectId) && validRevisionedCreate(projectId));
-        allow update: if !hasV2Meta(projectId) || (validTokenMergeRuleDoc(projectId) && validRevisionedUpdate(projectId));
-        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
+        allow create: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validTokenMergeRuleDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validTokenMergeRuleDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /label_sections/{sectionId} {
         allow read: if true;
-        allow create: if !hasV2Meta(projectId) || (validLabelSectionDoc(projectId) && validRevisionedCreate(projectId));
-        allow update: if !hasV2Meta(projectId) || (validLabelSectionDoc(projectId) && validRevisionedUpdate(projectId));
-        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
+        allow create: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validLabelSectionDoc(projectId) && validRevisionedCreate(projectId));
+        allow update: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (validLabelSectionDoc(projectId) && validRevisionedUpdate(projectId));
+        allow delete: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /activity_log/{entryId} {
         allow read: if true;
-        allow create, update: if !hasV2Meta(projectId) || validActivityLogDoc(projectId);
-        allow delete: if !hasV2Meta(projectId) || (resource != null && epochScopedDelete(projectId, resource.data));
+        allow create, update: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || validActivityLogDoc(projectId);
+        allow delete: if (!isSharedCollabProject(projectId) && !hasV2Meta(projectId)) || (resource != null && epochScopedDelete(projectId, resource.data));
       }
 
       match /project_operations/{operationId} {

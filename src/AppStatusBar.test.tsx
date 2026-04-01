@@ -11,7 +11,10 @@ import {
   recordSharedCloudWriteStart,
   recordSharedCloudWriteOk,
   resetCloudSyncStateForTests,
+  setProjectAuthoritativeSyncState,
 } from './cloudSyncStatus';
+import { performSharedMutation, trackSharedListenerApply } from './sharedCollabContract';
+import { getSharedActionRegistryEntry } from './sharedCollaboration';
 
 vi.mock('./changelogStorage', () => ({
   subscribeBuildName: (onName: (name: string) => void) => {
@@ -56,6 +59,12 @@ describe('AppStatusBar', () => {
   it('updates the open tooltip when auxiliary diagnostics change and surfaces background sync status', async () => {
     await flushCloud(() => {
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, { metadata: { fromCache: false } });
+      setProjectAuthoritativeSyncState({
+        enabled: true,
+        ready: true,
+        phase: 'synced',
+        pendingTargets: [],
+      });
     });
 
     render(<AppStatusBar activeProjectId="proj_1" />);
@@ -81,6 +90,12 @@ describe('AppStatusBar', () => {
     await flushCloud(() => {
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projectChunks, { metadata: { fromCache: false } });
       markListenerSnapshot(CLOUD_SYNC_CHANNELS.projects, { metadata: { fromCache: false } });
+      setProjectAuthoritativeSyncState({
+        enabled: true,
+        ready: true,
+        phase: 'synced',
+        pendingTargets: [],
+      });
       recordProjectCloudWriteStart();
       recordProjectFirestoreSaveOk();
       recordSharedCloudWriteStart();
@@ -92,7 +107,8 @@ describe('AppStatusBar', () => {
       fireEvent.click(screen.getByTestId('cloud-status-chip'));
     });
 
-    expect(await screen.findByText('This tab only — the headline prioritizes the open project when one is selected.')).toBeTruthy();
+    expect(await screen.findByText('Connection diagnostics')).toBeTruthy();
+    expect(screen.getByText(/headline prioritizes the open project/i)).toBeTruthy();
     expect(screen.getByText('Last project cloud sync')).toBeTruthy();
     expect(screen.getByText('Last shared-doc sync')).toBeTruthy();
 
@@ -101,7 +117,21 @@ describe('AppStatusBar', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getAllByText('Project sync problem — check status').length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/Project sync problem/).length).toBeGreaterThan(0);
     });
+  });
+
+  it('surfaces per-channel collaboration health in the tooltip', async () => {
+    await performSharedMutation(getSharedActionRegistryEntry('project.metadata'), async () => undefined);
+    trackSharedListenerApply(getSharedActionRegistryEntry('project.collection'));
+
+    render(<AppStatusBar activeProjectId="proj_1" />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cloud-status-chip'));
+    });
+
+    expect(await screen.findByText('Shared collaboration channels')).toBeTruthy();
+    expect(screen.getByTestId('collab-health-project.metadata')).toBeTruthy();
+    expect(screen.getByTestId('collab-health-project.collection')).toBeTruthy();
   });
 });

@@ -3,6 +3,7 @@
 > **Consolidated checklist:** see [`AGENTS.md`](./AGENTS.md) (entry point for agents + debt prevention + testing expectations).
 > For architecture details, see `ARCHITECTURE.md`.
 > For development workflow rules, see `CONTRIBUTING.md`.
+> For bug/debug/regression work, invoke the local Codex `bug-fixing` skill when available and follow it alongside `AGENTS.md`.
 
 ## Core Principles
 

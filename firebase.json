@@ -42,5 +42,10 @@
   "firestore": {
     "rules": "firestore.rules",
     "database": "first-db"
+  },
+  "emulators": {
+    "firestore": {
+      "port": 8080
+    }
   }
 }

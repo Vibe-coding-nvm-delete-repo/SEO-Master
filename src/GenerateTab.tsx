@@ -9,18 +9,16 @@ import {
   APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT,
   appSettingsIdbKey,
   cacheStateLocallyBestEffort,
+  deleteAppSettingsDocFieldsRemote,
   emitLocalAppSettingsRowsUpdated,
+  loadAppSettingsRows,
   loadCachedState,
   persistAppSettingsDoc,
   persistLocalCachedState,
   persistTrackedState,
   subscribeAppSettingsDoc,
+  writeAppSettingsRowsRemote,
 } from './appSettingsPersistence';
-import {
-  deleteAppSettingsDocFields,
-  loadChunkedAppSettingsRows,
-  writeChunkedAppSettingsRows,
-} from './appSettingsDocStore';
 import {
   ensureProjectGenerateWorkspace,
   scopeGenerateWorkspaceDocId,
@@ -203,11 +201,13 @@ export function classifyRowsSnapshotHandling(opts: {
   latestKnownUpdatedAt: string;
   isPrimaryGenerating: boolean;
   slotGeneratingState: Record<string, boolean>;
+  hasResolvedCurrentRows?: boolean;
 }): 'ignore' | 'defer' | 'apply' {
   if (
     opts.incomingUpdatedAt &&
     opts.latestKnownUpdatedAt &&
-    opts.incomingUpdatedAt <= opts.latestKnownUpdatedAt
+    opts.incomingUpdatedAt <= opts.latestKnownUpdatedAt &&
+    opts.hasResolvedCurrentRows
   ) {
     return 'ignore';
   }
@@ -353,6 +353,20 @@ function hasPrimaryRowContent(row: GenerateRow): boolean {
   );
 }
 
+function hasResolvedPrimaryRowState(row: GenerateRow): boolean {
+  return (
+    row.status !== 'pending' ||
+    row.output.trim().length > 0 ||
+    Boolean(row.error) ||
+    Boolean(row.generatedAt) ||
+    row.durationMs !== undefined ||
+    row.retries !== undefined ||
+    row.promptTokens !== undefined ||
+    row.completionTokens !== undefined ||
+    row.cost !== undefined
+  );
+}
+
 function hasSlotContent(
   slotData: GenerateSlotData | undefined,
   opts: { includeInput: boolean },
@@ -376,6 +390,22 @@ function hasSlotContent(
 
 export function shouldSkipUpstreamEmptyApply(nextRows: GenerateRow[], currentRows: GenerateRow[]): boolean {
   return nextRows.length === 0 && currentRows.some(hasPrimaryRowContent);
+}
+
+export function shouldSkipEquivalentUpstreamApply(nextRows: GenerateRow[], currentRows: GenerateRow[]): boolean {
+  if (nextRows.length === 0 || nextRows.length !== currentRows.length) return false;
+  let hasMaterialCurrentState = false;
+  for (let index = 0; index < nextRows.length; index += 1) {
+    const nextRow = nextRows[index];
+    const currentRow = currentRows[index];
+    if (!currentRow) return false;
+    if (nextRow.id !== currentRow.id) return false;
+    if (nextRow.input.trim() !== currentRow.input.trim()) return false;
+    if (currentRow.status !== 'pending' || currentRow.output.trim() || currentRow.error?.trim()) {
+      hasMaterialCurrentState = true;
+    }
+  }
+  return hasMaterialCurrentState;
 }
 
 export function countClearableRowsForView(
@@ -701,6 +731,14 @@ export function resolveRequestApiKey(currentApiKey: string, storageKey: string):
   return currentApiKey.trim();
 }
 
+export function shouldPersistSharedGenerateApiKey(lastPersistedApiKey: string, nextApiKey: string): boolean {
+  return lastPersistedApiKey !== nextApiKey;
+}
+
+export function preferExistingGenerateApiKey(currentApiKey: string, incomingApiKey: string): string {
+  return currentApiKey.trim() ? currentApiKey : incomingApiKey.trim();
+}
+
 const FINALIZE_PERSIST_TIMEOUT_MS = 10_000;
 
 export async function awaitPersistWithTimeout(
@@ -830,6 +868,7 @@ export function mergeHydratedScopedModelState(current: GenerateSettings, incomin
 export function hydrateGenerateSettings(current: GenerateSettings, incoming: GenerateSettings): GenerateSettings {
   return {
     ...incoming,
+    apiKey: preferExistingGenerateApiKey(current.apiKey, incoming.apiKey),
     ...mergeHydratedScopedModelState(current, incoming),
   };
 }
@@ -1643,9 +1682,46 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   const lastRowsWrittenAtRef = useRef<string>('');
   const latestRowsUpdatedAtRef = useRef<string>('');
   const deferredRowsSnapshotReloadRef = useRef(false);
+  const deferredRowsSnapshotUpdatedAtRef = useRef<string>('');
+  const [deferredRowsSnapshotReloadSignal, setDeferredRowsSnapshotReloadSignal] = useState(0);
   // rowsFirestoreLoadedRef prevents async IDB cache from overwriting authoritative
   // Firestore data (same guard pattern as settings).
   const rowsFirestoreLoadedRef = useRef(false);
+
+  const scheduleDeferredRowsSnapshotReload = useCallback((incomingUpdatedAt = '') => {
+    deferredRowsSnapshotReloadRef.current = true;
+    if (
+      incomingUpdatedAt &&
+      (!deferredRowsSnapshotUpdatedAtRef.current || incomingUpdatedAt > deferredRowsSnapshotUpdatedAtRef.current)
+    ) {
+      deferredRowsSnapshotUpdatedAtRef.current = incomingUpdatedAt;
+    }
+    setIsLoaded(true);
+    setDeferredRowsSnapshotReloadSignal((prev) => prev + 1);
+  }, []);
+
+  const reloadDeferredRowsSnapshot = useCallback(async () => {
+    const startRowsEditVersion = rowsLocalEditVersionRef.current;
+    const loadedRows = await loadAppSettingsRows<GenerateRow>({ docId: rowsDocId, loadMode: 'remote', registryKind: 'rows' });
+    if (rowsLocalEditVersionRef.current !== startRowsEditVersion) {
+      scheduleDeferredRowsSnapshotReload(deferredRowsSnapshotUpdatedAtRef.current);
+      return;
+    }
+    rowsFirestoreLoadedRef.current = true;
+    setIsLoaded(true);
+    const normalizedLoadedRows = normalizeLoadedRows(loadedRows);
+    applyRowsState(normalizedLoadedRows, { markLocalEdit: false });
+    cacheStateLocallyBestEffort({
+      idbKey: appSettingsIdbKey(rowsDocId),
+      value: loadedRows,
+      localStorageKey: rowsCacheKey(rowsDocId),
+    });
+    if (deferredRowsSnapshotUpdatedAtRef.current) {
+      latestRowsUpdatedAtRef.current = deferredRowsSnapshotUpdatedAtRef.current;
+      deferredRowsSnapshotUpdatedAtRef.current = '';
+    }
+    lastSavedRowsJsonRef.current = JSON.stringify(loadedRows);
+  }, [applyRowsState, normalizeLoadedRows, rowsDocId, scheduleDeferredRowsSnapshotReload]);
 
   // Load rows from Firestore and keep them live-synced
   useEffect(() => {
@@ -1690,32 +1766,30 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
             latestKnownUpdatedAt: latestRowsUpdatedAtRef.current,
             isPrimaryGenerating: isGeneratingRef.current,
             slotGeneratingState: slotGeneratingRef.current,
+            hasResolvedCurrentRows: rowsRef.current.some(hasResolvedPrimaryRowState),
           });
           if (snapshotHandling === 'ignore') {
             suppressRowsSnapshotRef.current = false;
             return;
           }
           if (snapshotHandling === 'defer') {
-            deferredRowsSnapshotReloadRef.current = true;
-            rowsFirestoreLoadedRef.current = true;
-            setIsLoaded(true);
+            scheduleDeferredRowsSnapshotReload(incomingUpdatedAt);
             return;
           }
           if (snap.exists()) {
             const startRowsVersion = rowsChangeVersionRef.current;
             const startRowsEditVersion = rowsLocalEditVersionRef.current;
-            const loadedRows: GenerateRow[] = await loadChunkedAppSettingsRows<GenerateRow>(rowsDocId);
+            const loadedRows = await loadAppSettingsRows<GenerateRow>({ docId: rowsDocId, loadMode: 'remote', registryKind: 'rows' });
             if (!alive) return;
             if (
               rowsChangeVersionRef.current !== startRowsVersion ||
               rowsLocalEditVersionRef.current !== startRowsEditVersion
             ) {
+              scheduleDeferredRowsSnapshotReload(incomingUpdatedAt);
               return;
             }
             if (hasActiveGeneration(isGeneratingRef.current, slotGeneratingRef.current)) {
-              deferredRowsSnapshotReloadRef.current = true;
-              rowsFirestoreLoadedRef.current = true;
-              setIsLoaded(true);
+              scheduleDeferredRowsSnapshotReload(incomingUpdatedAt);
               return;
             }
             if (
@@ -1779,7 +1853,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       alive = false;
       unsub();
     };
-  }, [runtimeEffectsActive, suffix, addToast, loadCachedRows, normalizeLoadedRows, rowsDocId]);
+  }, [addToast, loadCachedRows, normalizeLoadedRows, rowsDocId, runtimeEffectsActive, scheduleDeferredRowsSnapshotReload, suffix]);
 
   const isGeneratingRef = useRef(false);
   const lastSavedRowsJsonRef = useRef('');
@@ -1797,10 +1871,17 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     latestRowsUpdatedAtRef.current = updatedAt;
     suppressRowsSnapshotRef.current = true;
     try {
-      await writeChunkedAppSettingsRows(rowsDocId, sanitizedRows as unknown as Array<Record<string, unknown>>, {
+      const result = await writeAppSettingsRowsRemote({
+        docId: rowsDocId,
+        rows: sanitizedRows as unknown as Array<Record<string, unknown>>,
+        cloudContext: 'generate rows sync',
         updatedAt,
         totalRows: sanitizedRows.length,
+        registryKind: 'rows',
       });
+      if (result.status !== 'accepted') {
+        throw new Error(`generate rows sync blocked: ${result.reason}`);
+      }
     } catch (err) {
       suppressRowsSnapshotRef.current = false;
       throw err;
@@ -1822,18 +1903,18 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       // The extra cacheStateLocallyBestEffort was a redundant second IDB write
       // that competed for the same readwrite transaction lock.
       emitLocalAppSettingsRowsUpdated(rowsDocId);
-      // Mark loaded so async IDB fallback won't overwrite pipeline rows before H2 row snapshot arrives
-      if (populateFromSource?.upstreamDocId) {
-        rowsFirestoreLoadedRef.current = true;
-      }
     },
-    [persistRows, populateFromSource?.upstreamDocId, rowsDocId, suffix],
+    [persistRows, rowsDocId, suffix],
   );
 
   /** One-shot: load upstream + apply if safe (shared by Firestore listener and isLoaded retry). */
   const flushUpstreamPipelineSync = useCallback(async () => {
     if (!runtimeEffectsActive) return;
     if (!populateFromSource?.load) return;
+    if (!rowsFirestoreLoadedRef.current) {
+      deferredUpstreamSyncRef.current = true;
+      return;
+    }
     if (hasActiveGeneration(isGeneratingRef.current, slotGeneratingRef.current)) {
       deferredUpstreamSyncRef.current = true;
       return;
@@ -1862,9 +1943,19 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       }
       const json = JSON.stringify(next);
       if (json === lastAppliedUpstreamJsonRef.current) return;
+      const authoritativeCurrentRows = rowsFirestoreLoadedRef.current
+        ? await loadAppSettingsRows<GenerateRow>({ docId: rowsDocId, loadMode: 'remote', registryKind: 'rows' })
+        : rowsRef.current;
       // Guard: don't let an empty upstream response wipe non-empty local rows.
       // Protects both generated-output rows and synced-input rows from transient empties.
-      if (shouldSkipUpstreamEmptyApply(next, rowsRef.current)) {
+      if (shouldSkipUpstreamEmptyApply(next, authoritativeCurrentRows)) {
+        lastAppliedUpstreamJsonRef.current = json;
+        return;
+      }
+      // Preserve accepted/generated work when the upstream-derived inputs are unchanged.
+      // Auto-sync should rebuild pending rows only when the upstream source actually changes.
+      if (shouldSkipEquivalentUpstreamApply(next, authoritativeCurrentRows)) {
+        lastAppliedUpstreamJsonRef.current = json;
         return;
       }
       setIsSyncingSource(true);
@@ -2281,33 +2372,25 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
     if (!populateFromSource?.load) return;
     if (hasActiveGeneration(isGenerating, slotGenerating)) return;
     if (!deferredUpstreamSyncRef.current) return;
+    if (!rowsFirestoreLoadedRef.current) return;
     deferredUpstreamSyncRef.current = false;
     void flushUpstreamPipelineSync();
-  }, [populateFromSource, isGenerating, runtimeEffectsActive, slotGenerating, flushUpstreamPipelineSync]);
+  }, [flushUpstreamPipelineSync, isGenerating, populateFromSource, rows, runtimeEffectsActive, slotGenerating]);
 
   useEffect(() => {
     if (!runtimeEffectsActive) return;
     if (hasActiveGeneration(isGenerating, slotGenerating)) return;
+    if (deferredRowsSnapshotReloadSignal === 0) return;
     if (!deferredRowsSnapshotReloadRef.current) return;
     deferredRowsSnapshotReloadRef.current = false;
     void (async () => {
       try {
-        const startRowsEditVersion = rowsLocalEditVersionRef.current;
-        const loadedRows: GenerateRow[] = await loadChunkedAppSettingsRows<GenerateRow>(rowsDocId);
-        if (rowsLocalEditVersionRef.current !== startRowsEditVersion) return;
-        const normalizedLoadedRows = normalizeLoadedRows(loadedRows);
-        applyRowsState(normalizedLoadedRows, { markLocalEdit: false });
-        cacheStateLocallyBestEffort({
-          idbKey: appSettingsIdbKey(rowsDocId),
-          value: loadedRows,
-          localStorageKey: rowsCacheKey(rowsDocId),
-        });
-        lastSavedRowsJsonRef.current = JSON.stringify(loadedRows);
+        await reloadDeferredRowsSnapshot();
       } catch {
         // Keep local generation state if the deferred reload fails.
       }
     })();
-  }, [applyRowsState, isGenerating, normalizeLoadedRows, rowsDocId, runtimeEffectsActive, slotGenerating]);
+  }, [deferredRowsSnapshotReloadSignal, isGenerating, reloadDeferredRowsSnapshot, runtimeEffectsActive, slotGenerating]);
 
   // Sync live cost for slot generation (mirrors primary liveCost sync)
   useEffect(() => {
@@ -2661,10 +2744,21 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   // SECURITY: apiKey persisted to localStorage immediately on every change â€”
   // independent of Firestore guards/debounce so it never gets blocked.
-  // Skip the initial render (apiKey is already correct from useState initializer).
-  const apiKeyMountedRef = useRef(false);
+  // Track the last persisted value instead of skipping the first effect so
+  // a fast first edit cannot be dropped before the initial effect flushes.
+  const lastPersistedApiKeyRef = useRef(settings.apiKey);
+  const persistSharedApiKeyImmediately = useCallback((nextApiKey: string) => {
+    lastPersistedApiKeyRef.current = nextApiKey;
+    try {
+      localStorage.setItem(SHARED_API_KEY_CACHE_KEY, nextApiKey);
+      window.dispatchEvent(new CustomEvent<string>(SHARED_API_KEY_EVENT, { detail: nextApiKey }));
+    } catch {
+      /* quota */
+    }
+  }, []);
   useEffect(() => {
-    if (!apiKeyMountedRef.current) { apiKeyMountedRef.current = true; return; }
+    if (!shouldPersistSharedGenerateApiKey(lastPersistedApiKeyRef.current, settings.apiKey)) return;
+    lastPersistedApiKeyRef.current = settings.apiKey;
     try {
       localStorage.setItem(SHARED_API_KEY_CACHE_KEY, settings.apiKey);
       window.dispatchEvent(new CustomEvent<string>(SHARED_API_KEY_EVENT, { detail: settings.apiKey }));
@@ -2675,6 +2769,7 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
 
   useEffect(() => {
     const syncSharedApiKey = (nextApiKey: string) => {
+      lastPersistedApiKeyRef.current = nextApiKey;
       updateSettingsState((prev) => (prev.apiKey === nextApiKey ? prev : { ...prev, apiKey: nextApiKey }));
     };
 
@@ -2771,8 +2866,9 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       localStorageValue: json,
     }).then(() => {
       suppressSettingsSnapshotRef.current = false;
-    }).catch(() => {
+    }).catch((err) => {
       suppressSettingsSnapshotRef.current = false;
+      reportPersistFailure(addToast, 'generate settings', err);
     });
 
     if (sharedSelectedModelDocId !== settingsDocId && nextSettings.selectedModel.trim() && !nextSettings.selectedModelLocked) {
@@ -2910,7 +3006,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
           // SECURITY: If a stale apiKey exists in Firestore, scrub it immediately
           if (data.apiKey) {
             try {
-              void deleteAppSettingsDocFields(settingsDocId, ['apiKey']);
+              void deleteAppSettingsDocFieldsRemote({
+                docId: settingsDocId,
+                fields: ['apiKey'],
+                cloudContext: 'generate settings security scrub',
+                registryKind: 'settings',
+              });
             } catch { /* best-effort scrub */ }
           }
           const normalizedFsPolicy = normalizeGeneratePromptPolicy({
@@ -3541,12 +3642,13 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
   useEffect(() => {
     if (!runtimeEffectsActive) return undefined;
     if (!isLoaded) return;
+    if (!rowsFirestoreLoadedRef.current) return;
     if (!populateFromSource?.upstreamDocId && !(populateFromSource?.additionalUpstreamDocIds?.length) && !populateFromSource?.pipelineSettingsDocId) return;
     const t = setTimeout(() => {
       void flushUpstreamPipelineSync();
     }, 300);
     return () => clearTimeout(t);
-  }, [isLoaded, populateFromSource?.upstreamDocId, populateFromSource?.additionalUpstreamDocIds, populateFromSource?.pipelineSettingsDocId, flushUpstreamPipelineSync, runtimeEffectsActive]);
+  }, [flushUpstreamPipelineSync, isLoaded, populateFromSource?.additionalUpstreamDocIds, populateFromSource?.pipelineSettingsDocId, populateFromSource?.upstreamDocId, rows, runtimeEffectsActive]);
 
 
   // Generate all pending rows with rate limiting + batched UI updates
@@ -4862,7 +4964,11 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
                 <input
                   type="password"
                   value={settings.apiKey}
-                  onChange={(e) => updateSettingsState(prev => ({ ...prev, apiKey: e.target.value }))}
+                  onChange={(e) => {
+                    const nextApiKey = e.target.value;
+                    persistSharedApiKeyImmediately(nextApiKey);
+                    updateSettingsState(prev => ({ ...prev, apiKey: nextApiKey }));
+                  }}
                   placeholder="sk-or-..."
                   data-testid="openrouter-api-key"
                   className="w-full px-2.5 py-1 text-xs border border-zinc-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
@@ -5516,8 +5622,12 @@ export default function GenerateTab({
     setWorkspaceReady(false);
     setWorkspaceError(null);
     void ensureProjectGenerateWorkspace(activeProjectId)
-      .then(() => {
+      .then((result) => {
         if (!alive) return;
+        if (result.status !== 'ready') {
+          setWorkspaceError(result.message ?? 'Failed to prepare the shared Generate workspace.');
+          return;
+        }
         setWorkspaceReady(true);
       })
       .catch((error) => {

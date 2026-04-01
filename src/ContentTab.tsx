@@ -84,8 +84,7 @@ import {
 } from './contentSubtabRouting';
 import type { ContentPipelineLoadMode } from './contentPipelineLoaders';
 import { H1_BODY_EXTRA_COLUMNS, H1_HTML_EXTRA_COLUMNS, H2_CONTENT_EXTRA_COLUMNS, H2_RATING_EXTRA_COLUMNS, H2_SUMMARY_EXTRA_COLUMNS, METAS_SLUG_CTAS_EXTRA_COLUMNS, PAGE_NAMES_EXTRA_COLUMNS, QUICK_ANSWER_EXTRA_COLUMNS, QUICK_ANSWER_HTML_EXTRA_COLUMNS, TIPS_REDFLAGS_EXTRA_COLUMNS } from './generateTablePresets';
-import { subscribeAppSettingsDoc } from './appSettingsPersistence';
-import { writeChunkedAppSettingsRows } from './appSettingsDocStore';
+import { subscribeAppSettingsDoc, writeAppSettingsRowsRemote } from './appSettingsPersistence';
 import { ensureProjectGenerateWorkspace, resolveGenerateScopedDocIds } from './generateWorkspaceScope';
 
 // ============ Default Prompts ============
@@ -1147,9 +1146,16 @@ function stripUndefinedDeep<T>(value: T): T {
 
 async function persistGenerateRowsDoc(docId: string, rows: Array<Record<string, unknown>>): Promise<void> {
   const sanitizedRows = stripUndefinedDeep(rows);
-  await writeChunkedAppSettingsRows(docId, sanitizedRows, {
+  const result = await writeAppSettingsRowsRemote({
+    docId,
+    rows: sanitizedRows,
+    cloudContext: 'content pipeline rows sync',
     updatedAt: new Date().toISOString(),
+    registryKind: 'rows',
   });
+  if (result.status !== 'accepted') {
+    throw new Error(`content pipeline rows sync blocked: ${result.reason}`);
+  }
 }
 
 // ============ ContentTab ============
@@ -1311,8 +1317,18 @@ export default function ContentTab({
       alive = false;
     };
     void ensureProjectGenerateWorkspace(activeProjectId)
-      .then(() => {
+      .then((result) => {
         if (!alive) return;
+        if (result.status !== 'ready') {
+          setWorkspaceStatusByProject((prev) => ({
+            ...prev,
+            [activeProjectId]: {
+              ready: false,
+              error: result.message ?? 'Failed to prepare the shared Content workspace.',
+            },
+          }));
+          return;
+        }
         setWorkspaceStatusByProject((prev) => ({
           ...prev,
           [activeProjectId]: { ready: true, error: null },
@@ -1694,6 +1710,7 @@ export default function ContentTab({
       <div data-testid="content-panel-overview" style={{ display: externalView === 'overview' ? undefined : 'none' }}>
         <ContentOverviewPanel
           activeProjectId={activeProjectId}
+          runtimeEffectsActive={runtimeEffectsActive && externalView === 'overview'}
           onStageSelect={(stageId) => handleContentSubtabSelect(mapOverviewStageIdToContentSubtab(stageId))}
         />
       </div>
@@ -1954,7 +1971,11 @@ export default function ContentTab({
       </div>
 
       <div data-testid="content-panel-final-pages" style={{ display: externalView === 'final-pages' ? undefined : 'none' }}>
-        <FinalPagesPanel activeProjectId={activeProjectId} onSourceSelect={handleContentSubtabSelect} />
+        <FinalPagesPanel
+          activeProjectId={activeProjectId}
+          runtimeEffectsActive={runtimeEffectsActive && externalView === 'final-pages'}
+          onSourceSelect={handleContentSubtabSelect}
+        />
       </div>
     </div>
   );

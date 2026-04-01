@@ -19,7 +19,8 @@ This is the intended collaboration model for normal Group workspace editing:
 - Each shared entity write uses revision-aware conflict protection so one user cannot silently overwrite another user's newer edit.
 - Firestore listeners are the visibility path: once the write is acknowledged, all connected collaborators should converge on the same shared state.
 - Project-wide locks should be reserved for true bulk operations such as large rewrites, imports, or other exclusive flows. Normal day-to-day grouping, approving, blocking, and organizing should not feel lock-heavy or fragile.
-- Background canonical/meta reload is a syncing state, not automatically a hard read-only state. If the last known canonical state is still safe, routine grouping should remain usable while the reload completes.
+- Background canonical/meta reload is a syncing state, not automatically a hard read-only state. If the active `collab/meta` still points at the same `datasetEpoch/baseCommitId` as the last acknowledged writable canonical base, routine grouping can remain usable while the reload completes.
+- If `collab/meta` has already moved to a different `datasetEpoch/baseCommitId`, routine edits must pause until that newer canonical state finishes loading. The app must not keep writing stale old-epoch entity docs during that window.
 
 Layman's version:
 
@@ -181,7 +182,8 @@ Persistence boundaries:
 - Shared projects treat Firestore as authoritative and IndexedDB as the canonical local durable mirror of acknowledged shared state.
 - The app may show optimistic local state briefly, but that optimistic state must either be acknowledged and propagated or rejected and rolled back.
 - Project operation locks and hard read-only recovery states exist to protect consistency. They must block unsafe writes rather than permit unsynced local divergence.
-- Background canonical reload should surface as syncing/degraded status, not blanket read-only, when a safe writable canonical state still exists.
+- Background canonical reload should surface as syncing/degraded status, not blanket read-only, when the active `collab/meta` identity still matches the last safe writable canonical base.
+- If the active `collab/meta` identity no longer matches that last safe writable canonical base, the persistence boundary must fail closed until convergence finishes.
 - Queued bulk AI/grouping flows should collapse to the latest pending intent when appropriate rather than replaying stale queued jobs after the user changes filters or context.
 
 ## 5. Collaboration Guarantees And Failure Boundaries

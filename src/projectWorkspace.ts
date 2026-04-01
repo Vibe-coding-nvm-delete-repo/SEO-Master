@@ -26,9 +26,6 @@ import {
 } from './projectStorage';
 import { logPersistError } from './persistenceErrors';
 import { rebuildClusters, refreshGroupsFromClusterSummaries } from './tokenMerge';
-import { loadCollabMeta } from './projectCollabV2Storage';
-import { bootstrapV2Cache, saveCanonicalCacheToIDB } from './collabV2Cache';
-import type { ProjectCollabMetaDoc } from './collabV2Types';
 
 export interface ProjectViewState {
   results: ProcessedRow[] | null;
@@ -220,64 +217,4 @@ export const loadProjectDataForView = async (projectId: string): Promise<Project
     );
   }
   return picked;
-};
-
-/**
- * V2-aware project data loader. Checks for V2 collab meta and uses
- * the appropriate loading strategy:
- * - V2 projects: load from canonical V2 cache or base commit chunks
- * - Legacy projects: fall back to existing IDB + Firestore merge
- *
- * Returns the loaded data plus the V2 meta (if any) for the caller
- * to track readMode and epoch.
- */
-export const loadProjectDataV2Aware = async (
-  projectId: string,
-): Promise<{ data: ProjectDataPayload | null; meta: ProjectCollabMetaDoc | null }> => {
-  // Step 1: Check for V2 collab meta
-  let meta: ProjectCollabMetaDoc | null = null;
-  try {
-    meta = await loadCollabMeta(projectId);
-  } catch (err) {
-    console.warn('[V2 Bootstrap] Failed to load collab meta, falling back to legacy:', err);
-  }
-
-  // Step 2: If no V2 meta, use legacy path
-  if (!meta || meta.readMode === 'legacy') {
-    const data = await loadProjectDataForView(projectId);
-    return { data, meta };
-  }
-
-  // Step 3: V2 project — try canonical cache first
-  if (meta.baseCommitId) {
-    try {
-      const cacheResult = await bootstrapV2Cache(
-        projectId,
-        meta.datasetEpoch,
-        meta.baseCommitId,
-      );
-      if (cacheResult.entry) {
-        return { data: cacheResult.entry.payload, meta };
-      }
-    } catch (err) {
-      console.warn('[V2 Bootstrap] Cache bootstrap failed, loading from Firestore:', err);
-    }
-  }
-
-  // Step 4: Cache miss — fall back to legacy load (Firestore chunks still work for reading)
-  const data = await loadProjectDataForView(projectId);
-
-  // Step 5: If we loaded data, cache it for next time
-  if (data && meta.baseCommitId) {
-    saveCanonicalCacheToIDB(projectId, data, {
-      schemaVersion: meta.schemaVersion,
-      datasetEpoch: meta.datasetEpoch,
-      baseCommitId: meta.baseCommitId,
-      cachedAt: new Date().toISOString(),
-    }).catch((err) =>
-      logPersistError('V2 cache save after Firestore load', err),
-    );
-  }
-
-  return { data, meta };
 };

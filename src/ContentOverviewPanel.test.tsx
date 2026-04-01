@@ -1,21 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as appSettingsPersistence from './appSettingsPersistence';
 import ContentOverviewPanel from './ContentOverviewPanel';
 
 let cachedRowsByDocId: Record<string, unknown[] | null> = {};
 const PROJECT_PREFIX = 'project_proj-1__';
-
-vi.mock('./appSettingsDocStore', () => ({
-  loadChunkedAppSettingsRows: vi.fn(async (docId: string) => {
-    if (docId === `${PROJECT_PREFIX}generate_rows_page_names`) {
-      return [
-        { id: 'page-1', input: 'keyword one', status: 'generated', output: 'Keyword One Title', cost: 0.01 },
-        { id: 'page-2', input: 'keyword two', status: 'pending', output: '', cost: 0.02 },
-      ];
-    }
-    return [];
-  }),
-}));
 
 vi.mock('./appSettingsPersistence', () => ({
   APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT: 'kwg:app-settings-local-rows-updated',
@@ -24,8 +13,22 @@ vi.mock('./appSettingsPersistence', () => ({
     const docId = idbKey.replace('__app_settings__:', '');
     return cachedRowsByDocId[docId] ?? null;
   }),
+  loadAppSettingsRows: vi.fn(async ({ docId, loadMode }: { docId: string; loadMode?: 'remote' | 'local-preferred' }) => {
+    if (loadMode === 'local-preferred' && cachedRowsByDocId[docId]) {
+      return cachedRowsByDocId[docId];
+    }
+    if (docId === `${PROJECT_PREFIX}generate_rows_page_names`) {
+      return [
+        { id: 'page-1', input: 'keyword one', status: 'generated', output: 'Keyword One Title', cost: 0.01 },
+        { id: 'page-2', input: 'keyword two', status: 'pending', output: '', cost: 0.02 },
+      ];
+    }
+    return [];
+  }),
   subscribeAppSettingsDoc: vi.fn(() => () => undefined),
 }));
+
+const appSettingsMocks = vi.mocked(appSettingsPersistence);
 
 describe('ContentOverviewPanel', () => {
   afterEach(() => {
@@ -83,5 +86,16 @@ describe('ContentOverviewPanel', () => {
     await waitFor(() => {
       expect(screen.getAllByText('2/2').length).toBeGreaterThan(0);
     });
+  });
+
+  it('stays idle while runtime effects are disabled', async () => {
+    render(<ContentOverviewPanel activeProjectId="proj-1" runtimeEffectsActive={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('content-overview-panel')).toBeTruthy();
+    });
+
+    expect(appSettingsMocks.loadAppSettingsRows).not.toHaveBeenCalled();
+    expect(appSettingsMocks.subscribeAppSettingsDoc).not.toHaveBeenCalled();
   });
 });

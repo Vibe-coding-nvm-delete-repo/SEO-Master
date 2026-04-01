@@ -45,8 +45,6 @@ import {
 import { runCosineSimilarity, trimCosineClusterMismatchPages, DEFAULT_EMBEDDING_MODEL } from './CosineEngine';
 import type { SimilarityPair, CosineCluster, CosineProgress } from './CosineEngine';
 import { processReviewQueue, normalizeMismatchedPageNames, type ReviewRequest } from './GroupReviewEngine';
-import { db } from './firebase';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
 import InlineHelpHint from './InlineHelpHint';
 import { useToast } from './ToastContext';
 import {
@@ -539,7 +537,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
       if (models.length > 0) {
         setAgModel((current) => normalizePreferredOpenRouterModel(current, models.map((model: any) => model.id)));
       }
-    }).catch(() => {}).finally(() => { if (!cancelled) setAgModelsLoading(false); });
+    }).catch((err) => { console.warn('[AutoGroup] Failed to fetch models:', err); }).finally(() => { if (!cancelled) setAgModelsLoading(false); });
     return () => { cancelled = true; };
   }, [agApiKey]);
 

@@ -1,0 +1,140 @@
+[
+  {
+    "id": "app-settings-doc-store",
+    "path": "src/appSettingsDocStore.ts",
+    "status": "contract_managed",
+    "featureOwner": "shared-collab",
+    "purpose": "Low-level app_settings Firestore access behind the shared collaboration contract.",
+    "scope": "global_shared",
+    "userVisibleSharedState": true,
+    "migrationLane": "shared_app_settings"
+  },
+  {
+    "id": "changelog-support",
+    "path": "src/changelogStorage.ts",
+    "status": "internal_admin_or_support",
+    "featureOwner": "support",
+    "purpose": "Release notes and build markers are support channels, not collaborative user workspace state.",
+    "scope": "auxiliary",
+    "userVisibleSharedState": false,
+    "migrationLane": "support"
+  },
+  {
+    "id": "feedback-support",
+    "path": "src/feedbackStorage.ts",
+    "status": "internal_admin_or_support",
+    "featureOwner": "support",
+    "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+    "scope": "auxiliary",
+    "userVisibleSharedState": false,
+    "migrationLane": "support"
+  },
+  {
+    "id": "firestore-rules-emulator-tests",
+    "path": "src/firestore.rules.emulator.test.ts",
+    "status": "test_or_qa_only",
+    "featureOwner": "qa",
+    "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+    "scope": "test_only",
+    "userVisibleSharedState": false,
+    "migrationLane": "tests"
+  },
+  {
+    "id": "notifications-support",
+    "path": "src/notificationStorage.ts",
+    "status": "internal_admin_or_support",
+    "featureOwner": "support",
+    "purpose": "Notifications are support/auxiliary feeds rather than shared editing truth.",
+    "scope": "auxiliary",
+    "userVisibleSharedState": false,
+    "migrationLane": "support"
+  },
+  {
+    "id": "project-collab-v2",
+    "path": "src/projectCollabV2.ts",
+    "status": "contract_managed",
+    "featureOwner": "group-v2",
+    "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+    "scope": "project_group_v2",
+    "userVisibleSharedState": true,
+    "migrationLane": "group_project_v2"
+  },
+  {
+    "id": "project-collab-v2-storage",
+    "path": "src/projectCollabV2Storage.ts",
+    "status": "contract_managed",
+    "featureOwner": "group-v2",
+    "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+    "scope": "project_group_v2",
+    "userVisibleSharedState": true,
+    "migrationLane": "group_project_v2"
+  },
+  {
+    "id": "project-metadata-collab",
+    "path": "src/projectMetadataCollab.ts",
+    "status": "contract_managed",
+    "featureOwner": "project-metadata",
+    "purpose": "Project metadata collection listener routed through the shared collaboration contract.",
+    "scope": "project_metadata",
+    "userVisibleSharedState": true,
+    "migrationLane": "project_metadata"
+  },
+  {
+    "id": "project-storage-shared-metadata",
+    "path": "src/projectStorage.ts",
+    "startLine": 463,
+    "endLine": 544,
+    "status": "contract_managed",
+    "featureOwner": "project-metadata",
+    "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+    "scope": "project_metadata",
+    "userVisibleSharedState": true,
+    "migrationLane": "project_metadata"
+  },
+  {
+    "id": "project-storage-workspace-preferences",
+    "path": "src/projectStorage.ts",
+    "startLine": 545,
+    "endLine": 574,
+    "status": "contract_managed",
+    "featureOwner": "shared-app-settings",
+    "purpose": "Workspace preference remote read/write helpers used by the shared app_settings contract.",
+    "scope": "global_shared",
+    "userVisibleSharedState": true,
+    "migrationLane": "shared_app_settings"
+  },
+  {
+    "id": "project-storage-legacy-project-chunks",
+    "path": "src/projectStorage.ts",
+    "startLine": 634,
+    "endLine": 849,
+    "status": "out_of_scope_non_collab",
+    "featureOwner": "project-storage",
+    "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+    "scope": "out_of_scope",
+    "userVisibleSharedState": false,
+    "migrationLane": "none"
+  },
+  {
+    "id": "project-storage-project-bootstrap",
+    "path": "src/projectStorage.ts",
+    "startLine": 862,
+    "endLine": 862,
+    "status": "contract_managed",
+    "featureOwner": "project-metadata",
+    "purpose": "Projects collection bootstrap read used by the shared project metadata lane.",
+    "scope": "project_metadata",
+    "userVisibleSharedState": true,
+    "migrationLane": "project_metadata"
+  },
+  {
+    "id": "use-project-persistence",
+    "path": "src/useProjectPersistence.ts",
+    "status": "contract_managed",
+    "featureOwner": "group-v2",
+    "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+    "scope": "project_group_v2",
+    "userVisibleSharedState": true,
+    "migrationLane": "group_project_v2"
+  }
+]

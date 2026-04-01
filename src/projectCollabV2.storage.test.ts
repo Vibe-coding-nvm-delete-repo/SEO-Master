@@ -515,6 +515,72 @@ describe('projectCollabV2 storage contract', () => {
     expect(canonical.resolved).toEqual(makePayload(9));
   });
 
+  it('keeps shared projects on the V2 path when no collab meta exists yet', async () => {
+    firestoreMocks.getDoc.mockResolvedValue({
+      exists: () => false,
+      data: () => undefined,
+    });
+    firestoreMocks.getDocs.mockResolvedValue({
+      empty: true,
+      docs: [],
+    });
+    firestoreMocks.runTransaction.mockRejectedValue(new Error('migration bootstrap failed'));
+
+    const legacyLoader = vi.fn(async () => makePayload(9));
+    const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader, {
+      sharedProject: true,
+      localFallbackPayload: makePayload(9),
+    });
+
+    expect(legacyLoader).not.toHaveBeenCalled();
+    expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
+    expect(canonical.mode).toBe('v2');
+    expect(canonical.entities.meta).toBeNull();
+    expect(canonical.resolved).toEqual(makePayload(9));
+  });
+
+  it('keeps shared projects on the V2 path when meta is still legacy', async () => {
+    const meta = {
+      schemaVersion: 2 as const,
+      migrationState: 'failed' as const,
+      datasetEpoch: 9,
+      baseCommitId: null,
+      commitState: 'writing' as const,
+      lastMigratedAt: '2026-03-30T00:00:00.000Z',
+      migrationOwnerClientId: null,
+      migrationStartedAt: null,
+      migrationHeartbeatAt: null,
+      migrationExpiresAt: null,
+      readMode: 'legacy' as const,
+      requiredClientSchema: CLIENT_SCHEMA_VERSION,
+      revision: 9,
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      updatedByClientId: 'client-a',
+      lastMutationId: null,
+    };
+
+    firestoreMocks.getDoc.mockResolvedValue({
+      exists: () => true,
+      data: () => meta,
+    });
+    firestoreMocks.getDocs.mockResolvedValue({
+      empty: true,
+      docs: [],
+    });
+    firestoreMocks.runTransaction.mockRejectedValue(new Error('migration bootstrap failed'));
+
+    const legacyLoader = vi.fn(async () => makePayload(9));
+    const canonical = await loadCanonicalProjectState('project-1', 'client-a', legacyLoader, {
+      sharedProject: true,
+      localFallbackPayload: makePayload(9),
+    });
+
+    expect(legacyLoader).not.toHaveBeenCalled();
+    expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
+    expect(canonical.mode).toBe('v2');
+    expect(canonical.resolved).toEqual(makePayload(9));
+  });
+
   it('runs recovery to reset readMode when meta is stuck at v2 with missing base commit', async () => {
     const meta = {
       schemaVersion: 2 as const,

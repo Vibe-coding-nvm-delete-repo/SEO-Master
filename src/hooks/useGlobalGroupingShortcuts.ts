@@ -1,36 +1,57 @@
 import { useEffect } from 'react';
+import { isEditableShortcutTarget, shouldAllowGroupingShortcutFromTarget } from '../groupingShortcutTargets';
 
 interface UseGlobalGroupingShortcutsParams {
   activeTab: string;
+  tokenMgmtSubTab: string;
   canRunManualGroup: boolean;
   canApproveGrouped: boolean;
   canRunFilteredAutoGroup: boolean;
+  canRunTokenAutoMerge: boolean;
   handleGroupClusters: () => void;
   approveSelectedGrouped: () => void;
   handleRunFilteredAutoGroup: () => void;
+  handleRunTokenAutoMerge: () => void;
 }
 
 export function useGlobalGroupingShortcuts({
   activeTab,
+  tokenMgmtSubTab,
   canRunManualGroup,
   canApproveGrouped,
   canRunFilteredAutoGroup,
+  canRunTokenAutoMerge,
   handleGroupClusters,
   approveSelectedGrouped,
   handleRunFilteredAutoGroup,
+  handleRunTokenAutoMerge,
 }: UseGlobalGroupingShortcutsParams) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const isTypingTarget =
-        !!target &&
+      const target = event.target;
+      const isEditableTarget =
+        isEditableShortcutTarget(target) &&
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
           target.isContentEditable);
+      const shouldBlockShiftDigitShortcut = isEditableTarget && !shouldAllowGroupingShortcutFromTarget(target);
 
       if (event.shiftKey && event.code === 'Digit1') {
-        if (activeTab === 'pages' && !isTypingTarget && canRunFilteredAutoGroup) {
+        if (
+          !shouldBlockShiftDigitShortcut &&
+          tokenMgmtSubTab === 'auto-merge' &&
+          activeTab !== 'pages' &&
+          activeTab !== 'group-auto-merge' &&
+          canRunTokenAutoMerge
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          handleRunTokenAutoMerge();
+          return;
+        }
+
+        if (activeTab === 'pages' && !shouldBlockShiftDigitShortcut && canRunFilteredAutoGroup) {
           event.preventDefault();
           event.stopPropagation();
           handleRunFilteredAutoGroup();
@@ -38,7 +59,8 @@ export function useGlobalGroupingShortcuts({
         }
       }
 
-      if (event.key === 'Tab' || event.key === 'Shift') {
+      if (event.key === 'Tab') {
+        if (isEditableTarget) return;
         if (activeTab === 'pages' && canRunManualGroup) {
           event.preventDefault();
           event.stopPropagation();
@@ -61,7 +83,10 @@ export function useGlobalGroupingShortcuts({
     canApproveGrouped,
     canRunFilteredAutoGroup,
     canRunManualGroup,
+    canRunTokenAutoMerge,
     handleGroupClusters,
     handleRunFilteredAutoGroup,
+    handleRunTokenAutoMerge,
+    tokenMgmtSubTab,
   ]);
 }

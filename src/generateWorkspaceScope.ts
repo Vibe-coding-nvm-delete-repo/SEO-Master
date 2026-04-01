@@ -1,4 +1,9 @@
-import { getAppSettingsDocData, loadChunkedAppSettingsRows, setAppSettingsDocData, writeChunkedAppSettingsRows } from './appSettingsDocStore';
+import {
+  loadAppSettingsDoc,
+  loadAppSettingsRows,
+  writeAppSettingsDocRemote,
+  writeAppSettingsRowsRemote,
+} from './appSettingsPersistence';
 
 export const GENERATE_WORKSPACE_META_BASE_DOC_ID = 'generate_workspace_meta';
 const PROJECT_DOC_PREFIX = 'project_';
@@ -37,7 +42,14 @@ const GENERATE_WORKSPACE_SHARED_BASE_DOC_IDS = [
   'generate_settings_tips_redflags',
 ] as const;
 
-const pendingWorkspaceEnsures = new Map<string, Promise<void>>();
+const pendingWorkspaceEnsures = new Map<string, Promise<GenerateWorkspaceEnsureResult>>();
+
+export type GenerateWorkspaceEnsureResult = {
+  status: 'ready' | 'blocked' | 'failed';
+  reason?: 'permission-denied' | 'unknown';
+  step?: 'migration' | 'meta' | 'scoped-doc';
+  message?: string;
+};
 
 function isRowsDocId(docId: string): boolean {
   return docId.startsWith('generate_rows');
@@ -62,59 +74,121 @@ export function resolveGenerateScopedDocIds<T extends Record<string, string>>(
 }
 
 async function cloneLegacyWorkspaceDoc(projectId: string, baseDocId: string): Promise<boolean> {
-  const legacyDoc = await getAppSettingsDocData(baseDocId);
+  const legacyDoc = await loadAppSettingsDoc<Record<string, unknown>>({
+    docId: baseDocId,
+    registryKind: isRowsDocId(baseDocId) ? 'rows' : 'settings',
+  });
   if (!legacyDoc) return false;
 
   const scopedDocId = scopeGenerateWorkspaceDocId(projectId, baseDocId);
   if (isRowsDocId(baseDocId)) {
-    const rows = await loadChunkedAppSettingsRows<Record<string, unknown>>(baseDocId);
-    await writeChunkedAppSettingsRows(scopedDocId, rows, {
+    const rows = await loadAppSettingsRows<Record<string, unknown>>({
+      docId: baseDocId,
+      registryKind: 'rows',
+    });
+    const result = await writeAppSettingsRowsRemote({
+      docId: scopedDocId,
+      rows,
+      cloudContext: 'project generate workspace migration',
       updatedAt: typeof legacyDoc.updatedAt === 'string' ? legacyDoc.updatedAt : undefined,
       totalRows: typeof legacyDoc.totalRows === 'number' ? legacyDoc.totalRows : rows.length,
+      registryKind: 'rows',
     });
+    if (result.status !== 'accepted') {
+      throw new Error(`project generate workspace migration blocked: ${result.reason}`);
+    }
     return true;
   }
 
-  await setAppSettingsDocData(scopedDocId, legacyDoc);
+  const result = await writeAppSettingsDocRemote({
+    docId: scopedDocId,
+    data: legacyDoc,
+    cloudContext: 'project generate workspace migration',
+    registryKind: 'settings',
+  });
+  if (result.status !== 'accepted') {
+    throw new Error(`project generate workspace migration blocked: ${result.reason}`);
+  }
   return true;
 }
 
-export async function ensureProjectGenerateWorkspace(projectId: string | null): Promise<void> {
-  if (!projectId) return;
+function blockedEnsureResult(step: GenerateWorkspaceEnsureResult['step'], message: string): GenerateWorkspaceEnsureResult {
+  return {
+    status: 'blocked',
+    reason: 'permission-denied',
+    step,
+    message,
+  };
+}
+
+function failedEnsureResult(step: GenerateWorkspaceEnsureResult['step'], error: unknown): GenerateWorkspaceEnsureResult {
+  return {
+    status: 'failed',
+    reason: 'unknown',
+    step,
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+export async function ensureProjectGenerateWorkspace(projectId: string | null): Promise<GenerateWorkspaceEnsureResult> {
+  if (!projectId) return { status: 'ready' };
 
   const existing = pendingWorkspaceEnsures.get(projectId);
   if (existing) {
-    await existing;
-    return;
+    return await existing;
   }
 
   const ensurePromise = (async () => {
     const metaDocId = getGenerateWorkspaceMetaDocId(projectId);
-    const existingMeta = await getAppSettingsDocData(metaDocId);
-    if (existingMeta) return;
+    const existingMeta = await loadAppSettingsDoc<Record<string, unknown>>({
+      docId: metaDocId,
+      registryKind: 'settings',
+    });
+    if (existingMeta) return { status: 'ready' } satisfies GenerateWorkspaceEnsureResult;
 
     let importedLegacyAt = '';
     for (const baseDocId of GENERATE_WORKSPACE_SHARED_BASE_DOC_IDS) {
       const scopedDocId = scopeGenerateWorkspaceDocId(projectId, baseDocId);
-      const scopedDoc = await getAppSettingsDocData(scopedDocId);
+      const scopedDoc = await loadAppSettingsDoc<Record<string, unknown>>({
+        docId: scopedDocId,
+        registryKind: isRowsDocId(baseDocId) ? 'rows' : 'settings',
+      });
       if (scopedDoc) continue;
-      const migrated = await cloneLegacyWorkspaceDoc(projectId, baseDocId);
-      if (migrated && !importedLegacyAt) {
-        importedLegacyAt = new Date().toISOString();
+      try {
+        if (await cloneLegacyWorkspaceDoc(projectId, baseDocId) && !importedLegacyAt) {
+          importedLegacyAt = new Date().toISOString();
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('blocked: permission-denied') || message.includes('permission-denied')) {
+          return blockedEnsureResult('migration', message);
+        }
+        return failedEnsureResult('migration', error);
       }
     }
 
-    await setAppSettingsDocData(metaDocId, {
-      version: 1,
-      importedLegacyAt,
-      source: LEGACY_WORKSPACE_SOURCE,
+    const result = await writeAppSettingsDocRemote({
+      docId: metaDocId,
+      data: {
+        version: 1,
+        importedLegacyAt,
+        source: LEGACY_WORKSPACE_SOURCE,
+      },
+      cloudContext: 'project generate workspace meta',
+      registryKind: 'settings',
     });
+    if (result.status !== 'accepted') {
+      return result.reason === 'permission-denied'
+        ? blockedEnsureResult('meta', `project generate workspace meta blocked: ${result.reason}`)
+        : failedEnsureResult('meta', `project generate workspace meta blocked: ${result.reason}`);
+    }
+    return { status: 'ready' } satisfies GenerateWorkspaceEnsureResult;
   })().finally(() => {
     pendingWorkspaceEnsures.delete(projectId);
   });
 
   pendingWorkspaceEnsures.set(projectId, ensurePromise);
-  await ensurePromise;
+  return await ensurePromise;
 }
 
 export const LEGACY_GENERATE_WORKSPACE_DOC_IDS = [...GENERATE_WORKSPACE_SHARED_BASE_DOC_IDS];

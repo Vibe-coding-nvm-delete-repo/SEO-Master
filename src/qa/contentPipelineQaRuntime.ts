@@ -42,9 +42,12 @@ type QaH2Seed = {
 const QA_PATH = '/__qa/content-pipeline';
 const SHARED_API_KEY = 'qa-shared-openrouter-key';
 export const QA_PROJECT_ID = 'qa-content-project';
+export const QA_SCENARIO_INIT_PREFIX = 'kwg:qa:content-pipeline:init';
 const PAGE_ROW_ID = 'page_row_1';
 const PAGE_KEYWORD = 'installment loans';
 const PAGE_TITLE = 'Can You Get Installment Loans?';
+const QA_DOC_STORAGE_PREFIX = 'kwg:qa:content-pipeline:doc';
+const QA_CACHE_STORAGE_PREFIX = 'kwg:qa:content-pipeline:cache';
 
 const QA_PROMPTS = {
   pageNames: 'PAGE_TITLE::{KEYWORD}',
@@ -120,6 +123,7 @@ const FULL_FLOW_H2S: QaH2Seed[] = [
 let qaState: QaState | null = null;
 let originalFetch: typeof fetch | null = null;
 let fetchInstalled = false;
+let storageSyncInstalled = false;
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -127,6 +131,105 @@ function clone<T>(value: T): T {
 
 function normalizeQaDocId(docId: string): string {
   return docId.replace(/^project_.+?__/, '');
+}
+
+export function getQaScenarioInitKey(scenario: string): string {
+  return `${QA_SCENARIO_INIT_PREFIX}:${scenario}`;
+}
+
+function qaDocStorageKey(scenario: string, docId: string): string {
+  return `${QA_DOC_STORAGE_PREFIX}:${scenario}:${normalizeQaDocId(docId)}`;
+}
+
+function qaCacheStorageKey(scenario: string, key: string): string {
+  return `${QA_CACHE_STORAGE_PREFIX}:${scenario}:${normalizeQaDocId(key)}`;
+}
+
+export function parseScenarioKey(prefix: string, storageKey: string): { scenario: string; name: string } | null {
+  if (!storageKey.startsWith(`${prefix}:`)) return null;
+  const remainder = storageKey.slice(prefix.length + 1);
+  const separatorIndex = remainder.indexOf(':');
+  if (separatorIndex <= 0 || separatorIndex >= remainder.length - 1) return null;
+  const scenario = remainder.slice(0, separatorIndex);
+  return {
+    scenario,
+    name: remainder.slice(separatorIndex + 1),
+  };
+}
+
+function forEachScenarioStorageKey(prefix: string, scenario: string, onEntry: (storageKey: string, name: string) => void): void {
+  if (typeof window === 'undefined') return;
+  const scenarioPrefix = `${prefix}:${scenario}:`;
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const storageKey = window.localStorage.key(index);
+    if (!storageKey || !storageKey.startsWith(scenarioPrefix)) continue;
+    const parsed = parseScenarioKey(prefix, storageKey);
+    if (!parsed) continue;
+    onEntry(storageKey, parsed.name);
+  }
+}
+
+function loadScenarioDocsFromStorage(scenario: string): Map<string, QaDoc> {
+  const docs = new Map<string, QaDoc>();
+  if (typeof window === 'undefined') return docs;
+  forEachScenarioStorageKey(QA_DOC_STORAGE_PREFIX, scenario, (storageKey, docId) => {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return;
+    try {
+      docs.set(docId, JSON.parse(raw) as QaDoc);
+    } catch {
+      /* ignore malformed QA storage */
+    }
+  });
+  return docs;
+}
+
+function loadScenarioLocalCacheFromStorage(scenario: string): Map<string, unknown> {
+  const cache = new Map<string, unknown>();
+  if (typeof window === 'undefined') return cache;
+  forEachScenarioStorageKey(QA_CACHE_STORAGE_PREFIX, scenario, (storageKey, cacheKey) => {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return;
+    try {
+      cache.set(cacheKey, JSON.parse(raw));
+    } catch {
+      /* ignore malformed QA storage */
+    }
+  });
+  return cache;
+}
+
+function writeScenarioDocToStorage(scenario: string, docId: string, data: QaDoc | null): void {
+  if (typeof window === 'undefined') return;
+  const storageKey = qaDocStorageKey(scenario, docId);
+  if (data == null) {
+    window.localStorage.removeItem(storageKey);
+    return;
+  }
+  window.localStorage.setItem(storageKey, JSON.stringify(data));
+}
+
+function writeScenarioCacheToStorage(scenario: string, key: string, value: unknown | null): void {
+  if (typeof window === 'undefined') return;
+  const storageKey = qaCacheStorageKey(scenario, key);
+  if (value == null) {
+    window.localStorage.removeItem(storageKey);
+    return;
+  }
+  window.localStorage.setItem(storageKey, JSON.stringify(value));
+}
+
+function clearScenarioStorage(scenario: string): void {
+  if (typeof window === 'undefined') return;
+  const keysToDelete: string[] = [];
+  forEachScenarioStorageKey(QA_DOC_STORAGE_PREFIX, scenario, (storageKey) => {
+    keysToDelete.push(storageKey);
+  });
+  forEachScenarioStorageKey(QA_CACHE_STORAGE_PREFIX, scenario, (storageKey) => {
+    keysToDelete.push(storageKey);
+  });
+  window.localStorage.removeItem(getQaScenarioInitKey(scenario));
+  keysToDelete.forEach((storageKey) => window.localStorage.removeItem(storageKey));
 }
 
 function getRowMetadata(row: QaRow): Record<string, string> {
@@ -143,7 +246,10 @@ function makeSnapshot(data: QaDoc | null): QaSnapshot {
 }
 
 function ensureState(): QaState {
-  if (!qaState) qaState = createScenarioState(getContentPipelineQaScenario());
+  if (!qaState) {
+    const scenario = getContentPipelineQaScenario();
+    qaState = mergeScenarioStorage(createScenarioState(scenario), scenario);
+  }
   return qaState;
 }
 
@@ -951,6 +1057,16 @@ function createScenarioState(name: string): QaState {
   };
 }
 
+function mergeScenarioStorage(state: QaState, scenario: string): QaState {
+  loadScenarioDocsFromStorage(scenario).forEach((value, key) => {
+    state.appSettingsDocs.set(key, clone(value));
+  });
+  loadScenarioLocalCacheFromStorage(scenario).forEach((value, key) => {
+    state.localCache.set(key, clone(value));
+  });
+  return state;
+}
+
 function notifyAppSettingsDoc(docId: string) {
   const state = ensureState();
   const listeners = state.appSettingsListeners.get(docId);
@@ -1206,6 +1322,41 @@ export function installContentPipelineQaRuntime(): void {
   originalFetch = window.fetch.bind(window);
   window.fetch = qaFetch;
   fetchInstalled = true;
+  if (!storageSyncInstalled) {
+    window.addEventListener('storage', (event) => {
+      if (!event.key) return;
+      const scenario = getContentPipelineQaScenario();
+      const docEntry = parseScenarioKey(QA_DOC_STORAGE_PREFIX, event.key);
+      if (docEntry && docEntry.scenario === scenario) {
+        const state = ensureState();
+        if (event.newValue == null) {
+          state.appSettingsDocs.delete(docEntry.name);
+        } else {
+          try {
+            state.appSettingsDocs.set(docEntry.name, JSON.parse(event.newValue) as QaDoc);
+          } catch {
+            return;
+          }
+        }
+        notifyAppSettingsDoc(docEntry.name);
+        return;
+      }
+      const cacheEntry = parseScenarioKey(QA_CACHE_STORAGE_PREFIX, event.key);
+      if (cacheEntry && cacheEntry.scenario === scenario) {
+        const state = ensureState();
+        if (event.newValue == null) {
+          state.localCache.delete(cacheEntry.name);
+          return;
+        }
+        try {
+          state.localCache.set(cacheEntry.name, JSON.parse(event.newValue));
+        } catch {
+          /* ignore malformed QA cache payloads */
+        }
+      }
+    });
+    storageSyncInstalled = true;
+  }
   if (!navigator.geolocation) {
     Object.defineProperty(navigator, 'geolocation', {
       configurable: true,
@@ -1232,7 +1383,18 @@ export function installContentPipelineQaRuntime(): void {
 }
 
 export function resetContentPipelineQaRuntime(scenario = getContentPipelineQaScenario()): void {
-  qaState = createScenarioState(scenario);
+  clearScenarioStorage(scenario);
+  qaState = mergeScenarioStorage(createScenarioState(scenario), scenario);
+  const state = qaState;
+  state.appSettingsDocs.forEach((value, key) => {
+    writeScenarioDocToStorage(scenario, key, value);
+  });
+  state.localCache.forEach((value, key) => {
+    writeScenarioCacheToStorage(scenario, key, value);
+  });
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(getQaScenarioInitKey(scenario), new Date().toISOString());
+  }
 }
 
 export function getQaSharedApiKey(): string {
@@ -1251,19 +1413,26 @@ export async function loadQaLocalCache<T>(key: string): Promise<T | null> {
 
 export async function saveQaLocalCache(key: string, value: unknown): Promise<void> {
   const state = ensureState();
-  state.localCache.set(normalizeQaDocId(key), clone(value));
+  const normalizedKey = normalizeQaDocId(key);
+  const nextValue = clone(value);
+  state.localCache.set(normalizedKey, nextValue);
+  writeScenarioCacheToStorage(getContentPipelineQaScenario(), normalizedKey, nextValue);
 }
 
 export async function deleteQaLocalCache(key: string): Promise<void> {
   const state = ensureState();
-  state.localCache.delete(normalizeQaDocId(key));
+  const normalizedKey = normalizeQaDocId(key);
+  state.localCache.delete(normalizedKey);
+  writeScenarioCacheToStorage(getContentPipelineQaScenario(), normalizedKey, null);
 }
 
 export async function setQaAppSettingsDoc(docId: string, data: QaDoc, options?: { merge?: boolean }): Promise<void> {
   const state = ensureState();
   const normalizedDocId = normalizeQaDocId(docId);
   const previous = state.appSettingsDocs.get(normalizedDocId) ?? {};
-  state.appSettingsDocs.set(normalizedDocId, options?.merge ? { ...clone(previous), ...clone(data) } : clone(data));
+  const nextValue = options?.merge ? { ...clone(previous), ...clone(data) } : clone(data);
+  state.appSettingsDocs.set(normalizedDocId, nextValue);
+  writeScenarioDocToStorage(getContentPipelineQaScenario(), normalizedDocId, nextValue);
   notifyAppSettingsDoc(normalizedDocId);
 }
 
@@ -1273,6 +1442,7 @@ export async function deleteQaAppSettingsFields(docId: string, fields: string[])
   const previous = clone(state.appSettingsDocs.get(normalizedDocId) ?? {});
   for (const field of fields) delete previous[field];
   state.appSettingsDocs.set(normalizedDocId, previous);
+  writeScenarioDocToStorage(getContentPipelineQaScenario(), normalizedDocId, previous);
   notifyAppSettingsDoc(normalizedDocId);
 }
 

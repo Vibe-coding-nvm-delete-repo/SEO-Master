@@ -1,0 +1,2047 @@
+{
+  "generatedAt": "2026-04-01T21:23:47.042Z",
+  "callsiteCount": 125,
+  "unknownCount": 0,
+  "callsites": [
+    {
+      "path": "src/appSettingsDocStore.ts",
+      "line": 107,
+      "operation": "getDoc",
+      "snippet": "getDoc(doc(db, 'app_settings', docId))",
+      "classification": {
+        "id": "app-settings-doc-store",
+        "path": "src/appSettingsDocStore.ts",
+        "status": "contract_managed",
+        "featureOwner": "shared-collab",
+        "purpose": "Low-level app_settings Firestore access behind the shared collaboration contract.",
+        "scope": "global_shared",
+        "userVisibleSharedState": true,
+        "migrationLane": "shared_app_settings"
+      }
+    },
+    {
+      "path": "src/appSettingsDocStore.ts",
+      "line": 120,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'app_settings', docId), data, options?.merge ? { merge: true } : undefined)",
+      "classification": {
+        "id": "app-settings-doc-store",
+        "path": "src/appSettingsDocStore.ts",
+        "status": "contract_managed",
+        "featureOwner": "shared-collab",
+        "purpose": "Low-level app_settings Firestore access behind the shared collaboration contract.",
+        "scope": "global_shared",
+        "userVisibleSharedState": true,
+        "migrationLane": "shared_app_settings"
+      }
+    },
+    {
+      "path": "src/appSettingsDocStore.ts",
+      "line": 129,
+      "operation": "updateDoc",
+      "snippet": "updateDoc(",
+      "classification": {
+        "id": "app-settings-doc-store",
+        "path": "src/appSettingsDocStore.ts",
+        "status": "contract_managed",
+        "featureOwner": "shared-collab",
+        "purpose": "Low-level app_settings Firestore access behind the shared collaboration contract.",
+        "scope": "global_shared",
+        "userVisibleSharedState": true,
+        "migrationLane": "shared_app_settings"
+      }
+    },
+    {
+      "path": "src/appSettingsDocStore.ts",
+      "line": 143,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(doc(db, 'app_settings', docId), onData, onError)",
+      "classification": {
+        "id": "app-settings-doc-store",
+        "path": "src/appSettingsDocStore.ts",
+        "status": "contract_managed",
+        "featureOwner": "shared-collab",
+        "purpose": "Low-level app_settings Firestore access behind the shared collaboration contract.",
+        "scope": "global_shared",
+        "userVisibleSharedState": true,
+        "migrationLane": "shared_app_settings"
+      }
+    },
+    {
+      "path": "src/changelogStorage.ts",
+      "line": 97,
+      "operation": "addDoc",
+      "snippet": "addDoc(collection(db, CHANGELOG_COLLECTION), {",
+      "classification": {
+        "id": "changelog-support",
+        "path": "src/changelogStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Release notes and build markers are support channels, not collaborative user workspace state.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/changelogStorage.ts",
+      "line": 112,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, BUILD_INFO_DOC_PATH), { name, updatedAt: new Date().toISOString() }, { merge: true })",
+      "classification": {
+        "id": "changelog-support",
+        "path": "src/changelogStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Release notes and build markers are support channels, not collaborative user workspace state.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/changelogStorage.ts",
+      "line": 130,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "changelog-support",
+        "path": "src/changelogStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Release notes and build markers are support channels, not collaborative user workspace state.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/changelogStorage.ts",
+      "line": 158,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "changelog-support",
+        "path": "src/changelogStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Release notes and build markers are support channels, not collaborative user workspace state.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/feedbackStorage.ts",
+      "line": 106,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "feedback-support",
+        "path": "src/feedbackStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/feedbackStorage.ts",
+      "line": 184,
+      "operation": "getDocs",
+      "snippet": "getDocs(collection(db, FEEDBACK_COLLECTION))",
+      "classification": {
+        "id": "feedback-support",
+        "path": "src/feedbackStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/feedbackStorage.ts",
+      "line": 207,
+      "operation": "setDoc",
+      "snippet": "setDoc(docRef, basePayload)",
+      "classification": {
+        "id": "feedback-support",
+        "path": "src/feedbackStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/feedbackStorage.ts",
+      "line": 233,
+      "operation": "setDoc",
+      "snippet": "setDoc(docRef, { ...basePayload, attachmentUrls: urls })",
+      "classification": {
+        "id": "feedback-support",
+        "path": "src/feedbackStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/feedbackStorage.ts",
+      "line": 247,
+      "operation": "setDoc",
+      "snippet": "setDoc(docRef, basePayload)",
+      "classification": {
+        "id": "feedback-support",
+        "path": "src/feedbackStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/feedbackStorage.ts",
+      "line": 258,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "feedback-support",
+        "path": "src/feedbackStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Feedback intake and moderation are support flows outside the user-to-user collaboration contract.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 39,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'app_settings/group_review_settings'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 43,
+      "operation": "getDoc",
+      "snippet": "getDoc(doc(db, 'app_settings/group_review_settings'))",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 48,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-open'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 54,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'project_folders/default'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 62,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-v2'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 71,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-v2/base_commits/commit-4'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 93,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-v2/base_commits/invalid-commit'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 119,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-entity'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 125,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-entity/collab/meta'), V2_META)",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 130,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-entity/groups/group-1'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 141,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-entity/groups/group-1'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 156,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-meta'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 162,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-meta/base_commits/commit-4'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 183,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-meta/base_commits/commit-5'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 204,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-meta/collab/meta'), V2_META)",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 209,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-meta/collab/meta'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 219,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(adminDb, 'projects/proj-meta/project_operations/current'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/firestore.rules.emulator.test.ts",
+      "line": 230,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, 'projects/proj-meta/collab/meta'), {",
+      "classification": {
+        "id": "firestore-rules-emulator-tests",
+        "path": "src/firestore.rules.emulator.test.ts",
+        "status": "test_or_qa_only",
+        "featureOwner": "qa",
+        "purpose": "Firestore emulator assertions exercise security rules and are intentionally outside the product collaboration runtime.",
+        "scope": "test_only",
+        "userVisibleSharedState": false,
+        "migrationLane": "tests"
+      }
+    },
+    {
+      "path": "src/notificationStorage.ts",
+      "line": 133,
+      "operation": "addDoc",
+      "snippet": "addDoc(collection(db, NOTIFICATIONS_COLLECTION), {",
+      "classification": {
+        "id": "notifications-support",
+        "path": "src/notificationStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Notifications are support/auxiliary feeds rather than shared editing truth.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/notificationStorage.ts",
+      "line": 154,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "notifications-support",
+        "path": "src/notificationStorage.ts",
+        "status": "internal_admin_or_support",
+        "featureOwner": "support",
+        "purpose": "Notifications are support/auxiliary feeds rather than shared editing truth.",
+        "scope": "auxiliary",
+        "userVisibleSharedState": false,
+        "migrationLane": "support"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 471,
+      "operation": "getDocs",
+      "snippet": "getDocs(projectCollection(projectId, subcollection))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 475,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 481,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 506,
+      "operation": "getDocs",
+      "snippet": "getDocs(collection(parentRef, subcollection))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 510,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 516,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 537,
+      "operation": "getDocs",
+      "snippet": "getDocs(projectCollection(projectId, subcollection))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 540,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 546,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 561,
+      "operation": "getDocs",
+      "snippet": "getDocs(collection(parentRef, subcollection))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 564,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 570,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 585,
+      "operation": "getDocs",
+      "snippet": "getDocs(projectCollection(projectId, PROJECT_BASE_COMMITS_COLLECTION))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 592,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 598,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 613,
+      "operation": "getDocs",
+      "snippet": "getDocs(query(projectCollection(projectId, subcollection), where('datasetEpoch', '==', datasetEpoch)))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 616,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 622,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 639,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 645,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 666,
+      "operation": "getDocs",
+      "snippet": "getDocs(projectCollection(projectId, PROJECT_BASE_COMMITS_COLLECTION))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 688,
+      "operation": "deleteDoc",
+      "snippet": "deleteDoc(commitDoc.ref)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 705,
+      "operation": "getDocs",
+      "snippet": "getDocs(query(projectCollection(projectId, subcollection), where('datasetEpoch', '<', minEpochToKeep)))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 722,
+      "operation": "getDocs",
+      "snippet": "getDocs(source)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1061,
+      "operation": "setDoc",
+      "snippet": "setDoc(baseCommitDoc(projectId, commitId), sanitizeJsonForFirestore(writingManifest))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1078,
+      "operation": "setDoc",
+      "snippet": "setDoc(baseCommitDoc(projectId, commitId), sanitizeJsonForFirestore(readyManifest))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1162,
+      "operation": "getDoc",
+      "snippet": "getDoc(baseCommitDoc(projectId, commitId))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1163,
+      "operation": "getDocs",
+      "snippet": "getDocs(baseCommitChunksCollection(projectId, commitId))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1245,
+      "operation": "getDoc",
+      "snippet": "getDoc(collabMetaDoc(projectId))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1268,
+      "operation": "getDoc",
+      "snippet": "getDoc(operationLockDoc(projectId))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1313,
+      "operation": "setDoc",
+      "snippet": "setDoc(collabMetaDoc(projectId), sanitizeJsonForFirestore(nextMeta))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1335,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1341,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1381,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (tx) => {",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1429,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (tx) => {",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1525,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 1755,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (tx): Promise<NonNullable<CanonicalProjectState['diagnostics']>> => {",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2171,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (tx): Promise<RevisionedDocAck<T>> => {",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2216,
+      "operation": "setDoc",
+      "snippet": "setDoc(",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2235,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2241,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2277,
+      "operation": "deleteDoc",
+      "snippet": "deleteDoc(collabMetaDoc(projectId))",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2285,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (tx) => {",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2.ts",
+      "line": 2309,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (tx) => {",
+      "classification": {
+        "id": "project-collab-v2",
+        "path": "src/projectCollabV2.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Authoritative shared project V2 canonical/entity writes and reads.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 92,
+      "operation": "getDoc",
+      "snippet": "getDoc(collabMetaRef(projectId))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 102,
+      "operation": "setDoc",
+      "snippet": "setDoc(collabMetaRef(projectId), sanitizeJsonForFirestore(meta))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 120,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (txn) => {",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 212,
+      "operation": "setDoc",
+      "snippet": "setDoc(baseCommitRef(projectId, commitId), sanitizeJsonForFirestore(manifest))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 241,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 250,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 269,
+      "operation": "setDoc",
+      "snippet": "setDoc(baseCommitRef(projectId, commitId), sanitizeJsonForFirestore(readyManifest))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 282,
+      "operation": "getDoc",
+      "snippet": "getDoc(baseCommitRef(projectId, commitId))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 294,
+      "operation": "getDocs",
+      "snippet": "getDocs(baseCommitChunksRef(projectId, commitId))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 325,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (txn) => {",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 409,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(colRef, scopedId), sanitizeJsonForFirestore(entry))",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 425,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 434,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 466,
+      "operation": "getDocs",
+      "snippet": "getDocs(q)",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 524,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (txn) => {",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 567,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (txn) => {",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectCollabV2Storage.ts",
+      "line": 593,
+      "operation": "runTransaction",
+      "snippet": "runTransaction(db, async (txn) => {",
+      "classification": {
+        "id": "project-collab-v2-storage",
+        "path": "src/projectCollabV2Storage.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Low-level shared project V2 storage helpers behind the collaboration contract.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/projectMetadataCollab.ts",
+      "line": 28,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "project-metadata-collab",
+        "path": "src/projectMetadataCollab.ts",
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata collection listener routed through the shared collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 463,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, APP_SETTINGS_COLLECTION, PROJECT_FOLDERS_FS_DOC), {",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 480,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 496,
+      "operation": "setDoc",
+      "snippet": "setDoc(",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 508,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), projectMetaForFirestore(revived))",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 525,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, project.id), projectMetaForFirestore(project))",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 536,
+      "operation": "deleteDoc",
+      "snippet": "deleteDoc(doc(db, FIRESTORE_PROJECTS_COLLECTION, projectId))",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 544,
+      "operation": "setDoc",
+      "snippet": "setDoc(doc(db, APP_SETTINGS_COLLECTION, APP_PREFS_DOC), {",
+      "classification": {
+        "id": "project-storage-shared-metadata",
+        "path": "src/projectStorage.ts",
+        "startLine": 463,
+        "endLine": 544,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Project metadata and project folder writes behind the collaboration contract.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 574,
+      "operation": "getDocFromServer",
+      "snippet": "getDocFromServer(doc(db, APP_SETTINGS_COLLECTION, APP_PREFS_DOC))",
+      "classification": {
+        "id": "project-storage-workspace-preferences",
+        "path": "src/projectStorage.ts",
+        "startLine": 545,
+        "endLine": 574,
+        "status": "contract_managed",
+        "featureOwner": "shared-app-settings",
+        "purpose": "Workspace preference remote read/write helpers used by the shared app_settings contract.",
+        "scope": "global_shared",
+        "userVisibleSharedState": true,
+        "migrationLane": "shared_app_settings"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 634,
+      "operation": "getDocs",
+      "snippet": "getDocs(chunksRef)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 685,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 693,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 766,
+      "operation": "getDocFromServer",
+      "snippet": "getDocFromServer(",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 790,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 798,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 824,
+      "operation": "getDocsFromServer",
+      "snippet": "getDocsFromServer(chunksRef)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 826,
+      "operation": "getDocs",
+      "snippet": "getDocs(chunksRef)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 839,
+      "operation": "getDocs",
+      "snippet": "getDocs(chunksRef)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 842,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 849,
+      "operation": "writeBatch",
+      "snippet": "writeBatch(db)",
+      "classification": {
+        "id": "project-storage-legacy-project-chunks",
+        "path": "src/projectStorage.ts",
+        "startLine": 634,
+        "endLine": 849,
+        "status": "out_of_scope_non_collab",
+        "featureOwner": "project-storage",
+        "purpose": "Legacy project chunk persistence for non-collaborative workspace data.",
+        "scope": "out_of_scope",
+        "userVisibleSharedState": false,
+        "migrationLane": "none"
+      }
+    },
+    {
+      "path": "src/projectStorage.ts",
+      "line": 862,
+      "operation": "getDocs",
+      "snippet": "getDocs(collection(db, FIRESTORE_PROJECTS_COLLECTION))",
+      "classification": {
+        "id": "project-storage-project-bootstrap",
+        "path": "src/projectStorage.ts",
+        "startLine": 862,
+        "endLine": 862,
+        "status": "contract_managed",
+        "featureOwner": "project-metadata",
+        "purpose": "Projects collection bootstrap read used by the shared project metadata lane.",
+        "scope": "project_metadata",
+        "userVisibleSharedState": true,
+        "migrationLane": "project_metadata"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 2575,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 2863,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 2891,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 2919,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 2947,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 2975,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 3003,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 3052,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    },
+    {
+      "path": "src/useProjectPersistence.ts",
+      "line": 3338,
+      "operation": "onSnapshot",
+      "snippet": "onSnapshot(",
+      "classification": {
+        "id": "use-project-persistence",
+        "path": "src/useProjectPersistence.ts",
+        "status": "contract_managed",
+        "featureOwner": "group-v2",
+        "purpose": "Shared project V2 listeners and write guards exposed to the app-facing persistence APIs.",
+        "scope": "project_group_v2",
+        "userVisibleSharedState": true,
+        "migrationLane": "group_project_v2"
+      }
+    }
+  ]
+}

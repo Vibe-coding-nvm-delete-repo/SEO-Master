@@ -60,7 +60,7 @@ describe('ProjectsTab', () => {
     addToast: vi.fn(),
   };
 
-  it('moves projects to unassigned when removing a folder', async () => {
+  it('[project-folders-two-session] moves projects to unassigned when removing a folder', async () => {
     const projects: Project[] = [
       {
         id: 'p1',

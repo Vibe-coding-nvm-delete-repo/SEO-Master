@@ -28,8 +28,68 @@ Validation gate for this contract:
 - `npx tsc --noEmit`
 - `npx vitest run`
 - `npx vite build`
+- `npm run collab:gate` (includes census/audit/coverage + convergence runtime checks)
 
 Latest run status should always be read from CI or the most recent local run output, not from hard-coded counts in this document.
+
+---
+
+## 2026-04-01 Convergence Hardening Addendum
+
+This addendum documents the permanent hardening work that followed recurring
+reports of cross-user desync in shared projects.
+
+### Root-cause class addressed
+
+- Initial shared bootstrap could observe a `collab/meta` snapshot while
+  bootstrap was still unresolved, skip actionable work, and depend on a future
+  meta event to recover.
+- Listener readiness bookkeeping could be reset during reattach, leaving a
+  client non-authoritative even after authoritative canonical data had loaded.
+- Shared edit paths needed a strict fail-closed guard until authoritative
+  readiness is true.
+
+### Implementation decisions
+
+- **Skip-and-forget was replaced by queue-and-drain** for bootstrap `collab/meta`
+  snapshots.
+- **Deterministic listener attach trigger** was added after authoritative
+  canonical activation.
+- **Shared readiness preservation** was added across listener reattach for
+  already-authoritative state.
+- **Strict shared write gating** now blocks shared edits while readiness is not
+  authoritative.
+- **Legacy/non-shared behavior remains unchanged**; strict readiness gating is
+  scoped to shared projects.
+
+### Forensics and observability additions
+
+- A durable, bounded browser diagnostics journal now records:
+  - authoritative sync transitions
+  - shared project phase/readiness transitions
+  - server listener snapshots
+  - listener errors and clears
+  - listener-apply events
+  - shared mutation accepted/blocked/failed outcomes
+- Entries are stamped with runtime `sessionId` and `runId`.
+- Support/debug extraction helpers:
+  - `window.__kwgCollabDiagnostics.read(limit?)`
+  - `window.__kwgCollabDiagnostics.clear()`
+
+### Release/process hardening
+
+- `collab:gate` now enforces runtime convergence checks, not only static census.
+- `collab:release-gate` now begins with the stricter `collab:gate`, then runs
+  full typecheck, test suite, and build.
+
+### Verification matrix enforced
+
+- Shared app settings integration convergence tests
+- Project metadata convergence tests
+- Shared project app integration convergence tests
+- V2 persistence convergence and race regression tests
+- Firestore emulator rules tests
+- Browser two-session collaboration E2E tests
 
 ---
 
@@ -190,6 +250,7 @@ When a V2 project cannot load a ready canonical epoch, the recovery workflow **a
 Guardrails for the live meta listener:
 - meta-driven reloads must use the same recovery-capable canonical path as bootstrap/conflict reloads when a lightweight epoch load is null or unresolved; do not rely on `loadCanonicalEpoch` alone for listener-driven recovery
 - when a listener sees a newer `collab/meta` revision, only attach new epoch listeners from the final authoritative resolved meta state for that epoch
+- while a meta-driven reload is in flight, routine shared edits may stay writable only if the current `collab/meta` still points at the same `datasetEpoch/baseCommitId` as the last acknowledged writable canonical base already loaded in memory; if meta has advanced to a different base commit or epoch, the persistence boundary must fail closed until that canonical load finishes
 - when a listener sees `readMode` change from `'v2'` to `'legacy'`, immediately clear `isWriteUnsafe` and unlock writes
 - UI success messaging for grouping/approve/unapprove/ungroup flows must only run after the mutation is actually accepted by the persistence boundary; blocked shared writes must preserve user selection/input and surface only the read-only warning
 
@@ -321,7 +382,8 @@ Current state:
 - unit and hook regression coverage is strong
 
 What is left:
-- optional multi-client browser-level verification for lock/epoch transitions if we want end-to-end smoke coverage beyond the current test suite
+- browser-level multi-client verification is required release-gate coverage for user-visible shared state; one-runtime integration tests are not enough for cross-profile convergence bugs
+- the current QA browser harness still uses per-context local state for some shared-doc simulations, so true separate-profile/browser-cache verification remains an explicit follow-up harness limitation, not an optional nice-to-have
 
 ---
 
@@ -335,6 +397,9 @@ The current implementation is intended to guarantee the following within the lim
 - same-client rapid V2 writes do not depend on listener timing to use the right revision
 - V2 write paths reject mutation attempts during foreign bulk locks
 - V2 projects do not accept legacy whole-project writes from this client code path once schema cutover is active
+- shared project health does not count as authoritative until `collab/meta`, `project_operations/current`, and each required active-epoch entity collection have seen their first server-authoritative apply
+- first server-authoritative entity snapshots replace stale cached collection state before incremental `docChanges()` merges resume
+- project-scoped Generate/Content shared docs may use local cache only as provisional bootstrap; hidden idle surfaces must not own shared listeners or bootstrap writes
 
 ---
 

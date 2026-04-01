@@ -7,9 +7,8 @@ import * as XLSX from 'xlsx';
 import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check, DollarSign, Inbox, Bell } from 'lucide-react';
 import { numberMap, stateMap, stateAbbrToFull, stateFullNames, stopWords, ignoredTokens, synonymMap, countries } from './dictionaries';
 import { citySet, cityFirstWords, stateSet, capitalizeWords, normalizeState, detectForeignEntity, normalizeKeywordToTokenArr, getLabelColor } from './processing';
-import { auth, db, googleProvider } from './firebase';
+import { auth, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { doc, setDoc, deleteDoc, onSnapshot, query, where, getDoc, getDocFromServer, addDoc, serverTimestamp, getDocs, writeBatch } from 'firebase/firestore';
 import GenerateTab from './GenerateTab';
 import ContentTab from './ContentTab';
 import FeedbackTab from './FeedbackTab';
@@ -45,27 +44,15 @@ import {
   formatKeywordRatingDuration,
 } from './KeywordRatingEngine';
 import {
-  buildProjectDataPayloadFromChunkDocs,
-  loadProjectDataFromFirestore,
-  saveAppPrefsToFirestore,
-  saveAppPrefsToIDB,
-  saveToIDB,
-  type ProjectDataPayload,
 } from './projectStorage';
 import {
   createEmptyProjectViewState,
-  loadProjectDataForView,
   loadSavedWorkspacePrefs,
   toProjectViewState,
   type ProjectViewState,
 } from './projectWorkspace';
 import { useProjectPersistence } from './useProjectPersistence';
 import {
-  appSettingsIdbKey,
-  cacheStateLocallyBestEffort,
-  loadCachedState,
-  persistAppSettingsDoc,
-  subscribeAppSettingsDoc,
 } from './appSettingsPersistence';
 import { parseTokenMgmtSearchTerms, tokenIncludesAnyTerm } from './tokenMgmtSearch';
 import { parseSubClusterKey } from './subClusterKeys';
@@ -937,6 +924,7 @@ export default function App() {
     activeProjectId, flushNow,
     setTokenMgmtSubTab, setTokenMgmtPage,
     handleUndoMergeParent,
+    runWithExclusiveOperation,
   });
 
   const {
@@ -1083,13 +1071,13 @@ export default function App() {
 
   const {
     canRunFilteredAutoGroup,
+    filteredAutoGroupButtonTitle,
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue,
     filteredAutoGroupSettingsStatus,
     filteredAutoGroupStats,
     handleRunFilteredAutoGroup,
     handleStopFilteredAutoGroup,
-    isFilteredAutoGroupFilterActive,
     isRunningFilteredAutoGroup,
   } = useFilteredAutoGroupFlow({
     filteredClusters,
@@ -1123,14 +1111,21 @@ export default function App() {
     runWithExclusiveOperation,
   });
 
+  const canRunTokenAutoMerge = Boolean(results?.length) && !isBulkSharedEditBlocked && autoMergeJob.phase !== 'running';
+
   useGlobalGroupingShortcuts({
     activeTab,
+    tokenMgmtSubTab,
     canRunManualGroup,
     canApproveGrouped,
     canRunFilteredAutoGroup,
+    canRunTokenAutoMerge,
     handleGroupClusters,
     approveSelectedGrouped,
     handleRunFilteredAutoGroup,
+    handleRunTokenAutoMerge: () => {
+      void runAutoMergeRecommendations();
+    },
   });
 
   const pendingGroupMergeRecommendationsCount = groupMergeRecommendations.filter(
@@ -1246,6 +1241,7 @@ export default function App() {
     exportTokensCSV,
     fileName,
     filteredApprovedGroups,
+    filteredAutoGroupButtonTitle,
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue,
     filteredAutoGroupSettingsStatus,
@@ -1294,7 +1290,6 @@ export default function App() {
     handleUndoMergeParent,
     handleUnblockTokens,
     isDragging,
-    isFilteredAutoGroupFilterActive,
     isLabelDropdownOpen,
     isLabelSidebarOpen,
     isMergeModalOpen,
@@ -1846,9 +1841,7 @@ export default function App() {
             impact={results && clusterSummary ? computeMergeImpact(results, groupedClusters, approvedGroups, mergeModalTokens[0], mergeModalTokens.slice(1)) : { pagesAffected: 0, groupsAffected: 0, approvedGroupsAffected: 0, pageCollisions: 0 }}
             universalBlockedTokens={universalBlockedTokens}
             onConfirm={(parentToken) => {
-              void runWithExclusiveOperation('token-merge', async () => {
-                handleMergeTokens(parentToken);
-              });
+              void runWithExclusiveOperation('token-merge', () => handleMergeTokens(parentToken));
             }}
             onCancel={() => { setIsMergeModalOpen(false); setMergeModalTokens([]); }}
           />
@@ -1857,9 +1850,4 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
 

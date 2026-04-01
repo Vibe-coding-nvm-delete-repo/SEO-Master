@@ -1,6 +1,6 @@
 import { loadGeneratePrimaryPrompt } from './contentPipelineH2';
 import { METAS_SLUG_CTAS_ROWS_DOC_ID } from './contentPipelineMetasSlugCtas';
-import { loadChunkedAppSettingsRows } from './appSettingsDocStore';
+import { loadAppSettingsRows } from './appSettingsPersistence';
 import { hasMeaningfulContent } from './contentReadiness';
 import { canReusePersistedDerivedRowState } from './contentPipelineReuse';
 import { mergeCanonicalH2Context } from './contentPipelineContext';
@@ -197,7 +197,10 @@ export function mergeDerivedWithPersistedTipsRedflagsRows(
 }
 
 async function loadRowsFromFirestore<T>(docId: string): Promise<T[]> {
-  return loadChunkedAppSettingsRows<T>(docId);
+  return loadAppSettingsRows<T>({
+    docId,
+    registryKind: 'rows',
+  });
 }
 
 export async function loadMetasRowsForTipsFromFirestore(

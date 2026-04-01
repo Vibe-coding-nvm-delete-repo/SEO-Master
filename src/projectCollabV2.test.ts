@@ -5,10 +5,11 @@ import {
   buildEntityStateFromResolvedPayload,
   buildGroupDocChanges,
   buildManualBlockedKeywordDocChanges,
+  normalizeCollabMetaForRecoveryWrite,
   type ProjectCollabEntityState,
 } from './projectCollabV2';
 import type { ProjectDataPayload } from './projectStorage';
-import type { BlockedKeyword, ClusterSummary, GroupedCluster, ProjectGroupDoc } from './types';
+import type { BlockedKeyword, ClusterSummary, GroupedCluster, ProjectCollabMetaDoc, ProjectGroupDoc } from './types';
 
 function makeCluster(tokens: string, pageName = tokens): ClusterSummary {
   return {
@@ -235,5 +236,53 @@ describe('projectCollabV2', () => {
     expect(first[0].kind).toBe('upsert');
     expect(second[0].kind).toBe('upsert');
     expect(first[0].id).toBe(second[0].id);
+  });
+});
+
+describe('normalizeCollabMetaForRecoveryWrite', () => {
+  it('fills requiredClientSchema and schemaVersion when omitted (Firestore rules require them)', () => {
+    const thin = {
+      revision: 4,
+      datasetEpoch: 3,
+      baseCommitId: null,
+      readMode: 'v2' as const,
+      commitState: 'writing' as const,
+      migrationState: 'running' as const,
+      lastMigratedAt: '2026-03-31T00:00:00.000Z',
+      migrationOwnerClientId: null,
+      migrationStartedAt: null,
+      migrationHeartbeatAt: null,
+      migrationExpiresAt: null,
+      updatedAt: '2026-03-31T00:00:00.000Z',
+      updatedByClientId: 'c1',
+      lastMutationId: null,
+    } as unknown as ProjectCollabMetaDoc;
+
+    const out = normalizeCollabMetaForRecoveryWrite(thin);
+    expect(out.schemaVersion).toBe(2);
+    expect(out.requiredClientSchema).toBe(2);
+    expect(out.revision).toBe(4);
+    expect(out.datasetEpoch).toBe(3);
+  });
+
+  it('coerces invalid commitState to writing', () => {
+    const bad = {
+      revision: 1,
+      datasetEpoch: 1,
+      baseCommitId: null,
+      readMode: 'v2' as const,
+      commitState: 'bogus' as any,
+      migrationState: 'running' as const,
+      lastMigratedAt: '2026-03-31T00:00:00.000Z',
+      migrationOwnerClientId: null,
+      migrationStartedAt: null,
+      migrationHeartbeatAt: null,
+      migrationExpiresAt: null,
+      updatedAt: '2026-03-31T00:00:00.000Z',
+      updatedByClientId: 'c1',
+      lastMutationId: null,
+    } as unknown as ProjectCollabMetaDoc;
+
+    expect(normalizeCollabMetaForRecoveryWrite(bad).commitState).toBe('writing');
   });
 });

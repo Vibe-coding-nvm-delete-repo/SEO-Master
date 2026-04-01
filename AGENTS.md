@@ -9,6 +9,7 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 3. [`CONTRIBUTING.md`](./CONTRIBUTING.md) — workflow, file layout, testing requirements, technical debt prevention.
 4. [`ARCHITECTURE.md`](./ARCHITECTURE.md) — data flow, storage shape, where logic should live.
 5. [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) — authoritative shared-project persistence contract, recovery limits, and rollout rules.
+6. Local Codex skill `bug-fixing` (if installed at `$CODEX_HOME/skills/bug-fixing`) — mandatory for bug investigation / debugging / repair sessions.
 
 ## Non‑negotiables (summary)
 
@@ -18,9 +19,11 @@ This file is the **entry point** for anyone (human or agent) implementing featur
 - **Bootstrap guards:** Any feature that combines async local fallback (IndexedDB/localStorage) with a Firestore listener must use an explicit “Firestore is authoritative” guard so an initial empty/missing snapshot cannot wipe good local state during startup.
 - **Multi-user:** Treat Firestore as source of truth for shared projects; design for concurrent editors.
 - **Shared-project V2:** Before touching shared-project persistence, read `SHARED_PROJECT_COLLAB_V2.md` and preserve the commit-barrier model. Do not reintroduce whole-project mutable snapshot semantics or legacy fallback reads in V2 mode.
+- **Shared collaboration contract:** New app-facing Firestore listeners/writes must be classified by the Firestore census and routed through the shared collaboration contract. Raw `firebase/firestore` primitives belong only in approved infrastructure modules.
 - **No mixed-mode bootstrap writes:** Shared-project bootstrap must not allow legacy whole-project writes before storage mode resolves. Preserve the startup write barrier in `useProjectPersistence.ts`.
 - **No hidden idle shared-runtime work:** Mounted-but-hidden Generate/Content surfaces must not perform shared listeners, upstream auto-sync, model metadata fetches, or persistence work unless visible or actively busy.
 - **Verification before “done”:** `npx tsc --noEmit`, `npx vitest run`, `npx vite build` — zero new errors/failures.
+- **Collaboration gate before release work:** `npm run collab:gate` must stay clean; do not add or ship unknown Firestore callsites.
 - **FEATURES.md:** Update when user-visible behavior changes ([`FEATURES.md`](./FEATURES.md)).
 
 ## Technical debt prevention
@@ -50,6 +53,8 @@ If a feature touches **Firestore chunk layout** or **IDB schema**, you must upda
 ## Bug Fix Protocol (mandatory for all bug fixes)
 
 **Every bug fix must follow this protocol. Jumping straight to code is not allowed.**
+
+**Skill requirement:** If the local Codex skill `bug-fixing` is available, invoke it for every bug/debug/regression investigation before making changes. Treat the skill and this protocol as cumulative requirements.
 
 This protocol exists because the natural tendency — see symptom, patch the line, move on — produces shallow fixes that leave the root cause intact and miss sibling instances of the same bug. Each phase counters a specific failure mode:
 

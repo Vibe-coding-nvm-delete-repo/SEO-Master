@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, BarChart3, CircleDollarSign, Clock3, Code2, FileCode2, FileText, Layers3, MessageSquareQuote, NotebookPen, OctagonAlert, PanelTop, ScrollText, Sparkles, TrendingUp } from 'lucide-react';
-import { loadChunkedAppSettingsRows } from './appSettingsDocStore';
-import { APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, appSettingsIdbKey, loadCachedState, subscribeAppSettingsDoc } from './appSettingsPersistence';
+import { APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, loadAppSettingsRows, subscribeAppSettingsDoc } from './appSettingsPersistence';
 import { H1_BODY_ROWS_DOC_ID } from './contentPipelineH1';
 import { H1_HTML_ROWS_DOC_ID } from './contentPipelineH1Html';
 import { H2_CONTENT_ROWS_DOC_ID, H2_RATING_ROWS_DOC_ID, UPSTREAM_PAGE_NAMES_DOC_ID } from './contentPipelineH2';
@@ -220,9 +219,11 @@ function ProgressLine({
 export default function ContentOverviewPanel({
   activeProjectId,
   onStageSelect,
+  runtimeEffectsActive = true,
 }: {
   activeProjectId: string | null;
   onStageSelect?: (stageId: string) => void;
+  runtimeEffectsActive?: boolean;
 }) {
   const [overviewInputs, setOverviewInputs] = useState<ContentOverviewInputs | null>(null);
   const [loading, setLoading] = useState(true);
@@ -234,15 +235,12 @@ export default function ContentOverviewPanel({
 
   const loadOverviewInputs = useCallback(async (mode: 'remote' | 'local-preferred' = 'remote') => {
     setLoadError(null);
-    const loadRows = async (docId: string) => {
-      if (mode === 'local-preferred') {
-        const cached = await loadCachedState<OverviewRow[]>({
-          idbKey: appSettingsIdbKey(docId),
-        });
-        if (Array.isArray(cached)) return cached;
-      }
-      return loadChunkedAppSettingsRows<OverviewRow>(docId);
-    };
+    const loadRows = async (docId: string) => loadAppSettingsRows<OverviewRow>({
+      docId,
+      loadMode: mode,
+      registryKind: 'rows',
+      allowProjectScopedLocalCache: mode === 'local-preferred',
+    });
     const [
       pages,
       h2Content,
@@ -286,8 +284,15 @@ export default function ContentOverviewPanel({
 
   useEffect(() => {
     let active = true;
+    if (!runtimeEffectsActive) {
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
 
     const refresh = async () => {
+      setLoading(true);
       setLoadError(null);
       try {
         await loadOverviewInputs();
@@ -330,7 +335,7 @@ export default function ContentOverviewPanel({
       unsubscribers.forEach((unsubscribe) => unsubscribe());
       window.removeEventListener(APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, handleLocalRowsUpdated as EventListener);
     };
-  }, [loadOverviewInputs, overviewDocIds]);
+  }, [loadOverviewInputs, overviewDocIds, runtimeEffectsActive]);
 
   const summary = useMemo(() => buildContentOverview(overviewInputs ?? EMPTY_OVERVIEW_INPUTS), [overviewInputs]);
 

@@ -7,6 +7,14 @@
 
 import { WORKSPACE_FIRESTORE_DATABASE_ID } from './firestoreDbConfig';
 import { beginRuntimeTrace, traceRuntimeEvent } from './runtimeTrace';
+import type { SharedChannelKind, SharedScope } from './sharedCollaboration';
+import type { SharedMutationResult } from './sharedMutation';
+import {
+  appendCollaborationDiagnostic,
+  clearCollaborationDiagnostics as clearCollabDiagnosticsJournal,
+  getCollaborationDiagnostics as getCollabDiagnosticsJournal,
+  type CollabDiagnosticEntry,
+} from './collabDiagnosticsLog';
 
 const subscribers = new Set<() => void>();
 
@@ -86,6 +94,16 @@ export type CloudSyncChannel = {
   domain: CloudSyncChannelDomain;
   headline: CloudSyncChannelHeadline;
   reachability: CloudSyncReachabilityScope;
+};
+
+export type SharedAuthoritativeBootstrapSource = 'empty' | 'local-cache' | 'server-authoritative';
+export type SharedAuthoritativePhase = 'inactive' | 'connecting' | 'provisional-cache' | 'converging' | 'authoritative';
+
+type SharedProjectSyncState = {
+  activeProjectId: string | null;
+  bootstrapSource: SharedAuthoritativeBootstrapSource;
+  authoritativeReady: boolean;
+  pendingKeys: readonly string[];
 };
 
 type StaticChannelId = Exclude<CloudSyncChannelId, `${string}:${string}`>;
@@ -317,11 +335,23 @@ export function resolveCloudSyncChannel(id: CloudSyncChannelId): CloudSyncChanne
 }
 
 const listenerErrorChannels = new Set<CloudSyncChannelId>();
+const collaborationChannelHealth = new Map<string, CollaborationChannelHealth>();
+
+export type ProjectAuthoritativeSyncPhase =
+  | 'idle'
+  | 'provisional-cache'
+  | 'connecting'
+  | 'converging'
+  | 'synced';
 
 let revision = 0;
 let projectServerReachable = false;
 let sharedServerReachable = false;
 let auxiliaryServerReachable = false;
+let projectAuthoritativeSyncEnabled = false;
+let projectAuthoritativeSyncReady = false;
+let projectAuthoritativeSyncPhase: ProjectAuthoritativeSyncPhase = 'idle';
+let projectAuthoritativePendingTargets: string[] = [];
 
 let projectFlushDepth = 0;
 let projectCloudWritePendingCount = 0;
@@ -335,6 +365,44 @@ let sharedLastCloudWriteOkAtMs: number | null = null;
 let localWritePendingCount = 0;
 let localWriteFailed = false;
 let localLastWriteOkAtMs: number | null = null;
+let sharedProjectSyncState: SharedProjectSyncState = {
+  activeProjectId: null,
+  bootstrapSource: 'empty',
+  authoritativeReady: false,
+  pendingKeys: [],
+};
+
+export type CollaborationChannelHealth = {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+  lastAcceptedWriteAtMs: number | null;
+  lastListenerApplyAtMs: number | null;
+  lastBlockedReason: string | null;
+  lastFailedReason: string | null;
+};
+
+function ensureCollaborationChannelHealth(seed: {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+}): CollaborationChannelHealth {
+  const existing = collaborationChannelHealth.get(seed.actionId);
+  if (existing) return existing;
+  const next: CollaborationChannelHealth = {
+    ...seed,
+    lastAcceptedWriteAtMs: null,
+    lastListenerApplyAtMs: null,
+    lastBlockedReason: null,
+    lastFailedReason: null,
+  };
+  collaborationChannelHealth.set(seed.actionId, next);
+  return next;
+}
 
 function sortChannels(channels: readonly CloudSyncChannel[]): readonly CloudSyncChannel[] {
   return [...channels].sort((a, b) => a.label.localeCompare(b.label));
@@ -352,10 +420,19 @@ export function subscribeCloudSync(onChange: () => void): () => void {
 }
 
 export function resetServerReachOnBrowserOnline(): void {
-  if (!projectServerReachable && !sharedServerReachable && !auxiliaryServerReachable) return;
+  if (
+    !projectServerReachable &&
+    !sharedServerReachable &&
+    !auxiliaryServerReachable &&
+    (!projectAuthoritativeSyncEnabled || (!projectAuthoritativeSyncReady && projectAuthoritativeSyncPhase === 'idle'))
+  ) return;
   projectServerReachable = false;
   sharedServerReachable = false;
   auxiliaryServerReachable = false;
+  if (projectAuthoritativeSyncEnabled) {
+    projectAuthoritativeSyncReady = false;
+    projectAuthoritativeSyncPhase = 'connecting';
+  }
   markStateChanged();
 }
 
@@ -370,6 +447,14 @@ export function markListenerSnapshot(
   const channel = resolveCloudSyncChannel(channelId);
   let changed = listenerErrorChannels.delete(channel.id);
   if (snap?.metadata?.fromCache === false) {
+    appendCollaborationDiagnostic({
+      kind: 'listener-snapshot-server',
+      channelId,
+      data: {
+        domain: channel.domain,
+        reachability: channel.reachability,
+      },
+    });
     if (channel.reachability === 'project' && !projectServerReachable) {
       projectServerReachable = true;
       changed = true;
@@ -384,15 +469,59 @@ export function markListenerSnapshot(
   if (changed) markStateChanged();
 }
 
+type ProjectAuthoritativeSyncUpdate = {
+  enabled: boolean;
+  ready: boolean;
+  phase: ProjectAuthoritativeSyncPhase;
+  pendingTargets?: readonly string[];
+};
+
+export function setProjectAuthoritativeSyncState(update: ProjectAuthoritativeSyncUpdate): void {
+  const nextPending = [...(update.pendingTargets ?? [])].sort();
+  const pendingChanged =
+    nextPending.length !== projectAuthoritativePendingTargets.length ||
+    nextPending.some((target, index) => target !== projectAuthoritativePendingTargets[index]);
+  if (
+    projectAuthoritativeSyncEnabled === update.enabled &&
+    projectAuthoritativeSyncReady === update.ready &&
+    projectAuthoritativeSyncPhase === update.phase &&
+    !pendingChanged
+  ) {
+    return;
+  }
+  projectAuthoritativeSyncEnabled = update.enabled;
+  projectAuthoritativeSyncReady = update.ready;
+  projectAuthoritativeSyncPhase = update.phase;
+  projectAuthoritativePendingTargets = nextPending;
+  appendCollaborationDiagnostic({
+    kind: 'authoritative-sync-state',
+    data: {
+      enabled: update.enabled,
+      ready: update.ready,
+      phase: update.phase,
+      pendingTargets: nextPending,
+    },
+  });
+  markStateChanged();
+}
+
 export function markListenerError(channelId: CloudSyncChannelId): void {
   if (listenerErrorChannels.has(channelId)) return;
   listenerErrorChannels.add(channelId);
+  appendCollaborationDiagnostic({
+    kind: 'listener-error',
+    channelId,
+  });
   markStateChanged();
 }
 
 export function clearListenerError(channelId: CloudSyncChannelId): void {
   if (!listenerErrorChannels.has(channelId)) return;
   listenerErrorChannels.delete(channelId);
+  appendCollaborationDiagnostic({
+    kind: 'listener-error-cleared',
+    channelId,
+  });
   markStateChanged();
 }
 
@@ -558,6 +687,100 @@ export function recordSharedCloudWriteError(): void {
   if (changed) markStateChanged();
 }
 
+export function recordCollaborationMutationResult(args: {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+  result: SharedMutationResult;
+}): void {
+  const channel = ensureCollaborationChannelHealth(args);
+  let changed = false;
+  if (args.result.status === 'accepted') {
+    appendCollaborationDiagnostic({
+      kind: 'mutation-accepted',
+      actionId: args.actionId,
+      data: {
+        scope: args.scope,
+        channelKind: args.channelKind,
+        storageChannel: args.storageChannel,
+      },
+    });
+    const now = Date.now();
+    if (channel.lastAcceptedWriteAtMs !== now) {
+      channel.lastAcceptedWriteAtMs = now;
+      changed = true;
+    }
+    if (channel.lastBlockedReason !== null) {
+      channel.lastBlockedReason = null;
+      changed = true;
+    }
+    if (channel.lastFailedReason !== null) {
+      channel.lastFailedReason = null;
+      changed = true;
+    }
+  } else if (args.result.status === 'blocked') {
+    appendCollaborationDiagnostic({
+      kind: 'mutation-blocked',
+      actionId: args.actionId,
+      data: {
+        reason: args.result.reason,
+        scope: args.scope,
+        channelKind: args.channelKind,
+        storageChannel: args.storageChannel,
+      },
+    });
+    if (channel.lastBlockedReason !== args.result.reason) {
+      channel.lastBlockedReason = args.result.reason;
+      changed = true;
+    }
+  } else {
+    appendCollaborationDiagnostic({
+      kind: 'mutation-failed',
+      actionId: args.actionId,
+      data: {
+        reason: args.result.reason,
+        scope: args.scope,
+        channelKind: args.channelKind,
+        storageChannel: args.storageChannel,
+      },
+    });
+    if (channel.lastFailedReason !== args.result.reason) {
+      channel.lastFailedReason = args.result.reason;
+      changed = true;
+    }
+  }
+  if (changed) markStateChanged();
+}
+
+export function recordCollaborationListenerApply(args: {
+  actionId: string;
+  label: string;
+  scope: SharedScope;
+  channelKind: SharedChannelKind;
+  storageChannel: string;
+}): void {
+  const channel = ensureCollaborationChannelHealth(args);
+  const now = Date.now();
+  if (channel.lastListenerApplyAtMs === now) return;
+  channel.lastListenerApplyAtMs = now;
+  appendCollaborationDiagnostic({
+    kind: 'listener-apply',
+    actionId: args.actionId,
+    data: {
+      scope: args.scope,
+      channelKind: args.channelKind,
+      storageChannel: args.storageChannel,
+    },
+  });
+  markStateChanged();
+}
+
+export function getCollaborationHealthSnapshot(): readonly CollaborationChannelHealth[] {
+  return [...collaborationChannelHealth.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /** Call when switching projects so a prior failure does not stick to a new workspace. */
 export function clearProjectPersistErrorFlag(): void {
   if (!projectDataWriteFailed) return;
@@ -565,12 +788,53 @@ export function clearProjectPersistErrorFlag(): void {
   markStateChanged();
 }
 
+export function setSharedProjectSyncState(next: SharedProjectSyncState): void {
+  const changed =
+    sharedProjectSyncState.activeProjectId !== next.activeProjectId ||
+    sharedProjectSyncState.bootstrapSource !== next.bootstrapSource ||
+    sharedProjectSyncState.authoritativeReady !== next.authoritativeReady ||
+    sharedProjectSyncState.pendingKeys.length !== next.pendingKeys.length ||
+    sharedProjectSyncState.pendingKeys.some((value, index) => value !== next.pendingKeys[index]);
+  if (!changed) return;
+  sharedProjectSyncState = {
+    activeProjectId: next.activeProjectId,
+    bootstrapSource: next.bootstrapSource,
+    authoritativeReady: next.authoritativeReady,
+    pendingKeys: [...next.pendingKeys],
+  };
+  appendCollaborationDiagnostic({
+    kind: 'shared-project-sync-state',
+    projectId: next.activeProjectId,
+    data: {
+      bootstrapSource: next.bootstrapSource,
+      authoritativeReady: next.authoritativeReady,
+      pendingKeys: [...next.pendingKeys],
+    },
+  });
+  markStateChanged();
+}
+
+export function clearSharedProjectSyncState(projectId?: string | null): void {
+  if (projectId && sharedProjectSyncState.activeProjectId !== projectId) return;
+  setSharedProjectSyncState({
+    activeProjectId: null,
+    bootstrapSource: 'empty',
+    authoritativeReady: false,
+    pendingKeys: [],
+  });
+}
+
 export function resetCloudSyncStateForTests(): void {
   listenerErrorChannels.clear();
+  collaborationChannelHealth.clear();
   revision = 0;
   projectServerReachable = false;
   sharedServerReachable = false;
   auxiliaryServerReachable = false;
+  projectAuthoritativeSyncEnabled = false;
+  projectAuthoritativeSyncReady = false;
+  projectAuthoritativeSyncPhase = 'idle';
+  projectAuthoritativePendingTargets = [];
   projectFlushDepth = 0;
   projectCloudWritePendingCount = 0;
   projectDataWriteFailed = false;
@@ -581,7 +845,22 @@ export function resetCloudSyncStateForTests(): void {
   localWritePendingCount = 0;
   localWriteFailed = false;
   localLastWriteOkAtMs = null;
+  sharedProjectSyncState = {
+    activeProjectId: null,
+    bootstrapSource: 'empty',
+    authoritativeReady: false,
+    pendingKeys: [],
+  };
+  clearCollabDiagnosticsJournal();
   notifyQueued = false;
+}
+
+export function getCollaborationDiagnostics(limit = 300): readonly CollabDiagnosticEntry[] {
+  return getCollabDiagnosticsJournal(limit);
+}
+
+export function clearCollaborationDiagnostics(): void {
+  clearCollabDiagnosticsJournal();
 }
 
 /** Read-only probe for recovery timers — true when the last IDB write failed. */
@@ -602,6 +881,9 @@ export type CloudSyncDerived = {
     writeFailed: boolean;
     lastCloudWriteOkAtMs: number | null;
     serverReachable: boolean;
+    authoritativeReady: boolean;
+    authoritativePhase: ProjectAuthoritativeSyncPhase;
+    pendingAuthoritativeTargets: readonly string[];
     listenerErrors: readonly CloudSyncChannel[];
     criticalListenerErrors: readonly CloudSyncChannel[];
   };
@@ -623,7 +905,26 @@ export type CloudSyncDerived = {
     auxiliaryErrors: readonly CloudSyncChannel[];
   };
   unsafeToRefresh: boolean;
+  sharedProject: {
+    activeProjectId: string | null;
+    bootstrapSource: SharedAuthoritativeBootstrapSource;
+    authoritativeReady: boolean;
+    pendingKeys: readonly string[];
+    phase: SharedAuthoritativePhase;
+  };
 };
+
+function deriveSharedProjectPhase(
+  state: SharedProjectSyncState,
+  projectServerPathReady: boolean,
+): SharedAuthoritativePhase {
+  if (!state.activeProjectId) return 'inactive';
+  if (state.authoritativeReady) return 'authoritative';
+  if (!projectServerPathReady) {
+    return state.bootstrapSource === 'local-cache' ? 'provisional-cache' : 'connecting';
+  }
+  return state.bootstrapSource === 'local-cache' ? 'provisional-cache' : 'converging';
+}
 
 export function getCloudSyncSnapshot(): CloudSyncDerived {
   const allErrors = sortChannels([...listenerErrorChannels].map(resolveCloudSyncChannel));
@@ -645,6 +946,11 @@ export function getCloudSyncSnapshot(): CloudSyncDerived {
       writeFailed: projectDataWriteFailed,
       lastCloudWriteOkAtMs: projectLastCloudWriteOkAtMs,
       serverReachable: projectServerReachable,
+      authoritativeReady: projectAuthoritativeSyncEnabled ? projectAuthoritativeSyncReady : projectServerReachable,
+      authoritativePhase: projectAuthoritativeSyncEnabled
+        ? projectAuthoritativeSyncPhase
+        : (projectServerReachable ? 'synced' : 'connecting'),
+      pendingAuthoritativeTargets: projectAuthoritativeSyncEnabled ? projectAuthoritativePendingTargets : [],
       listenerErrors: projectErrors,
       criticalListenerErrors: sortChannels(projectErrors.filter((channel) => channel.headline === 'critical')),
     },
@@ -666,6 +972,13 @@ export function getCloudSyncSnapshot(): CloudSyncDerived {
       auxiliaryErrors,
     },
     unsafeToRefresh: localWritePendingCount > 0,
+    sharedProject: {
+      activeProjectId: sharedProjectSyncState.activeProjectId,
+      bootstrapSource: sharedProjectSyncState.bootstrapSource,
+      authoritativeReady: sharedProjectSyncState.authoritativeReady,
+      pendingKeys: sharedProjectSyncState.pendingKeys,
+      phase: deriveSharedProjectPhase(sharedProjectSyncState, projectServerReachable),
+    },
   };
 }
 
@@ -699,6 +1012,11 @@ export function formatLastFirestoreWriteClock(lastMs: number | null): string | u
 function detailLastOk(lastMs: number | null, prefix: string): string | undefined {
   const clock = formatLastFirestoreWriteClock(lastMs);
   return clock ? `${prefix}${clock}` : undefined;
+}
+
+function detailPendingTargets(targets: readonly string[]): string | undefined {
+  if (targets.length === 0) return undefined;
+  return `Waiting on ${targets.length} source${targets.length === 1 ? '' : 's'}`;
 }
 
 export function deriveCloudStatusLine(
@@ -784,6 +1102,37 @@ export function deriveCloudStatusLine(
         detail: detailLastOk(snap.project.lastCloudWriteOkAtMs, 'Last project OK '),
       };
     }
+    if (snap.sharedProject.activeProjectId && !snap.sharedProject.authoritativeReady) {
+      const detail = snap.sharedProject.pendingKeys.length > 0
+        ? `· Waiting on ${snap.sharedProject.pendingKeys.length} shared sync check${snap.sharedProject.pendingKeys.length === 1 ? '' : 's'}`
+        : detailLastOk(snap.project.lastCloudWriteOkAtMs, 'Last project OK ');
+      if (snap.sharedProject.phase === 'provisional-cache') {
+        return {
+          label: 'Using cached project view…',
+          tone: 'amber',
+          detail,
+        };
+      }
+      return {
+        label: 'Cloud converging…',
+        tone: 'amber',
+        detail,
+      };
+    }
+    if (!snap.project.authoritativeReady) {
+      if (snap.project.authoritativePhase === 'provisional-cache') {
+        return {
+          label: 'Viewing cached data â€” verifyingâ€¦',
+          tone: 'amber',
+          detail: detailPendingTargets(snap.project.pendingAuthoritativeTargets) ?? detailLastOk(snap.project.lastCloudWriteOkAtMs, 'Last project OK '),
+        };
+      }
+      return {
+        label: 'Converging shared projectâ€¦',
+        tone: 'amber',
+        detail: detailPendingTargets(snap.project.pendingAuthoritativeTargets) ?? detailLastOk(snap.project.lastCloudWriteOkAtMs, 'Last project OK '),
+      };
+    }
     const clock = formatLastFirestoreWriteClock(snap.project.lastCloudWriteOkAtMs);
     return {
       label: 'Cloud: synced',
@@ -857,6 +1206,8 @@ export function formatCloudStatusDetailText(
     `Project server path: ${snap.project.serverReachable ? 'Reached (server snapshot seen)' : 'Not yet — cache-only or waiting'}`,
     `Workspace server path: ${snap.shared.serverReachable ? 'Reached (server snapshot seen)' : 'Not yet — cache-only or waiting'}`,
     `Auxiliary server path: ${snap.auxiliary.serverReachable ? 'Reached' : 'Not yet'}`,
+    `Shared project convergence: ${!snap.sharedProject.activeProjectId ? 'No shared project active' : snap.sharedProject.authoritativeReady ? 'Authoritative server state confirmed' : snap.sharedProject.phase === 'provisional-cache' ? 'Using provisional cache until server convergence completes' : 'Waiting for authoritative shared server state'}`,
+    `Shared project pending checks: ${snap.sharedProject.activeProjectId ? (snap.sharedProject.pendingKeys.length > 0 ? snap.sharedProject.pendingKeys.join(', ') : 'None') : 'Not applicable'}`,
     `Unsafe to refresh: ${snap.unsafeToRefresh || snap.local.failed ? 'Yes' : 'No'}`,
     `Local durability: ${snap.local.failed ? 'Failed — refresh may lose changes' : snap.local.pendingCount > 0 ? `Writing (${snap.local.pendingCount} pending)` : 'Succeeded'}`,
     `Project cloud writes: ${projectWritesPending > 0 ? `Writing (${projectWritesPending} pending)` : snap.project.writeFailed ? 'Failed — needs attention' : 'Idle / succeeded'}`,
