@@ -1464,7 +1464,7 @@ export function useProjectPersistence(options: {
     }
     if (isWriteUnsafeRef.current) {
       const message = writeBlockReasonRef.current === 'permission-denied'
-        ? 'Shared project recovery is blocked by Firestore permissions. Edits are temporarily read-only until the shared rules or deployment are repaired.'
+        ? 'Shared project repair is blocked by Firestore (rules or collab/meta). Edits stay read-only until that succeeds—deploy latest firestore.rules or fix meta in console.'
         : `Shared state is still recovering. ${actionLabel} is temporarily read-only.`;
       addToastRef.current(message, 'warning');
       return false;
@@ -2000,6 +2000,10 @@ export function useProjectPersistence(options: {
         clearWritableCanonical();
         setCanonicalReloading(false);
       }
+      const recoveryDiag = canonical.diagnostics?.recovery;
+      const recoveryBlockedByPermissions =
+        recoveryDiag?.outcome === 'failed' && recoveryDiag.code === 'permission-denied';
+
       if (canonical.resolved) {
         const viewState = toProjectViewState(canonical.resolved, project);
         applyViewState(viewState);
@@ -2009,35 +2013,31 @@ export function useProjectPersistence(options: {
           updateCanonicalCache(canonical.resolved, cacheMeta);
         }
       } else {
-        const recoveryDiagnostics = canonical.diagnostics?.recovery;
-        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
-        setWriteUnsafe(
-          true,
-          recoveryBlockedByPermissions
-            ? 'permission-denied'
-            : 'canonical-unresolved',
-        );
         if (!idbData) {
           applyViewState(createEmptyProjectViewState());
           loadFenceRef.current = 0;
         }
-        addToastRef.current(
-          recoveryBlockedByPermissions
-            ? 'Shared project recovery is blocked by Firestore permissions. Edits are temporarily read-only until the shared rules or deployment are repaired.'
-            : 'Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.',
-          'warning',
-        );
       }
-      if (legacyFallbackMeta) {
-        const recoveryDiagnostics = canonical.diagnostics?.recovery;
-        const recoveryBlockedByPermissions = recoveryDiagnostics?.outcome === 'failed' && recoveryDiagnostics.code === 'permission-denied';
-        setWriteUnsafe(true, recoveryBlockedByPermissions ? 'permission-denied' : 'canonical-unresolved');
-        addToastRef.current(
-          recoveryBlockedByPermissions
-            ? 'Shared project recovery is blocked by Firestore permissions. Showing the last local snapshot in read-only mode until the shared state is repaired.'
-            : 'Shared project canonical state is incomplete. Showing the last local snapshot in read-only mode until the shared state is repaired.',
-          'warning',
+
+      const warnStuckShared = !canonical.resolved || legacyFallbackMeta != null;
+      if (warnStuckShared) {
+        setWriteUnsafe(
+          true,
+          recoveryBlockedByPermissions ? 'permission-denied' : 'canonical-unresolved',
         );
+        let message: string;
+        if (recoveryBlockedByPermissions) {
+          message = legacyFallbackMeta
+            ? 'Could not auto-repair shared project data (Firestore blocked the fix—often missing required fields on collab/meta or rules not deployed). You can still view your last local copy; editing stays off until repair succeeds. If this persists, deploy latest firestore.rules from the repo or reset collab/meta in the Firebase console.'
+            : 'Could not auto-repair shared project data (Firestore blocked the fix). Edits stay read-only until latest security rules are deployed or an admin repairs the project.';
+        } else if (legacyFallbackMeta) {
+          message =
+            'Shared project data is incomplete in the cloud. Showing the last local snapshot in read-only mode until the shared state is repaired.';
+        } else {
+          message =
+            'Shared project is recovering from an incomplete cloud commit. Edits are temporarily read-only.';
+        }
+        addToastRef.current(message, 'warning');
       }
     } else {
       collabMetaRef.current = null;

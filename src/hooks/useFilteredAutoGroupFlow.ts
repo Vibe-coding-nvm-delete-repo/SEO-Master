@@ -1,8 +1,11 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction, type TransitionStartFunction } from 'react';
-import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { OPENROUTER_REQUEST_TIMEOUT_MS, runWithOpenRouterTimeout } from '../openRouterTimeout';
+import {
+  effectiveFilterSummaryForPrompt,
+  FILTERED_AUTO_GROUP_NO_EXTRA_FILTERS_SENTINEL,
+  filteredAutoGroupDisabledReason,
+} from '../filteredAutoGroupEligibility';
 import { getFilteredAutoGroupSettingsStatus } from '../filteredAutoGroupSettingsStatus';
 import { buildGroupedClusterFromPages, mergeGroupedClustersByName } from '../groupedClusterUtils';
 import { parseFilteredAutoGroupResponse } from '../autoGroupResponseParser';
@@ -136,7 +139,7 @@ export function useFilteredAutoGroupFlow({
     if (maxKwRating.trim()) active.push(`max_kw_rating=${maxKwRating.trim()}`);
     if (minLen.trim()) active.push(`min_len=${minLen.trim()}`);
     if (maxLen.trim()) active.push(`max_len=${maxLen.trim()}`);
-    return active.length > 0 ? active.join(' | ') : 'No additional filters active';
+    return active.length > 0 ? active.join(' | ') : FILTERED_AUTO_GROUP_NO_EXTRA_FILTERS_SENTINEL;
   }, [
     debouncedSearchQuery,
     excludedLabels,
@@ -155,12 +158,33 @@ export function useFilteredAutoGroupFlow({
     selectedTokens,
   ]);
 
-  const isFilteredAutoGroupFilterActive = filteredAutoGroupFilterSummary !== 'No additional filters active';
-  const canRunFilteredAutoGroup = !isBulkSharedEditBlocked && isFilteredAutoGroupFilterActive && filteredClusters.length >= 1;
+  const isFilteredAutoGroupFilterActive =
+    filteredAutoGroupFilterSummary !== FILTERED_AUTO_GROUP_NO_EXTRA_FILTERS_SENTINEL;
   const filteredAutoGroupSettingsStatus = useMemo(
     () => getFilteredAutoGroupSettingsStatus(groupReviewSettingsHydrated, groupReviewSettingsSnapshot),
     [groupReviewSettingsHydrated, groupReviewSettingsSnapshot],
   );
+
+  const filteredAutoGroupDisableReason = useMemo(
+    () =>
+      filteredAutoGroupDisabledReason({
+        isBulkSharedEditBlocked,
+        filteredClusterCount: filteredClusters.length,
+        groupReviewSettingsHydrated,
+        settingsMissing: filteredAutoGroupSettingsStatus.missing,
+      }),
+    [
+      filteredClusters.length,
+      groupReviewSettingsHydrated,
+      filteredAutoGroupSettingsStatus.missing,
+      isBulkSharedEditBlocked,
+    ],
+  );
+
+  const canRunFilteredAutoGroup = filteredAutoGroupDisableReason === null;
+  const filteredAutoGroupButtonTitle =
+    filteredAutoGroupDisableReason ??
+    'Run AI Auto Group on all visible ungrouped pages in this list (Shift+1).';
 
   const buildFilteredAutoGroupPrompt = useCallback((pages: ClusterSummary[], filterSummary: string, basePrompt: string) => {
     const pageLines = pages
@@ -431,16 +455,6 @@ FAILURE CONDITIONS TO AVOID:
       );
       return;
     }
-    if (!isFilteredAutoGroupFilterActive) {
-      logAndToast(
-        'auto-group',
-        'Filtered Auto Group blocked: activate filters first',
-        0,
-        'Activate at least one filter (search/tokens/city/state/keyword/volume/KD/len) before using Auto Group.',
-        'info',
-      );
-      return;
-    }
     if (filteredClusters.length < 1) {
       logAndToast(
         'auto-group',
@@ -475,17 +489,18 @@ FAILURE CONDITIONS TO AVOID:
     }
 
     const pagesToReview = [...filteredClusters];
+    const filterSummaryForJob = effectiveFilterSummaryForPrompt(filteredAutoGroupFilterSummary);
     const job: FilteredAutoGroupJob = {
       id: `filtered-auto-group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       signature: JSON.stringify({
         tokens: pagesToReview.map((page) => page.tokens).sort(),
-        filterSummary: filteredAutoGroupFilterSummary,
+        filterSummary: filterSummaryForJob,
         model: settingsData.selectedModel,
         temperature: settingsData.temperature,
         prompt: settingsData.autoGroupPrompt,
       }),
       pages: pagesToReview,
-      filterSummary: filteredAutoGroupFilterSummary,
+      filterSummary: filterSummaryForJob,
       settings: { ...settingsData },
       modelPricing: modelObj?.pricing,
     };
@@ -515,7 +530,6 @@ FAILURE CONDITIONS TO AVOID:
     filteredClusters,
     groupReviewSettingsHydrated,
     groupReviewSettingsRef,
-    isFilteredAutoGroupFilterActive,
     isRunningFilteredAutoGroup,
     isBulkSharedEditBlocked,
     logAndToast,
@@ -559,6 +573,7 @@ FAILURE CONDITIONS TO AVOID:
 
   return {
     canRunFilteredAutoGroup,
+    filteredAutoGroupButtonTitle,
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue,
     filteredAutoGroupSettingsStatus,

@@ -1225,8 +1225,9 @@ describe('useProjectPersistence V2 hardening', () => {
       await result.current.loadProject('project-1', PROJECTS);
     });
 
+    expect(addToast).toHaveBeenCalledTimes(1);
     expect(addToast).toHaveBeenCalledWith(
-      expect.stringContaining('recovery is blocked by Firestore permissions'),
+      expect.stringContaining('Firestore blocked the fix'),
       'warning',
     );
   });
@@ -1297,8 +1298,9 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(result.current.storageMode).toBe('v2');
     expect(result.current.isSharedProjectReadOnly).toBe(true);
     expect(Array.from(result.current.blockedTokens)).toEqual(['cached']);
+    expect(addToast).toHaveBeenCalledTimes(1);
     expect(addToast).toHaveBeenCalledWith(
-      expect.stringContaining('Showing the last local snapshot in read-only mode'),
+      expect.stringMatching(/Firestore blocked the fix|last local copy/i),
       'warning',
     );
 

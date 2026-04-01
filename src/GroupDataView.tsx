@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import React from 'react';
+import React, { useMemo } from 'react';
 import { UploadCloud, Download, FileText, Loader2, AlertCircle, RefreshCw, Database, CheckCircle2, Layers, Search, ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, Hash, TrendingUp, MapPin, Map as MapIcon, HelpCircle, ShoppingCart, Navigation, Calendar, Filter, BookOpen, Compass, LogIn, LogOut, Save, Bookmark, Sparkles, X, Plus, Folder, Trash2, Lock, Settings, Star, ExternalLink, Copy, Zap, Globe, ClipboardList, Cloud, CloudOff, Lightbulb, List, Check, DollarSign, Inbox, Bell } from 'lucide-react';
 import GroupReviewSettings from './GroupReviewSettings';
 import MergeConfirmModal from './MergeConfirmModal';
@@ -56,6 +56,7 @@ export default function GroupDataView(props: any) {
     exportTokensCSV,
     fileName,
     filteredApprovedGroups,
+    filteredAutoGroupButtonTitle,
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue,
     filteredAutoGroupSettingsStatus,
@@ -104,7 +105,6 @@ export default function GroupDataView(props: any) {
     handleUndoMergeParent,
     handleUnblockTokens,
     isDragging,
-    isFilteredAutoGroupFilterActive,
     isLabelDropdownOpen,
     isLabelSidebarOpen,
     isMergeModalOpen,
@@ -233,6 +233,16 @@ export default function GroupDataView(props: any) {
     tokenMgmtTotalPages,
     writeBlockReason,
   } = props;
+
+  const manualGroupButtonTitle = useMemo(() => {
+    if (canRunManualGroup) return 'Create a group from the selected pages.';
+    if (isRoutineSharedEditBlocked) {
+      return 'Shared project is read-only, write-unsafe, or busy. Wait until edits are allowed.';
+    }
+    if (selectedClusters.size === 0) return 'Select one or more pages using the row checkboxes.';
+    if (!groupNameInput.trim()) return 'Enter a group name (it auto-fills when you select pages).';
+    return 'Cannot group right now.';
+  }, [canRunManualGroup, isRoutineSharedEditBlocked, selectedClusters.size, groupNameInput]);
 
   return (
         <>
@@ -868,17 +878,23 @@ export default function GroupDataView(props: any) {
                     {activeTab === 'pages' && (
                       <>
                         <button
+                          type="button"
                           onClick={handleGroupClusters}
                           disabled={!canRunManualGroup}
+                          title={manualGroupButtonTitle}
                           className="px-4 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[90px]"
                         >
                           Group ({selectedClusters.size})
                         </button>
                         <button
+                          type="button"
                           onClick={handleRunFilteredAutoGroup}
                           disabled={!canRunFilteredAutoGroup}
+                          title={
+                            filteredAutoGroupButtonTitle ??
+                            'Run AI Auto Group on visible ungrouped pages in this list (Shift+1).'
+                          }
                           className="px-4 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[110px]"
-                          title="Review all currently filtered ungrouped pages and create strict semantic groups"
                         >
                           {isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0 ? 'Queue Auto Group' : 'Auto Group'} ({filteredClusters.length})
                         </button>

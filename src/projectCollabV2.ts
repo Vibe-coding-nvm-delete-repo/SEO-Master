@@ -1654,6 +1654,39 @@ export async function loadCanonicalEpoch(
   return null;
 }
 
+/**
+ * Incomplete migrations sometimes write collab/meta without every field Firestore rules require
+ * on update (`validCollabMetaCreate`). Missing `requiredClientSchema` / wrong types → permission-denied
+ * on `recoverStuckV2Meta` and the user sees a stuck read-only warning forever.
+ */
+export function normalizeCollabMetaForRecoveryWrite(meta: ProjectCollabMetaDoc): ProjectCollabMetaDoc {
+  const revision = typeof meta.revision === 'number' && Number.isFinite(meta.revision) ? meta.revision : 0;
+  const datasetEpoch =
+    typeof meta.datasetEpoch === 'number' && Number.isFinite(meta.datasetEpoch) ? meta.datasetEpoch : 1;
+  const requiredClientSchema =
+    typeof meta.requiredClientSchema === 'number' && meta.requiredClientSchema >= 2
+      ? meta.requiredClientSchema
+      : CLIENT_SCHEMA_VERSION;
+  const commitState =
+    meta.commitState === 'writing' || meta.commitState === 'ready' ? meta.commitState : 'writing';
+  const migrationState =
+    meta.migrationState === 'running' ||
+    meta.migrationState === 'complete' ||
+    meta.migrationState === 'failed'
+      ? meta.migrationState
+      : 'failed';
+
+  return {
+    ...meta,
+    schemaVersion: CLIENT_SCHEMA_VERSION,
+    revision,
+    datasetEpoch,
+    requiredClientSchema,
+    commitState,
+    migrationState,
+  };
+}
+
 async function recoverStuckV2Meta(
   projectId: string,
   meta: ProjectCollabMetaDoc,
@@ -1698,7 +1731,8 @@ async function recoverStuckV2Meta(
           },
         };
       }
-      const current = metaSnap.data() as ProjectCollabMetaDoc;
+      const currentRaw = metaSnap.data() as ProjectCollabMetaDoc;
+      const current = normalizeCollabMetaForRecoveryWrite(currentRaw);
       if (!isMetaDocV2(current) || current.readMode !== 'v2') {
         return {
           recovery: {
@@ -1759,7 +1793,7 @@ async function recoverStuckV2Meta(
           tx.set(metaRef, sanitizeJsonForFirestore({
             ...current,
             readMode: 'legacy',
-            commitState: current.commitState ?? 'writing',
+            commitState: current.commitState,
             lastWriterClientId: actorId,
             revision: current.revision + 1,
             updatedAt: now,
@@ -1808,10 +1842,7 @@ async function recoverStuckV2Meta(
           // the client falls back to legacy mode locally but Firestore still
           // blocks legacy chunk writes because readMode is still 'v2'.
           readMode: 'legacy',
-          // Ensure commitState has a valid value for Firestore rules validation.
-          // The meta may be missing commitState entirely (e.g. incomplete migration
-          // that wrote migrationState:'complete' without commitState/baseCommitId).
-          commitState: current.commitState ?? 'writing',
+          commitState: current.commitState,
           lastMigratedAt: now,
           lastWriterClientId: actorId,
           revision: current.revision + 1,

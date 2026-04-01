@@ -1083,13 +1083,13 @@ export default function App() {
 
   const {
     canRunFilteredAutoGroup,
+    filteredAutoGroupButtonTitle,
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue,
     filteredAutoGroupSettingsStatus,
     filteredAutoGroupStats,
     handleRunFilteredAutoGroup,
     handleStopFilteredAutoGroup,
-    isFilteredAutoGroupFilterActive,
     isRunningFilteredAutoGroup,
   } = useFilteredAutoGroupFlow({
     filteredClusters,
@@ -1246,6 +1246,7 @@ export default function App() {
     exportTokensCSV,
     fileName,
     filteredApprovedGroups,
+    filteredAutoGroupButtonTitle,
     filteredAutoGroupFilterSummary,
     filteredAutoGroupQueue,
     filteredAutoGroupSettingsStatus,
@@ -1294,7 +1295,6 @@ export default function App() {
     handleUndoMergeParent,
     handleUnblockTokens,
     isDragging,
-    isFilteredAutoGroupFilterActive,
     isLabelDropdownOpen,
     isLabelSidebarOpen,
     isMergeModalOpen,
