@@ -94,7 +94,14 @@ All keyword management tabs share a single `TableHeader` component:
 - **Do not** duplicate `TableHeader`, label dropdowns, or column definitions — extend `tableConstants.ts` and shared components.
 - **Do not** skip tests for new logic “because it’s simple”; trivial helpers still regress when others edit them.
 - **Do not** add raw `firebase/firestore` reads, writes, or listeners in app-facing UI/hooks without first classifying the callsite and routing it through the shared collaboration contract.
-- Run `npm run collab:gate` before release work or any shared-persistence refactor; it is the Firestore census/audit barrier that prevents unclassified collaboration touchpoints from slipping in.
+- Run `npm run collab:gate` before release work or any shared-persistence refactor; it is the Firestore census/audit plus runtime convergence barrier that prevents unclassified collaboration touchpoints and cross-client sync regressions from slipping in.
+
+### Collaboration diagnostics (incident forensics)
+- Shared-collaboration runtime writes a bounded local diagnostics journal for key sync/mutation transitions.
+- To inspect in a live browser session:
+  - `window.__kwgCollabDiagnostics.read(300)` returns recent entries.
+  - `window.__kwgCollabDiagnostics.clear()` clears the journal after export.
+- Use diagnostics entries together with runtime trace/session ids when debugging cross-client divergence.
 
 ### State & Persistence (Critical Rule)
 **ALL user-facing state MUST be persisted.** Follow the 3-tier pattern:
@@ -134,6 +141,9 @@ npm run dev      # Start dev server at localhost:3000
 | `npm test` | Run all tests |
 | `npm run test:watch` | Tests in watch mode |
 | `npm run setup` | Full dependency install + WASM patches |
+| `npm run collab:convergence` | Shared convergence matrix (integration + rules + 2-session E2E) |
+| `npm run collab:gate` | Firestore census/audit/coverage + convergence matrix |
+| `npm run collab:release-gate` | Collab gate + full typecheck/tests/build |
 
 ### Worktree Workflow (Claude Code Agents)
 
