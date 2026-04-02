@@ -2336,9 +2336,6 @@ export function useProjectPersistence(options: {
       projectId,
       clientIdRef.current,
       async () => {
-        if (sharedProject) {
-          return idbData ?? null;
-        }
         return idbData ?? loadProjectDataForView(projectId);
       },
       {
@@ -3147,7 +3144,7 @@ export function useProjectPersistence(options: {
               const canonical = await loadCanonicalProjectState(
                 loadPid,
                 clientIdRef.current,
-                async () => null,
+                async () => loadProjectDataForView(loadPid),
                 {
                   sharedProject,
                 },
