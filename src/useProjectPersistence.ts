@@ -2792,8 +2792,7 @@ export function useProjectPersistence(options: {
       resetSharedAuthoritativeTracking(listenerProjectId, sharedBootstrapSourceRef.current, {
         preserveMeta: true,
         preserveOperation: true,
-        preserveEntities: sharedBootstrapSourceRef.current === 'server-authoritative' &&
-          sharedAuthoritativeReadyRef.current,
+        preserveEntities: true,
       });
       const listenerGeneration = epochLoadGenerationRef.current;
       const isEntityListenerCurrent = () =>
@@ -2837,9 +2836,11 @@ export function useProjectPersistence(options: {
         current: T[],
         snap: { docs: Array<{ id: string; data: () => unknown }>; docChanges: () => Array<{ type: string; doc: { id: string; data: () => unknown } }>; metadata?: { fromCache?: boolean; hasPendingWrites?: boolean } },
       ): { docs: T[]; changed: boolean } => {
-        if (!snap.metadata?.fromCache && !hasAuthoritativeEntitySnapshot(subcollection)) {
+        const isFromServer = !snap.metadata?.fromCache;
+        const isEmptyFromCache = snap.metadata?.fromCache && snap.docs.length === 0;
+        if ((isFromServer || isEmptyFromCache) && !hasAuthoritativeEntitySnapshot(subcollection)) {
           const replaced = replaceRevisionedDocsFromSnapshot(current, snap.docs, subcollection, datasetEpoch);
-          markSharedAuthoritativeKey(listenerProjectId, subcollection, 'server-authoritative');
+          markSharedAuthoritativeKey(listenerProjectId, subcollection, isFromServer ? 'server-authoritative' : 'local-cache');
           traceEntityListenerEvent('v2:listener-authoritative-replace', subcollection, snap.docs.length);
           return replaced;
         }
