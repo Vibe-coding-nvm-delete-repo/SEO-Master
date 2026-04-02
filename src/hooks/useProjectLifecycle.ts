@@ -18,6 +18,7 @@ import {
   loadProjectsBootstrapState,
 } from '../projectStorage';
 import { deleteProjectV2Data } from '../projectCollabV2';
+import { SHARED_PROJECT_DESCRIPTION } from '../projectSharing';
 import { loadSavedWorkspacePrefs } from '../projectWorkspace';
 import { parseAppPath, buildMainPath, type MainTab, type GroupSubTab, type SettingsSubTab } from '../appRouting';
 import { projectUrlKey, projectUrlKeySuffixFromId } from '../projectUrlKey';
@@ -502,7 +503,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
         id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         uid: 'local',
         name: newProjectName,
-        description: newProjectDescription,
+        description: SHARED_PROJECT_DESCRIPTION,
         createdAt: new Date().toISOString(),
         folderId: null,
         deletedAt: null,
