@@ -26,6 +26,7 @@ import {
 import { PRIMARY_COLUMN_WIDTH_PRESETS, type PrimaryColumnPreset } from './generateTablePresets';
 import {
   buildOpenRouterTimeoutError,
+  isTransientNetworkError,
   OPENROUTER_REQUEST_TIMEOUT_MS,
   resolveOpenRouterAbortError,
   runWithOpenRouterTimeout,
@@ -3476,6 +3477,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
             durationMs: Math.round(performance.now() - startTime),
           };
         }
+        // Retry transient network errors (Failed to fetch, connection reset, etc.)
+        if (isTransientNetworkError(e) && attempt < maxRateLimitRetries) {
+          const completedDelay = await waitForDelayOrAbort(Math.min(2000 * Math.pow(2, attempt), 30000), signal);
+          if (!completedDelay) return { error: '__aborted__', durationMs: Math.round(performance.now() - startTime) };
+          continue;
+        }
         return { error: e.message || 'Unknown error', durationMs: Math.round(performance.now() - startTime) };
       }
     }
@@ -4152,6 +4159,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
               }),
               durationMs: Math.round(performance.now() - st),
             };
+          }
+          // Retry transient network errors (Failed to fetch, connection reset, etc.)
+          if (isTransientNetworkError(e) && attempt < maxRateLimitRetries) {
+            const completedDelay = await waitForDelayOrAbort(Math.min(2000 * Math.pow(2, attempt), 30000), signal);
+            if (!completedDelay) return { error: '__aborted__', durationMs: Math.round(performance.now() - st) };
+            continue;
           }
           return { error: e.message || 'Unknown error', durationMs: Math.round(performance.now() - st) };
         }
