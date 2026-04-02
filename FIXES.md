@@ -143,6 +143,13 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 **Scenario:** User removes page X from group A at T=0 (triggers re-review). User adds page Y to group A at T=2s. Timer fires at T=5s, reads current `groupedClustersRef` which now has page Y. Re-review runs on wrong group composition.
 **Fix:** Capture the full group snapshot when scheduling, not just IDs. The re-review should operate on the group state that triggered it.
 
+### [x] 1.9a All new projects created without shared collab flag (ROOT CAUSE)
+**Date fixed:** 2026-04-01
+**File:** `src/hooks/useProjectLifecycle.ts:505`
+**Root cause:** `createProject()` set `description: newProjectDescription` (user input, defaults to `""`). Since `isSharedProject()` checks for `description === 'collab'`, EVERY project created through the UI was a non-shared legacy project. This meant ALL multi-user sync infrastructure (V2 entity-per-doc listeners, CAS revisions, epoch scoping) was completely bypassed. Both users wrote to the same legacy `chunks` collection with last-writer-wins semantics.
+**Fix:** Hardcode `description: SHARED_PROJECT_DESCRIPTION` in `createProject()`. Also patched all 10 existing non-shared projects in Firestore production.
+**Impact:** This was the #1 reason multi-user sync didn't work. All other sync fixes (1.1-1.8, 1.10-1.16) were correct but irrelevant because the V2 sync path was never activated.
+
 ### [x] 1.9 Shared projects could still fall back to legacy chunk writes after V2 recovery/missing meta
 **Date fixed:** 2026-03-31
 **Files:** `src/useProjectPersistence.ts`, `src/projectCollabV2.ts`, `src/projectWorkspace.ts`, `scripts/migrate-shared-projects-v2.ts`, `package.json`, `firestore.rules`, `src/projectCollabV2.storage.test.ts`, `src/useProjectPersistence.v2.test.tsx`, `src/App.shared-projects.integration.test.tsx`

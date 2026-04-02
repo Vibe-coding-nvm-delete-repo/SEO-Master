@@ -29,6 +29,7 @@
    - The `suppressSnapshotRef` flag MUST be set during all Firestore writes to prevent the `onSnapshot` listener from overwriting in-flight state changes
    - When multiple saves can fire in the same render cycle, ensure ALL refs are synced before ANY save
    - Data must be visible to ALL users (not just the current browser) immediately after save -- this is a shared, multi-user app
+   - EVERY project MUST be created with `description: SHARED_PROJECT_DESCRIPTION` ('collab') -- this activates V2 entity-per-doc sync. Without it, the project uses legacy single-user chunk persistence and multi-user sync is completely broken. NEVER allow project creation with an empty or user-supplied description field that could bypass shared mode.
 
    **CRITICAL: Firestore-first load guard.** When loading settings/state on mount using both an async cache read (IDB/localStorage) AND a Firestore `onSnapshot` listener, you MUST guard against the cache overwriting authoritative Firestore data. The async IDB read can complete *after* Firestore delivers the real snapshot, causing stale/empty cache to overwrite good data — then the persist effect writes the empty state back to Firestore, destroying it permanently.
 

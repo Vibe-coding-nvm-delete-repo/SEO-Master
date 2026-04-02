@@ -1064,6 +1064,14 @@ Classify tokens as topic tokens (payday, mortgage) vs modifier tokens (best, how
 - Shared write gating now fails closed until authoritative shared readiness is reached, preventing editable-but-desynced windows during shared convergence.
 - Authoritative readiness now survives listener reattach after authoritative canonical activation, and convergence remains deterministic across reloads/project switches.
 
+### 2026-04-01: Fix — All Projects Now Auto-Shared
+
+- **Root cause fix:** `createProject()` was setting `description` from the optional user text field (default: `""`), which meant `isSharedProject()` returned `false` for every project ever created through the UI. All V2 entity-per-doc sync, CAS revisions, and epoch-scoped listeners were completely bypassed — both users silently wrote to the same legacy `chunks` collection with last-writer-wins, causing one-directional data loss.
+- `createProject()` now hardcodes `description: SHARED_PROJECT_DESCRIPTION` (`'collab'`), ensuring every new project uses V2 shared sync from creation.
+- All 10 existing non-collab projects in Firestore production were patched to `description: 'collab'`.
+- Added snapshot suppression (`suppressSnapshotRef` + `lastWrittenAtRef` + `updatedAt` timestamp comparison) to `GroupReviewSettings.tsx` and `useUniversalBlockedTokens.ts` to prevent own-write echoes from overwriting concurrent remote changes.
+- Replaced 3 remaining silent `.catch(() => {})` handlers with error reporting in `GenerateTab.tsx`, `AutoGroupPanel.tsx`, and `TableHeader.tsx`.
+
 ### 2026-04-01: Mandatory Collab Convergence Gate
 
 - Collaboration gating now includes runtime convergence validation, not only static Firestore census/audit checks.
