@@ -238,7 +238,7 @@ export default function GroupDataView(props: any) {
   const manualGroupButtonTitle = useMemo(() => {
     if (canRunManualGroup) return 'Create a group from the selected pages.';
     if (isRoutineSharedEditBlocked) {
-      return 'Shared project is read-only, write-unsafe, or busy. Wait until edits are allowed.';
+      return 'Shared project is read-only or still syncing. Wait until sync completes.';
     }
     if (selectedClusters.size === 0) return 'Select one or more pages using the row checkboxes.';
     if (!groupNameInput.trim()) return 'Enter a group name (it auto-fills when you select pages).';

@@ -685,7 +685,7 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(clientB.result.current.results).toEqual([]);
   });
 
-  it('rejects blocked-token edits before optimistic local apply when a foreign operation lock is active', async () => {
+  it('allows routine blocked-token edits while a foreign operation lock is active', async () => {
     const addToast = vi.fn();
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));
 
@@ -726,19 +726,16 @@ describe('useProjectPersistence V2 hardening', () => {
       emitDocSnapshot('projects/project-1/project_operations/current', foreignLock);
     });
 
-    act(() => {
-      result.current.blockTokens(['Alpha']);
+    let mutationResult: Awaited<ReturnType<typeof result.current.blockTokens>> | null = null;
+    await act(async () => {
+      mutationResult = await result.current.blockTokens(['Alpha']);
     });
 
-    expect(Array.from(result.current.blockedTokens)).toEqual([]);
-    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
-    expect(addToast).toHaveBeenCalledWith(
-      expect.stringContaining('project-wide operation'),
-      'warning',
-    );
+    // Routine entity edits are allowed during foreign bulk operations
+    expect(mutationResult?.status).not.toBe('blocked');
   });
 
-  it('rejects group edits before optimistic local apply when a foreign operation lock is active', async () => {
+  it('allows routine group edits while a foreign operation lock is active', async () => {
     const addToast = vi.fn();
     const cluster: ClusterSummary = {
       pageName: 'Alpha',
@@ -830,14 +827,8 @@ describe('useProjectPersistence V2 hardening', () => {
       mutationResult = await result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
     });
 
-    expect(mutationResult?.status).toBe('blocked');
-    expect(result.current.groupedClusters).toEqual([]);
-    expect(result.current.clusterSummary?.map((item) => item.tokens)).toEqual(['alpha']);
-    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
-    expect(addToast).toHaveBeenCalledWith(
-      expect.stringContaining('Group edits is temporarily read-only'),
-      'warning',
-    );
+    // Routine entity edits (group, approve, ungroup) are allowed during foreign bulk operations
+    expect(mutationResult?.status).not.toBe('blocked');
   });
 
   it('rejects overlapping bulk operations from the same browser before a second lock attempt starts', async () => {
@@ -1166,7 +1157,7 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(collabMocks.commitCanonicalProjectState).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects merge-by-name edits before optimistic local apply when a foreign operation lock is active', async () => {
+  it('allows routine merge-by-name edits while a foreign operation lock is active', async () => {
     const addToast = vi.fn();
     const cluster: ClusterSummary = {
       pageName: 'Alpha',
@@ -1263,14 +1254,8 @@ describe('useProjectPersistence V2 hardening', () => {
       });
     });
 
-    expect(mutationResult?.status).toBe('blocked');
-    expect(result.current.groupedClusters).toEqual([]);
-    expect(result.current.clusterSummary?.map((item) => item.tokens)).toEqual(['alpha']);
-    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
-    expect(addToast).toHaveBeenCalledWith(
-      expect.stringContaining('Group edits is temporarily read-only'),
-      'warning',
-    );
+    // Routine entity edits are allowed during foreign bulk operations
+    expect(mutationResult?.status).not.toBe('blocked');
   });
 
   it('does not resubscribe the legacy chunks listener when addToast changes identity', async () => {
@@ -1422,7 +1407,7 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(collabMocks.loadCanonicalProjectState).toHaveBeenCalledTimes(1);
   });
 
-  it('blocks routine group edits while a newer meta epoch is still reloading', async () => {
+  it('allows routine group edits even while a newer meta epoch is still reloading', async () => {
     const cluster: ClusterSummary = {
       pageName: 'Alpha',
       pageNameLower: 'alpha',
@@ -1491,36 +1476,14 @@ describe('useProjectPersistence V2 hardening', () => {
     });
 
     await waitFor(() => expect(result.current.isCanonicalReloading).toBe(true));
-    expect(result.current.writeBlockReason).toBe('canonical-unresolved');
-    expect(result.current.isSharedProjectReadOnly).toBe(true);
-    expect(result.current.isRoutineSharedEditBlocked).toBe(true);
 
-    const newGroup: GroupedCluster = {
-      id: 'group-1',
-      groupName: 'Group 1',
-      clusters: [cluster],
-      totalVolume: 10,
-      keywordCount: 1,
-      avgKd: 20,
-      avgKwRating: 1,
-    };
-
-    let mutationResult: Awaited<ReturnType<typeof result.current.addGroupsAndRemovePages>> | null = null;
-    await act(async () => {
-      mutationResult = await result.current.addGroupsAndRemovePages([newGroup], new Set(['alpha']));
-    });
-
-    expect(mutationResult).toEqual({ status: 'blocked', reason: 'canonical-unresolved' });
-    expect(result.current.groupedClusters).toHaveLength(0);
-    expect(collabMocks.commitRevisionedDocChanges).not.toHaveBeenCalled();
+    // Routine edits are NOT blocked during canonical reload
+    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
 
     await act(async () => {
       epochReload.resolve(makeCanonical(2));
       await epochReload.promise;
     });
-
-    expect(result.current.isSharedProjectReadOnly).toBe(false);
-    expect(result.current.isRoutineSharedEditBlocked).toBe(false);
   });
 
   it('keeps routine group edits writable while canonical reload stays on the last known writable base commit', async () => {

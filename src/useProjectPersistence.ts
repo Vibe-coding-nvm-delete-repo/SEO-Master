@@ -1809,21 +1809,11 @@ export function useProjectPersistence(options: {
       addToastRef.current(message, 'warning');
       return false;
     }
-    const currentCanonicalIdentity = canonicalIdentity(
-      collabMetaRef.current?.datasetEpoch ?? null,
-      collabMetaRef.current?.baseCommitId ?? null,
-    );
-    if (
-      isCanonicalReloadingRef.current &&
-      currentCanonicalIdentity !== lastKnownGoodWritableStateRef.current
-    ) {
-      addToastRef.current(`Shared state is still syncing to a newer canonical version. ${actionLabel} is temporarily read-only.`, 'warning');
-      return false;
-    }
-    if (!hasFullSharedAuthoritativeReadiness(activeProjectIdRef.current)) {
-      addToastRef.current(`Shared state is not fully connected yet. ${actionLabel} is temporarily read-only until sync is authoritative.`, 'warning');
-      return false;
-    }
+    return true;
+  }, []);
+
+  const ensureBulkV2MutationAllowed = useCallback((actionLabel: string): boolean => {
+    if (!ensureV2MutationAllowed(actionLabel)) return false;
     if (
       activeOperationRef.current &&
       activeOperationRef.current.ownerId !== clientIdRef.current &&
@@ -1834,17 +1824,17 @@ export function useProjectPersistence(options: {
       return false;
     }
     return true;
-  }, [canonicalIdentity, hasFullSharedAuthoritativeReadiness]);
+  }, [ensureV2MutationAllowed]);
 
   const ensureOwnedBulkMutationAllowed = useCallback((actionLabel: string): boolean => {
-    if (!ensureV2MutationAllowed(actionLabel)) return false;
+    if (!ensureBulkV2MutationAllowed(actionLabel)) return false;
     if (!hasOwnedActiveOperationLock()) {
       addToastRef.current(`This ${actionLabel.toLowerCase()} action requires an active project operation lock. Start it from the bulk action flow and try again.`, 'warning');
       lastV2WriteErrorRef.current = new Error('operation-locked');
       return false;
     }
     return true;
-  }, [ensureV2MutationAllowed, hasOwnedActiveOperationLock]);
+  }, [ensureBulkV2MutationAllowed, hasOwnedActiveOperationLock]);
 
   const mergeAckedDocs = useCallback(<T extends { id: string; revision?: number; lastMutationId?: string | null }>(
     currentDocs: T[],
@@ -3973,10 +3963,7 @@ export function useProjectPersistence(options: {
   );
   const isRoutineSharedEditBlocked = storageMode === 'v2' && (
     legacyWritesBlocked ||
-    isWriteUnsafe ||
-    isCanonicalReloadWriteBlocked ||
-    isSharedAuthoritativeReadinessBlocked ||
-    isProjectBusy
+    isWriteUnsafe
   );
   const isBulkSharedEditBlocked = storageMode === 'v2' && (
     legacyWritesBlocked ||
