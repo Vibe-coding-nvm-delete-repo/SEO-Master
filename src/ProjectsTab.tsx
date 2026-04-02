@@ -43,8 +43,6 @@ export interface ProjectsTabProps {
   setIsCreatingProject: (v: boolean) => void;
   newProjectName: string;
   setNewProjectName: (v: string) => void;
-  newProjectDescription: string;
-  setNewProjectDescription: (v: string) => void;
   projectError: string | null;
   isProjectLoading: boolean;
   addToast: ToastFn;
@@ -63,8 +61,6 @@ export default function ProjectsTab({
   setIsCreatingProject,
   newProjectName,
   setNewProjectName,
-  newProjectDescription,
-  setNewProjectDescription,
   projectError,
   isProjectLoading,
   addToast,
@@ -344,15 +340,6 @@ export default function ProjectsTab({
                 onChange={(e) => setNewProjectName(e.target.value)}
                 placeholder="e.g., Q1 SEO Strategy"
                 className="w-full px-3 py-1.5 text-sm border border-zinc-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-zinc-700 mb-1">Description (Optional)</label>
-              <textarea
-                value={newProjectDescription}
-                onChange={(e) => setNewProjectDescription(e.target.value)}
-                placeholder="What is this project about?"
-                className="w-full px-3 py-1.5 text-sm border border-zinc-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all h-16 resize-none"
               />
             </div>
             <div className="flex justify-end gap-2 pt-1">

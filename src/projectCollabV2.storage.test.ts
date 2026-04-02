@@ -532,8 +532,7 @@ describe('projectCollabV2 storage contract', () => {
       localFallbackPayload: makePayload(9),
     });
 
-    expect(legacyLoader).not.toHaveBeenCalled();
-    expect(firestoreMocks.getDocs).not.toHaveBeenCalled();
+    expect(legacyLoader).toHaveBeenCalledTimes(1);
     expect(canonical.mode).toBe('v2');
     expect(canonical.entities.meta).toBeNull();
     expect(canonical.resolved).toEqual(makePayload(9));

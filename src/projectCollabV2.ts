@@ -1986,9 +1986,10 @@ export async function loadCanonicalProjectState(
   if (sharedProject) {
     if (!meta) {
       try {
+        const legacyPayload = await legacyLoader();
         return await migrateLegacyProjectToV2(
           projectId,
-          emptyProjectDataPayload(),
+          legacyPayload ?? emptyProjectDataPayload(),
           actorId,
         );
       } catch (migrationError) {

@@ -159,7 +159,6 @@ export default function App() {
   const [isProjectLoading, setIsProjectLoading] = useState(false);
   const [editingProjectName, setEditingProjectName] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
-  const [newProjectDescription, setNewProjectDescription] = useState('');
   const [projectError, setProjectError] = useState<string | null>(null);
   const [isProjectCardCollapsed, setIsProjectCardCollapsed] = useState(true);
   const [selectedClusters, setSelectedClusters] = useState<Set<string>>(new Set());
@@ -311,9 +310,7 @@ export default function App() {
     setIsAuthReady,
     setSavedClusters,
     newProjectName,
-    newProjectDescription,
     setNewProjectName,
-    setNewProjectDescription,
     setProjectError,
     setIsCreatingProject,
     canChangeProject: () => !isProjectWorkspaceBusy,
@@ -1189,8 +1186,6 @@ export default function App() {
     setIsCreatingProject,
     newProjectName,
     setNewProjectName,
-    newProjectDescription,
-    setNewProjectDescription,
     projectError,
     setProjectError,
     isProjectLoading,

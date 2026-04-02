@@ -53,8 +53,6 @@ describe('ProjectsTab', () => {
     setIsCreatingProject: vi.fn(),
     newProjectName: '',
     setNewProjectName: vi.fn(),
-    newProjectDescription: '',
-    setNewProjectDescription: vi.fn(),
     projectError: null,
     isProjectLoading: false,
     addToast: vi.fn(),

@@ -51,9 +51,7 @@ export interface UseProjectLifecycleInput {
   setIsAuthReady: (v: boolean) => void;
   setSavedClusters: Dispatch<SetStateAction<any[]>>;
   newProjectName: string;
-  newProjectDescription: string;
   setNewProjectName: (v: string) => void;
-  setNewProjectDescription: (v: string) => void;
   setProjectError: (v: string | null) => void;
   setIsCreatingProject: (v: boolean) => void;
   canChangeProject?: () => boolean;
@@ -79,9 +77,7 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
     setIsAuthReady,
     setSavedClusters,
     newProjectName,
-    newProjectDescription,
     setNewProjectName,
-    setNewProjectDescription,
     setProjectError,
     setIsCreatingProject,
     canChangeProject,
@@ -513,7 +509,6 @@ export function useProjectLifecycle(input: UseProjectLifecycleInput) {
       recentlyCreatedProjectRef.current = { id: newProject.id, until: Date.now() + 10000 };
       setProjects(updatedProjects);
       setNewProjectName('');
-      setNewProjectDescription('');
       setIsCreatingProject(false);
       advanceGeneration(newProject.id);
       setActiveProjectId(newProject.id);
