@@ -895,20 +895,12 @@ export default function GroupDataView(props: any) {
                           disabled={!canRunFilteredAutoGroup}
                           title={
                             filteredAutoGroupButtonTitle ??
-                            'Run AI Auto Group on visible ungrouped pages in this list (Shift+1).'
+                            'Run AI Auto Group on visible ungrouped pages in this list (Shift+1 or `).'
                           }
                           className="px-4 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[110px]"
                         >
                           {isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0 ? 'Queue Auto Group' : 'Auto Group'} ({filteredClusters.length})
                         </button>
-                        {isRunningFilteredAutoGroup && (
-                          <button
-                            onClick={handleStopFilteredAutoGroup}
-                            className="px-4 py-1.5 text-xs font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors whitespace-nowrap min-w-[110px]"
-                          >
-                            Stop
-                          </button>
-                        )}
                       </>
                     )}
 
@@ -959,6 +951,15 @@ export default function GroupDataView(props: any) {
                           <Download className="w-3.5 h-3.5 mr-1 inline" /> Export
                         </button>
                       </>
+                    )}
+                    {(activeTab === 'pages' || activeTab === 'grouped') && (isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={handleStopFilteredAutoGroup}
+                        className="px-4 py-1.5 text-xs font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors whitespace-nowrap min-w-[110px]"
+                      >
+                        Stop Auto Group
+                      </button>
                     )}
                   </div>
                     </>
@@ -1057,8 +1058,8 @@ export default function GroupDataView(props: any) {
                       </span>
                     )}
                     {activeTab === 'pages' && (
-                      <span className="text-zinc-400 shrink-0" title="Keyboard shortcut">
-                        Shift+1
+                      <span className="text-zinc-400 shrink-0" title="Keyboard shortcuts">
+                        Shift+1 or `
                       </span>
                     )}
                   </div>
@@ -1243,16 +1244,6 @@ export default function GroupDataView(props: any) {
                         onSubClusterSelect={handleSubClusterSelect}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
-                        groupActionButton={
-                          <button
-                            onClick={() => handleApproveGroup(row.groupName)}
-                  disabled={isRoutineSharedEditBlocked}
-                            className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-bold shrink-0"
-                            title="Approve group"
-                          >
-                            {'\u2713'}
-                          </button>
-                        }
                       />
                     ))}
 

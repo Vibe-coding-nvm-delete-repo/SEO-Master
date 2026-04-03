@@ -146,4 +146,91 @@ describe('useProjectPersistence duplicate restore guards', () => {
     expect(result.current.results).toHaveLength(1);
     expect(result.current.results?.[0].tokens).toBe('approved tokens');
   });
+
+  it('applyFilteredAutoGroupBatch repairs omitted accepted pages before removing them from legacy Ungrouped state', async () => {
+    const alpha = makeCluster('alpha', 'Alpha');
+    const beta = makeCluster('beta', 'Beta');
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: [],
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.bulkSet({
+        results: [makeRow(alpha), makeRow(beta)],
+        clusterSummary: [alpha, beta],
+      });
+    });
+
+    await act(async () => {
+      await result.current.applyFilteredAutoGroupBatch({
+        incoming: [makeGroup('group-alpha', alpha)],
+        acceptedPages: [alpha, beta],
+        hasReviewApi: true,
+      });
+    });
+
+    expect(result.current.groupedClusters.flatMap((group) => group.clusters.map((cluster) => cluster.tokens)).sort()).toEqual([
+      'alpha',
+      'beta',
+    ]);
+    expect(result.current.clusterSummary).toEqual([]);
+    expect(result.current.results).toEqual([]);
+  });
+
+  it('applyFilteredAutoGroupBatch removes stale accepted-page duplicates from existing grouped state', async () => {
+    const alpha = makeCluster('alpha', 'Alpha');
+    const beta = makeCluster('beta', 'Beta');
+    const gamma = makeCluster('gamma', 'Gamma');
+    const staleGroupedAlpha: GroupedCluster = {
+      id: 'stale-group',
+      groupName: 'Shared Intent',
+      clusters: [alpha, gamma],
+      totalVolume: alpha.totalVolume + gamma.totalVolume,
+      keywordCount: alpha.keywordCount + gamma.keywordCount,
+      avgKd: 20,
+      avgKwRating: null,
+    };
+
+    const incomingGroup: GroupedCluster = {
+      id: 'incoming-group',
+      groupName: 'Shared Intent',
+      clusters: [alpha, beta],
+      totalVolume: alpha.totalVolume + beta.totalVolume,
+      keywordCount: alpha.keywordCount + beta.keywordCount,
+      avgKd: 20,
+      avgKwRating: null,
+    };
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: [],
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.bulkSet({
+        results: [makeRow(alpha), makeRow(beta)],
+        clusterSummary: [alpha, beta],
+        groupedClusters: [staleGroupedAlpha],
+      });
+    });
+
+    await act(async () => {
+      await result.current.applyFilteredAutoGroupBatch({
+        incoming: [incomingGroup],
+        acceptedPages: [alpha, beta],
+        hasReviewApi: true,
+      });
+    });
+
+    const finalTokens = result.current.groupedClusters.flatMap((group) => group.clusters.map((cluster) => cluster.tokens));
+    expect(finalTokens.filter((token) => token === 'alpha')).toHaveLength(1);
+    expect(finalTokens.sort()).toEqual(['alpha', 'beta', 'gamma']);
+  });
 });

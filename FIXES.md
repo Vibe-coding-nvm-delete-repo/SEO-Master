@@ -218,6 +218,16 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 ### [x] 1.16 Shared V2 fallback payloads could masquerade as canonical state
 **Date fixed:** 2026-04-01
 **Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FIXES.md`, `FEATURES.md`
+
+### [x] 1.17 Filtered Auto Group forced tab switches and could resurrect accepted pages in Ungrouped
+**Date fixed:** 2026-04-03
+**Files:** `src/App.tsx`, `src/filteredAutoGroupContract.ts`, `src/filteredAutoGroupContract.test.ts`, `src/hooks/useFilteredAutoGroupFlow.ts`, `src/hooks/useFilteredAutoGroupFlow.test.tsx`, `src/useProjectPersistence.ts`, `src/useProjectPersistence.test.tsx`, `src/useProjectPersistence.v2.test.tsx`, `FEATURES.md`
+**Root cause:** Filtered Auto Group had two separate failure points. A local UI regression explicitly called `showGroupedTab()` on run start, which forced users away from Ungrouped. Separately, the flow hid the whole accepted batch immediately but the persistence boundary trusted caller-provided removal tokens without proving the final merged grouped state still contained those same pages. If the model omitted pages or any later merge path lost them, pending masking expired and those pages resurfaced in Ungrouped.
+**All instances fixed:**
+- `src/App.tsx` and `src/hooks/useFilteredAutoGroupFlow.ts` no longer switch tabs automatically when filtered Auto Group starts.
+- `src/filteredAutoGroupContract.ts` centralizes accepted-page reconciliation, duplicate-assignment normalization, and final exact-once grouped-coverage checks for the entire filtered Auto Group flow.
+- `src/useProjectPersistence.ts` now uses a dedicated `applyFilteredAutoGroupBatch()` boundary that strips stale accepted-page duplicates out of existing grouped state before merge and refuses to prune Ungrouped if final grouped coverage is incomplete or duplicated.
+- Regression coverage now locks in the no-tab-switch contract, accepted-page singleton repair behavior, legacy-state durability, and V2 invocation path.
 **Root cause:** The shared-project V2 hook treated a fallback `canonical.resolved` payload as equivalent to a fully loaded canonical epoch whenever `collab/meta` already said `readMode:'v2'` and `commitState:'ready'`. That collapsed provisional local fallback and authoritative canonical state into the same branch. Once that happened, a stale cache payload could be re-saved as canonical IndexedDB state, the browser could appear writable even though no immutable base commit was loaded, and the `collab/meta` listener could short-circuit identical meta snapshots before retrying the canonical reload that should have repaired the session.
 **All instances fixed:**
 - `src/useProjectPersistence.ts` now tracks whether the current V2 base snapshot is `authoritative` or only `provisional`, so only a loaded base commit matching the active `collab/meta` epoch can unlock writes or qualify for canonical cache persistence.
@@ -476,6 +486,11 @@ All items in this file were triple-checked on 2026-03-25:
   Root cause: static census/audit/coverage checks alone can verify callsite hygiene, but they cannot guarantee runtime cross-client convergence for every shared lane.
   Instances fixed: collab gate now enforces targeted convergence tests for app settings, project metadata, shared-project V2 persistence, Firestore rules, and two-session browser collaboration before release gating continues.
   Prevention rule: no release gate can pass unless shared-lane convergence tests pass in addition to Firestore callsite contract checks.
+
+- [x] (2026-04-03) Restored filtered Auto Group queue capture, grouped-tab handoff, and full stop behavior in `src/App.tsx`, `src/hooks/useFilteredAutoGroupFlow.ts`, `src/hooks/useFilteredAutoGroupFlow.test.tsx`, `src/hooks/useFilteredTableData.test.tsx`, `src/hooks/useGlobalGroupingShortcuts.ts`, `src/hooks/useGlobalGroupingShortcuts.test.tsx`, and `src/GroupDataView.tsx`.
+  Root cause: the extracted filtered Auto Group hook had drifted away from the documented flow. It no longer flipped the workspace into the Grouped tab when a run started, the queue/stop state machine only aborted the active fetch instead of cancelling the full pending pipeline, the keyboard shortcut contract had fallen out of sync with the documented backquote alias, omitted-model pages could fall back into Ungrouped instead of being forced into singleton groups, and the final removal path still trusted generated-group tokens instead of the accepted Pages batch itself.
+  Instances fixed: start-of-run grouped-tab handoff, pending-token rollback when the exclusive-operation wrapper refuses to start, queue cancellation and pending-token restoration on Stop, backquote shortcut support outside editable targets, singleton fallback for omitted pages, accepted-batch repair if generated groups still miss a page, and direct regressions proving pending auto-group pages disappear from Ungrouped immediately.
+  Prevention rule: filtered Auto Group must always treat the current visible Pages list as the accepted source of truth; any page accepted into the run must either be restored by Stop/cancel or be forcibly represented in grouped output before Ungrouped removal clears.
 
 - [x] (2026-04-01) Added durable collaboration diagnostics journaling in `src/collabDiagnosticsLog.ts`, `src/cloudSyncStatus.ts`, and `src/runtimeTrace.ts` with regression tests in `src/collabDiagnosticsLog.test.ts` and `src/cloudSyncStatus.diagnostics.test.ts`.
   Root cause: prevention gates were strong, but forensic debugging still depended on transient console output and in-memory state, making post-incident cross-client timeline reconstruction difficult.

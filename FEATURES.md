@@ -316,6 +316,7 @@ Hover tooltip shows: network state, database name, server snapshot status, proje
 ### Keyboard Shortcuts
 - **Tab:** Group clusters (ungrouped) or Approve (grouped)
 - **Shift+1:** Run Pages Auto Group (on Pages tab) or Auto Merge KWs (on Token Management auto-merge view)
+- **Backquote (`):** Alias for Pages Auto Group when focus is not inside an editable field
 
 ---
 
@@ -345,8 +346,15 @@ Hover tooltip shows: network state, database name, server snapshot status, proje
 ### Filtered Auto-Group (Shift+1 from Pages Tab)
 
 - Runs on the current visible ungrouped page list (respects all active filters)
+- Captures that full filtered Pages snapshot at trigger time and processes all of those pages in one run
 - When no filters active, uses explicit full-table scope
 - Keeps only the latest pending run (prevents stale filter intents from stacking)
+- **Singleton fallback:** any page the AI model omits from its response is automatically placed into its own singleton group, ensuring ALL accepted filtered pages end up grouped
+- **Exact-once grouped invariant:** before Ungrouped is durably pruned, the grouped write normalizes duplicate AI assignments, strips stale accepted-page duplicates out of existing grouped state, and re-checks that every accepted filtered page appears exactly once in final grouped state
+- Immediately marks the current filtered pages as pending so they disappear from Ungrouped as soon as the run is accepted
+- Keeps the user on the Ungrouped tab while the run is in flight; Auto Group never forces a tab switch
+- Stop cancels the in-flight run, clears queued Auto Group jobs, and restores pending pages back to Ungrouped
+- Shared read-only / canonical reload transitions pause queued jobs instead of silently clearing them
 
 ### QA Review (Optional)
 
@@ -774,6 +782,7 @@ All settings persisted to IDB + Firestore with real-time sync.
 ### Keyboard Shortcuts
 - Tab: context-aware (group or approve)
 - Shift+1: context-aware (auto-group or auto-merge)
+- Backquote (`): Pages Auto Group alias outside editable fields
 - Works from search/filter inputs without requiring click-out
 - Escape: close tooltips/modals
 
@@ -847,4 +856,4 @@ All settings persisted to IDB + Firestore with real-time sync.
 
 ---
 
-*Last updated: 2026-04-02*
+*Last updated: 2026-04-03*

@@ -65,6 +65,7 @@ import type {
 import { parseSubClusterKey } from './subClusterKeys';
 import { getPersistErrorInfo, logPersistError, reportLocalPersistFailure, reportPersistFailure } from './persistenceErrors';
 import { withPersistTimeout } from './persistTimeout';
+import { prepareFilteredAutoGroupFinalGroups, type AcceptedTokenCoverageMismatch } from './filteredAutoGroupContract';
 import {
   clearSharedProjectSyncState,
   clearListenerError,
@@ -277,11 +278,10 @@ export interface PersistedState {
 
 type RecalcFn = (g: GroupedCluster, remaining: ClusterSummary[]) => GroupedCluster;
 
-interface MergeGroupsByNameOpts {
+interface FilteredAutoGroupBatchOpts {
   incoming: GroupedCluster[];
-  removedTokens: Set<string>;
+  acceptedPages: ClusterSummary[];
   hasReviewApi: boolean;
-  mergeFn: (existing: GroupedCluster[], incoming: GroupedCluster[], hasReviewApi: boolean) => GroupedCluster[];
 }
 
 export interface ProjectPersistence extends PersistedState {
@@ -311,7 +311,7 @@ export interface ProjectPersistence extends PersistedState {
 
   // Atomic mutations
   addGroupsAndRemovePages: (newGroups: GroupedCluster[], removedTokens: Set<string>) => Promise<SharedMutationResult>;
-  mergeGroupsByName: (opts: MergeGroupsByNameOpts) => Promise<SharedMutationResult>;
+  applyFilteredAutoGroupBatch: (opts: FilteredAutoGroupBatchOpts) => Promise<SharedMutationResult>;
   updateGroups: (
     updaterOrValue: ((groups: GroupedCluster[]) => GroupedCluster[]) | GroupedCluster[],
     approvedOverride?: GroupedCluster[],
@@ -3425,27 +3425,78 @@ export function useProjectPersistence(options: {
     return SHARED_MUTATION_ACCEPTED;
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
-  const mergeGroupsByName = useCallback(async (opts: MergeGroupsByNameOpts): Promise<SharedMutationResult> => {
+  const applyFilteredAutoGroupBatch = useCallback(async (opts: FilteredAutoGroupBatchOpts): Promise<SharedMutationResult> => {
+    const acceptedTokens = new Set(opts.acceptedPages.map((page) => page.tokens));
+    const failCoverageInvariant = (mismatch: AcceptedTokenCoverageMismatch): SharedMutationResult => {
+      const fragments: string[] = [];
+      if (mismatch.missingTokens.length > 0) {
+        fragments.push(
+          mismatch.missingTokens.length === 1
+            ? '1 accepted page was missing from final grouped state'
+            : `${mismatch.missingTokens.length} accepted pages were missing from final grouped state`,
+        );
+      }
+      if (mismatch.duplicateTokens.length > 0) {
+        fragments.push(
+          mismatch.duplicateTokens.length === 1
+            ? '1 accepted page was assigned more than once'
+            : `${mismatch.duplicateTokens.length} accepted pages were assigned more than once`,
+        );
+      }
+      const message = `Auto Group could not finalize the accepted batch because ${fragments.join(' and ')}. Ungrouped pages were left unchanged so no page is lost.`;
+      lastV2WriteErrorRef.current = new Error(
+        `filtered-auto-group-coverage:missing=${mismatch.missingTokens.join(',')};duplicate=${mismatch.duplicateTokens.join(',')}`,
+      );
+      addToastRef.current(message, 'error');
+      console.error('Filtered Auto Group coverage invariant failed', {
+        duplicateTokens: mismatch.duplicateTokens,
+        missingTokens: mismatch.missingTokens,
+        acceptedTokens: Array.from(acceptedTokens),
+      });
+      return failedSharedMutation('unknown');
+    };
+
+    const buildNextState = (state: PersistedState) => {
+      const prepared = prepareFilteredAutoGroupFinalGroups(
+        state.groupedClusters,
+        opts.incoming,
+        opts.acceptedPages,
+        opts.hasReviewApi,
+      );
+      return {
+        groupedClusters: prepared.groups,
+        mismatch: prepared.mismatch,
+        clusterSummary: state.clusterSummary?.filter((cluster) => !acceptedTokens.has(cluster.tokens)) || null,
+        results: state.results?.filter((row) => !acceptedTokens.has(row.tokens)) || null,
+      };
+    };
+
     if (storageModeRef.current === 'v2') {
       const s = latest.current;
-      const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
-      const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
-      const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
-      const result = await persistGroupsV2(merged, s.approvedGroups);
+      const next = buildNextState(s);
+      if (next.mismatch.missingTokens.length > 0 || next.mismatch.duplicateTokens.length > 0) {
+        return failCoverageInvariant(next.mismatch);
+      }
+      const result = await persistGroupsV2(next.groupedClusters, s.approvedGroups);
       if (!isAcceptedSharedMutation(result)) return result;
       applyLocalChanges({
-        groupedClusters: merged,
-        clusterSummary: nextClusters,
-        results: nextResults,
+        groupedClusters: next.groupedClusters,
+        clusterSummary: next.clusterSummary,
+        results: next.results,
       }, { checkpoint: true });
       return result;
     }
-    mutateAndSave(s => {
-      const merged = opts.mergeFn(s.groupedClusters, opts.incoming, opts.hasReviewApi);
-      const nextClusters = s.clusterSummary?.filter(c => !opts.removedTokens.has(c.tokens)) || null;
-      const nextResults = s.results?.filter(r => !opts.removedTokens.has(r.tokens)) || null;
-      return { groupedClusters: merged, clusterSummary: nextClusters, results: nextResults };
-    });
+
+    const current = latest.current;
+    const next = buildNextState(current);
+    if (next.mismatch.missingTokens.length > 0 || next.mismatch.duplicateTokens.length > 0) {
+      return failCoverageInvariant(next.mismatch);
+    }
+    mutateAndSave(() => ({
+      groupedClusters: next.groupedClusters,
+      clusterSummary: next.clusterSummary,
+      results: next.results,
+    }));
     return SHARED_MUTATION_ACCEPTED;
   }, [applyLocalChanges, mutateAndSave, persistGroupsV2]);
 
@@ -4075,7 +4126,7 @@ export function useProjectPersistence(options: {
 
     // Atomic mutations
     addGroupsAndRemovePages,
-    mergeGroupsByName,
+    applyFilteredAutoGroupBatch,
     updateGroups,
     approveGroup,
     unapproveGroup,

@@ -1244,13 +1244,12 @@ describe('useProjectPersistence V2 hardening', () => {
       avgKwRating: 1,
     };
 
-    let mutationResult: Awaited<ReturnType<typeof result.current.mergeGroupsByName>> | null = null;
+    let mutationResult: Awaited<ReturnType<typeof result.current.applyFilteredAutoGroupBatch>> | null = null;
     await act(async () => {
-      mutationResult = await result.current.mergeGroupsByName({
+      mutationResult = await result.current.applyFilteredAutoGroupBatch({
         incoming: [incomingGroup],
-        removedTokens: new Set(['alpha']),
+        acceptedPages: [cluster],
         hasReviewApi: false,
-        mergeFn: (_existing, incoming) => incoming,
       });
     });
 

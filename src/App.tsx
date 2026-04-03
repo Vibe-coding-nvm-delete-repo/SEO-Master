@@ -1097,7 +1097,7 @@ export default function App() {
     maxKwRating,
     minLen,
     maxLen,
-    mergeGroupsByName: persistence.mergeGroupsByName,
+    applyFilteredAutoGroupBatch: persistence.applyFilteredAutoGroupBatch,
     pendingFilteredAutoGroupTokens,
     setPendingFilteredAutoGroupTokens,
     setSelectedClusters,

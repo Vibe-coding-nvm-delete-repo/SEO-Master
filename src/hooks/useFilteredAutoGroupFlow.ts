@@ -6,8 +6,9 @@ import {
   FILTERED_AUTO_GROUP_NO_EXTRA_FILTERS_SENTINEL,
   filteredAutoGroupDisabledReason,
 } from '../filteredAutoGroupEligibility';
+import { normalizeFilteredAutoGroupIncomingGroups } from '../filteredAutoGroupContract';
 import { getFilteredAutoGroupSettingsStatus } from '../filteredAutoGroupSettingsStatus';
-import { buildGroupedClusterFromPages, mergeGroupedClustersByName } from '../groupedClusterUtils';
+import { buildGroupedClusterFromPages } from '../groupedClusterUtils';
 import { parseFilteredAutoGroupResponse } from '../autoGroupResponseParser';
 import { enqueueLatestFilteredAutoGroupJob } from '../filteredAutoGroupQueue';
 import type { GroupReviewSettingsData, GroupReviewSettingsRef } from '../GroupReviewSettings';
@@ -58,11 +59,10 @@ interface UseFilteredAutoGroupFlowParams {
   maxKwRating: string;
   minLen: string;
   maxLen: string;
-  mergeGroupsByName: (params: {
+  applyFilteredAutoGroupBatch: (params: {
     incoming: GroupedCluster[];
-    removedTokens: Set<string>;
+    acceptedPages: ClusterSummary[];
     hasReviewApi: boolean;
-    mergeFn: typeof mergeGroupedClustersByName;
   }) => Promise<SharedMutationResult>;
   pendingFilteredAutoGroupTokens: Set<string>;
   setPendingFilteredAutoGroupTokens: Dispatch<SetStateAction<Set<string>>>;
@@ -95,7 +95,7 @@ export function useFilteredAutoGroupFlow({
   maxKwRating,
   minLen,
   maxLen,
-  mergeGroupsByName,
+  applyFilteredAutoGroupBatch,
   pendingFilteredAutoGroupTokens,
   setPendingFilteredAutoGroupTokens,
   setSelectedClusters,
@@ -107,6 +107,7 @@ export function useFilteredAutoGroupFlow({
 }: UseFilteredAutoGroupFlowParams) {
   const filteredAutoGroupAbortRef = useRef<AbortController | null>(null);
   const activeFilteredAutoGroupJobRef = useRef<FilteredAutoGroupJob | null>(null);
+  const stopRequestedRef = useRef(false);
   const [isRunningFilteredAutoGroup, setIsRunningFilteredAutoGroup] = useState(false);
   const [filteredAutoGroupQueue, setFilteredAutoGroupQueue] = useState<FilteredAutoGroupJob[]>([]);
   const [filteredAutoGroupStats, setFilteredAutoGroupStats] = useState<FilteredAutoGroupRunStats>({
@@ -121,6 +122,15 @@ export function useFilteredAutoGroupFlow({
     completionTokens: 0,
     elapsedMs: 0,
   });
+
+  const removePendingTokensForPages = useCallback((pages: ClusterSummary[]) => {
+    if (pages.length === 0) return;
+    setPendingFilteredAutoGroupTokens((prev) => {
+      const next = new Set(prev);
+      for (const page of pages) next.delete(page.tokens);
+      return next;
+    });
+  }, [setPendingFilteredAutoGroupTokens]);
 
   const filteredAutoGroupFilterSummary = useMemo(() => {
     const active: string[] = [];
@@ -184,7 +194,7 @@ export function useFilteredAutoGroupFlow({
   const canRunFilteredAutoGroup = filteredAutoGroupDisableReason === null;
   const filteredAutoGroupButtonTitle =
     filteredAutoGroupDisableReason ??
-    'Run AI Auto Group on all visible ungrouped pages in this list (Shift+1).';
+    'Run AI Auto Group on all visible ungrouped pages in this list (Shift+1 or `).';
 
   const buildFilteredAutoGroupPrompt = useCallback((pages: ClusterSummary[], filterSummary: string, basePrompt: string) => {
     const pageLines = pages
@@ -243,6 +253,13 @@ FAILURE CONDITIONS TO AVOID:
   const runFilteredAutoGroupJob = useCallback(async (job: FilteredAutoGroupJob) => {
     const pagesToReview = job.pages;
     const controller = new AbortController();
+    const throwIfStopped = () => {
+      if (controller.signal.aborted || stopRequestedRef.current) {
+        throw new DOMException('Filtered Auto Group aborted', 'AbortError');
+      }
+    };
+
+    stopRequestedRef.current = false;
     activeFilteredAutoGroupJobRef.current = job;
     filteredAutoGroupAbortRef.current = controller;
     setIsRunningFilteredAutoGroup(true);
@@ -303,6 +320,7 @@ FAILURE CONDITIONS TO AVOID:
           }),
       });
       const response = timedResponse.result;
+      throwIfStopped();
 
       if (!response.ok) {
         const errText = (
@@ -315,6 +333,7 @@ FAILURE CONDITIONS TO AVOID:
         throw new Error(`API ${response.status}: ${errText.slice(0, 200)}`);
       }
 
+      throwIfStopped();
       const data = (
         await runWithOpenRouterTimeout({
           signal: controller.signal,
@@ -322,20 +341,37 @@ FAILURE CONDITIONS TO AVOID:
           run: async () => response.json(),
         })
       ).result;
+      throwIfStopped();
       const content = data.choices?.[0]?.message?.content || '';
       const parsedGroups = parseFilteredAutoGroupResponse(content, pagesToReview);
       if (parsedGroups.length === 0) throw new Error('Model returned no usable groups');
 
+      // Collect all tokens the model assigned to a group
+      const matchedTokens = new Set<string>();
+      for (const group of parsedGroups) {
+        for (const page of group) {
+          matchedTokens.add(page.tokens);
+        }
+      }
+      // Create singleton groups for pages the model omitted
+      const unmatchedPages = pagesToReview.filter((p) => !matchedTokens.has(p.tokens));
+      const singletonGroups: ClusterSummary[][] = unmatchedPages.map((p) => [p]);
+      const allGroups = [...parsedGroups, ...singletonGroups];
+
       const hasReviewApi = groupReviewSettingsRef.current?.hasApiKey() ?? false;
-      const generatedGroups: GroupedCluster[] = parsedGroups
+      const rawGeneratedGroups: GroupedCluster[] = allGroups
         .filter((groupPages) => groupPages.length >= 1)
         .map((groupPages) =>
           buildGroupedClusterFromPages(groupPages, hasReviewApi, {
             id: `filtered_auto_group_${Date.now()}_${groupPages[0].tokens}`,
           }),
         );
-
-      const groupedTokens = new Set(generatedGroups.flatMap((group) => group.clusters.map((page) => page.tokens)));
+      const generatedGroups = normalizeFilteredAutoGroupIncomingGroups(
+        rawGeneratedGroups,
+        pagesToReview,
+        hasReviewApi,
+      );
+      const acceptedTokens = new Set(pagesToReview.map((page) => page.tokens));
       const groupedVolume = generatedGroups.reduce((sum, group) => sum + group.totalVolume, 0);
       const promptTokens = data.usage?.prompt_tokens || 0;
       const completionTokens = data.usage?.completion_tokens || 0;
@@ -344,16 +380,18 @@ FAILURE CONDITIONS TO AVOID:
           completionTokens * parseFloat(job.modelPricing.completion || '0')
         : 0;
 
+      throwIfStopped();
       const applyResult =
         !isBulkSharedEditBlocked && generatedGroups.length > 0
-          ? await mergeGroupsByName({
+          ? await applyFilteredAutoGroupBatch({
               incoming: generatedGroups,
-              removedTokens: groupedTokens,
+              acceptedPages: pagesToReview,
               hasReviewApi,
-              mergeFn: mergeGroupedClustersByName,
             })
           : null;
       const groupsApplied = Boolean(applyResult && isAcceptedSharedMutation(applyResult));
+      const applyFailed = applyResult?.status === 'failed';
+      const applyBlocked = applyResult?.status === 'blocked';
 
       if (groupsApplied) {
         startTransition(() => {
@@ -362,19 +400,32 @@ FAILURE CONDITIONS TO AVOID:
         });
       }
 
-      setPendingFilteredAutoGroupTokens((prev) => {
-        const next = new Set(prev);
-        for (const page of pagesToReview) next.delete(page.tokens);
-        return next;
-      });
+      removePendingTokensForPages(pagesToReview);
 
       const elapsedMs = Math.round(performance.now() - startedAt);
+      if (applyFailed) {
+        setFilteredAutoGroupStats({
+          status: 'error',
+          totalPages: pagesToReview.length,
+          groupsCreated: 0,
+          pagesGrouped: 0,
+          pagesRemaining: pagesToReview.length,
+          totalVolumeGrouped: 0,
+          cost,
+          promptTokens,
+          completionTokens,
+          elapsedMs,
+          error: 'Auto Group could not finalize all accepted pages. Ungrouped pages were left unchanged.',
+        });
+        return;
+      }
+
       setFilteredAutoGroupStats({
         status: 'complete',
         totalPages: pagesToReview.length,
         groupsCreated: groupsApplied ? generatedGroups.length : 0,
-        pagesGrouped: groupsApplied ? groupedTokens.size : 0,
-        pagesRemaining: pagesToReview.length - (groupsApplied ? groupedTokens.size : 0),
+        pagesGrouped: groupsApplied ? acceptedTokens.size : 0,
+        pagesRemaining: pagesToReview.length - (groupsApplied ? acceptedTokens.size : 0),
         totalVolumeGrouped: groupsApplied ? groupedVolume : 0,
         cost,
         promptTokens,
@@ -382,21 +433,29 @@ FAILURE CONDITIONS TO AVOID:
         elapsedMs,
       });
 
-      if (groupsApplied && groupedTokens.size > 0) recordGroupingEvent(groupedTokens.size);
-      if (groupsApplied && groupedTokens.size > 0) {
+      if (groupsApplied && acceptedTokens.size > 0) recordGroupingEvent(acceptedTokens.size);
+      if (groupsApplied && acceptedTokens.size > 0) {
         logAndToast(
           'auto-group',
           `Filtered Auto Group created ${generatedGroups.length} groups from ${pagesToReview.length} filtered pages`,
-          groupedTokens.size,
-          `Auto Group grouped ${groupedTokens.size}/${pagesToReview.length} filtered pages into ${generatedGroups.length} groups`,
+          acceptedTokens.size,
+          `Auto Group grouped ${acceptedTokens.size}/${pagesToReview.length} filtered pages into ${generatedGroups.length} groups`,
           'success',
         );
-      } else if (generatedGroups.length > 0) {
+      } else if (applyBlocked) {
         logAndToast(
           'auto-group',
           'Filtered Auto Group could not apply groups while shared edits are read-only',
           0,
           'Auto Group finished generating candidate groups, but shared edits are currently read-only so nothing was applied.',
+          'warning',
+        );
+      } else if (generatedGroups.length > 0) {
+        logAndToast(
+          'auto-group',
+          'Filtered Auto Group generated candidate groups but did not apply them',
+          0,
+          'Auto Group generated groups, but nothing was applied. Check the latest error details and try again.',
           'warning',
         );
       } else {
@@ -409,15 +468,12 @@ FAILURE CONDITIONS TO AVOID:
         );
       }
     } catch (error: any) {
-      setPendingFilteredAutoGroupTokens((prev) => {
-        const next = new Set(prev);
-        for (const page of pagesToReview) next.delete(page.tokens);
-        return next;
-      });
+      removePendingTokensForPages(pagesToReview);
       if (error.name === 'AbortError') {
         setFilteredAutoGroupStats((prev) => ({
           ...prev,
           status: 'idle',
+          error: undefined,
           elapsedMs: Math.round(performance.now() - startedAt),
         }));
       } else {
@@ -434,15 +490,18 @@ FAILURE CONDITIONS TO AVOID:
       filteredAutoGroupAbortRef.current = null;
       activeFilteredAutoGroupJobRef.current = null;
     }
-  }, [buildFilteredAutoGroupPrompt, groupReviewSettingsRef, isBulkSharedEditBlocked, logAndToast, mergeGroupsByName, recordGroupingEvent, setCurrentPage, setSelectedClusters, startTransition]);
+  }, [applyFilteredAutoGroupBatch, buildFilteredAutoGroupPrompt, groupReviewSettingsRef, isBulkSharedEditBlocked, logAndToast, recordGroupingEvent, removePendingTokensForPages, setCurrentPage, setSelectedClusters, startTransition]);
 
   const runLockedFilteredAutoGroupJob = useCallback(async (job: FilteredAutoGroupJob) => {
     if (runWithExclusiveOperation) {
-      await runWithExclusiveOperation('auto-group', () => runFilteredAutoGroupJob(job));
+      const result = await runWithExclusiveOperation('auto-group', () => runFilteredAutoGroupJob(job));
+      if (result === null) {
+        removePendingTokensForPages(job.pages);
+      }
       return;
     }
     await runFilteredAutoGroupJob(job);
-  }, [runFilteredAutoGroupJob, runWithExclusiveOperation]);
+  }, [removePendingTokensForPages, runFilteredAutoGroupJob, runWithExclusiveOperation]);
 
   const handleRunFilteredAutoGroup = useCallback(() => {
     if (isBulkSharedEditBlocked) {
@@ -505,6 +564,7 @@ FAILURE CONDITIONS TO AVOID:
       modelPricing: modelObj?.pricing,
     };
 
+    stopRequestedRef.current = false;
     setPendingFilteredAutoGroupTokens((prev) => {
       const next = new Set(prev);
       for (const page of pagesToReview) next.add(page.tokens);
@@ -537,35 +597,41 @@ FAILURE CONDITIONS TO AVOID:
   ]);
 
   const handleStopFilteredAutoGroup = useCallback(() => {
+    const activeJob = activeFilteredAutoGroupJobRef.current;
+    const queuedJobs = filteredAutoGroupQueue;
+    if (!activeJob && queuedJobs.length === 0) return;
+
+    stopRequestedRef.current = true;
     filteredAutoGroupAbortRef.current?.abort();
-  }, []);
+    setFilteredAutoGroupQueue([]);
+    removePendingTokensForPages([
+      ...(activeJob?.pages ?? []),
+      ...queuedJobs.flatMap((job) => job.pages),
+    ]);
+    setFilteredAutoGroupStats((prev) => ({
+      ...prev,
+      status: 'idle',
+      error: undefined,
+      pagesRemaining: 0,
+    }));
+    logAndToast(
+      'auto-group',
+      'Filtered Auto Group stopped by user',
+      0,
+      'Auto Group stopped. Pending pages returned to Ungrouped.',
+      'info',
+    );
+  }, [filteredAutoGroupQueue, logAndToast, removePendingTokensForPages]);
 
   useEffect(() => {
     if (isRunningFilteredAutoGroup) return;
     if (activeFilteredAutoGroupJobRef.current) return;
-    if (isBulkSharedEditBlocked) {
-      if (filteredAutoGroupQueue.length > 0) {
-        setPendingFilteredAutoGroupTokens((prev) => {
-          const next = new Set(prev);
-          for (const queuedJob of filteredAutoGroupQueue) {
-            for (const page of queuedJob.pages) next.delete(page.tokens);
-          }
-          return next;
-        });
-        setFilteredAutoGroupQueue([]);
-      }
-      return;
-    }
+    if (isBulkSharedEditBlocked) return;
     if (filteredAutoGroupQueue.length === 0) return;
     const [nextJob, ...rest] = filteredAutoGroupQueue;
     setFilteredAutoGroupQueue(rest);
     void runLockedFilteredAutoGroupJob(nextJob);
-  }, [filteredAutoGroupQueue, isBulkSharedEditBlocked, isRunningFilteredAutoGroup, runLockedFilteredAutoGroupJob, setPendingFilteredAutoGroupTokens]);
-
-  useEffect(() => {
-    if (!isBulkSharedEditBlocked) return;
-    filteredAutoGroupAbortRef.current?.abort();
-  }, [isBulkSharedEditBlocked]);
+  }, [filteredAutoGroupQueue, isBulkSharedEditBlocked, isRunningFilteredAutoGroup, runLockedFilteredAutoGroupJob]);
 
   useEffect(() => () => {
     filteredAutoGroupAbortRef.current?.abort();
