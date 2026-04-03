@@ -6,6 +6,7 @@ import {
   buildGroupDocChanges,
   buildManualBlockedKeywordDocChanges,
   normalizeCollabMetaForRecoveryWrite,
+  type ProjectBaseSnapshot,
   type ProjectCollabEntityState,
 } from './projectCollabV2';
 import type { ProjectDataPayload } from './projectStorage';
@@ -181,6 +182,90 @@ describe('projectCollabV2', () => {
         tokenArr: ['beta'],
       },
     ]);
+  });
+
+  it('keeps grouped ownership authoritative when a group doc only has cluster tokens', () => {
+    const alpha = makeCluster('alpha', 'Alpha');
+    const beta = makeCluster('beta', 'Beta');
+    const base: ProjectBaseSnapshot = {
+      results: [
+        {
+          pageName: alpha.pageName,
+          pageNameLower: alpha.pageNameLower,
+          pageNameLen: alpha.pageNameLen,
+          tokens: alpha.tokens,
+          tokenArr: alpha.tokenArr,
+          keyword: alpha.keywords[0].keyword,
+          keywordLower: alpha.keywords[0].keyword.toLowerCase(),
+          searchVolume: alpha.keywords[0].volume,
+          kd: alpha.keywords[0].kd,
+          label: alpha.label,
+          labelArr: alpha.labelArr,
+          locationCity: alpha.locationCity,
+          locationState: alpha.locationState,
+          kwRating: alpha.keywords[0].kwRating ?? null,
+        },
+        {
+          pageName: beta.pageName,
+          pageNameLower: beta.pageNameLower,
+          pageNameLen: beta.pageNameLen,
+          tokens: beta.tokens,
+          tokenArr: beta.tokenArr,
+          keyword: beta.keywords[0].keyword,
+          keywordLower: beta.keywords[0].keyword.toLowerCase(),
+          searchVolume: beta.keywords[0].volume,
+          kd: beta.keywords[0].kd,
+          label: beta.label,
+          labelArr: beta.labelArr,
+          locationCity: beta.locationCity,
+          locationState: beta.locationState,
+          kwRating: beta.keywords[0].kwRating ?? null,
+        },
+      ],
+      clusterSummary: [beta],
+      tokenSummary: [],
+      stats: null,
+      datasetStats: null,
+      autoGroupSuggestions: [],
+      autoMergeRecommendations: [],
+      groupMergeRecommendations: [],
+      updatedAt: '2026-03-30T00:00:00.000Z',
+      datasetEpoch: 7,
+    };
+    const overlay: ProjectCollabEntityState = {
+      meta: null,
+      groups: [
+        {
+          id: 'group-alpha',
+          groupName: 'Alpha Group',
+          status: 'grouped',
+          datasetEpoch: 7,
+          clusterTokens: ['alpha'],
+          pageCount: 1,
+          totalVolume: alpha.totalVolume,
+          keywordCount: alpha.keywordCount,
+          avgKd: alpha.avgKd,
+          avgKwRating: alpha.avgKwRating,
+          revision: 1,
+          updatedAt: '2026-03-30T00:00:00.000Z',
+          updatedByClientId: 'client-a',
+          lastMutationId: 'm1',
+        },
+      ],
+      blockedTokens: [],
+      manualBlockedKeywords: [],
+      tokenMergeRules: [],
+      labelSections: [],
+      activityLog: [],
+      activeOperation: null,
+    };
+
+    const resolved = assembleCanonicalPayload(base, overlay);
+
+    expect(resolved?.groupedClusters).toHaveLength(1);
+    expect(resolved?.groupedClusters[0]?.clusters.map((cluster) => cluster.tokens)).toEqual(['alpha']);
+    expect(resolved?.clusterSummary?.map((cluster) => cluster.tokens)).toEqual(['beta']);
+    expect(resolved?.results?.map((row) => row.tokens)).toEqual(['beta']);
   });
 
   it('buildGroupDocChanges emits upsert and delete diffs by stable group id', () => {

@@ -685,6 +685,100 @@ describe('useProjectPersistence V2 hardening', () => {
     expect(clientB.result.current.results).toEqual([]);
   });
 
+  it('preserves accepted grouped pages when the groups listener first echoes an empty cache snapshot', async () => {
+    const alpha = makeCluster('alpha', 'Alpha');
+    const canonical = makeCanonical(1);
+    canonical.base.clusterSummary = [alpha];
+    canonical.base.results = [makeRow(alpha)];
+    canonical.resolved.clusterSummary = [alpha];
+    canonical.resolved.results = [makeRow(alpha)];
+    collabMocks.loadCanonicalProjectState.mockResolvedValue(canonical);
+
+    collabMocks.commitRevisionedDocChanges.mockImplementation(
+      async (_projectId, subcollection, changes, actorId) => {
+        if (subcollection !== PROJECT_GROUPS_SUBCOLLECTION) {
+          return [];
+        }
+        return changes
+          .filter((change: { kind: 'upsert' | 'delete' }) => change.kind === 'upsert')
+          .map((change: {
+            id: string;
+            mutationId?: string;
+            expectedRevision: number;
+            value?: Record<string, unknown>;
+          }) => ({
+            kind: 'upsert' as const,
+            id: change.id,
+            revision: change.expectedRevision + 1,
+            lastMutationId: change.mutationId ?? null,
+            value: {
+              ...(change.value ?? {}),
+              id: change.id,
+              revision: change.expectedRevision + 1,
+              updatedByClientId: actorId,
+              lastMutationId: change.mutationId ?? null,
+            },
+          }));
+      },
+    );
+
+    const { result } = renderHook(() =>
+      useProjectPersistence({
+        projects: SHARED_PROJECTS,
+        setProjects: vi.fn(),
+        addToast: vi.fn(),
+        clientIdOverride: 'client-a',
+      }),
+    );
+
+    act(() => {
+      result.current.setActiveProjectId('project-1');
+    });
+
+    await act(async () => {
+      await result.current.loadProject('project-1', SHARED_PROJECTS);
+    });
+
+    await waitFor(() => expect(result.current.storageMode).toBe('v2'));
+
+    act(() => {
+      emitDocSnapshot('projects/project-1/collab/meta', makeMeta(1, 2));
+    });
+
+    await waitFor(() =>
+      expect(firestoreMocks.listeners.has('projects/project-1/groups')).toBe(true),
+    );
+
+    const newGroup = makeGroup('group-1', 'Alpha Group', alpha);
+
+    let mutationResult: Awaited<ReturnType<typeof result.current.applyFilteredAutoGroupBatch>> | null = null;
+    await act(async () => {
+      mutationResult = await result.current.applyFilteredAutoGroupBatch({
+        incoming: [newGroup],
+        acceptedPages: [alpha],
+        hasReviewApi: false,
+      });
+    });
+
+    expect(mutationResult?.status).toBe('accepted');
+    expect(result.current.groupedClusters.map((group) => group.id)).toEqual(['group-1']);
+    expect(result.current.clusterSummary).toEqual([]);
+
+    act(() => {
+      firestoreMocks.emit('projects/project-1/groups', {
+        metadata: { fromCache: true, hasPendingWrites: false },
+        docs: [],
+        docChanges: () => [],
+      });
+    });
+
+    await flush();
+
+    expect(result.current.groupedClusters.map((group) => group.id)).toEqual(['group-1']);
+    expect(result.current.clusterSummary).toEqual([]);
+    expect(result.current.results).toEqual([]);
+  });
+
   it('allows routine blocked-token edits while a foreign operation lock is active', async () => {
     const addToast = vi.fn();
     collabMocks.loadCanonicalProjectState.mockResolvedValue(makeCanonical(1));

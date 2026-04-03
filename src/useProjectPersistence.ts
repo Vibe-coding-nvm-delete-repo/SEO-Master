@@ -2838,11 +2838,21 @@ export function useProjectPersistence(options: {
       ): { docs: T[]; changed: boolean } => {
         const isFromServer = !snap.metadata?.fromCache;
         const isEmptyFromCache = snap.metadata?.fromCache && snap.docs.length === 0;
-        if ((isFromServer || isEmptyFromCache) && !hasAuthoritativeEntitySnapshot(subcollection)) {
+        if (isFromServer && !hasAuthoritativeEntitySnapshot(subcollection)) {
           const replaced = replaceRevisionedDocsFromSnapshot(current, snap.docs, subcollection, datasetEpoch);
           markSharedAuthoritativeKey(listenerProjectId, subcollection, isFromServer ? 'server-authoritative' : 'local-cache');
           traceEntityListenerEvent('v2:listener-authoritative-replace', subcollection, snap.docs.length);
           return replaced;
+        }
+        if (isEmptyFromCache && !hasAuthoritativeEntitySnapshot(subcollection)) {
+          if (current.length === 0) {
+            markSharedAuthoritativeKey(listenerProjectId, subcollection, 'local-cache');
+          } else {
+            traceEntityListenerEvent('v2:listener-empty-cache-preserved', subcollection, snap.docs.length, {
+              localDocCount: current.length,
+            });
+          }
+          return { docs: current, changed: false };
         }
         return mergeRevisionedDocs(current, snap.docChanges() as any, subcollection, datasetEpoch);
       };

@@ -852,6 +852,7 @@ All settings persisted to IDB + Firestore with real-time sync.
 - **Shared project recovery:** `recoverStuckV2Meta` resets `readMode` to `'legacy'` when V2 canonical state is unrecoverable
 - **No permanent read-only:** if V2 is broken, recovery resets to legacy so both users can keep working
 - **Schema version gating:** `CLIENT_SCHEMA_VERSION` checked; too-old clients → `legacyWritesBlocked`
+- **Filtered Auto Group ownership guard:** shared V2 listeners never let an empty cache snapshot evict a newer local grouped-page ownership set, so accepted Auto Group pages do not leak back into Ungrouped while the authoritative server snapshot catches up
 - **Transient network retry (Generate):** Primary and slot generation auto-retry `TypeError: Failed to fetch` and other browser-level network errors with exponential backoff (2s base, 30s cap, 5 max retries). Detection via `isTransientNetworkError()` in `openRouterTimeout.ts`. Abort-safe — user can stop mid-retry.
 
 ---

@@ -236,6 +236,67 @@ function dedupeRows(rows: ProcessedRow[]): ProcessedRow[] {
   return Array.from(byKey.values());
 }
 
+function buildClusterMapFromBase(base: ProjectBaseSnapshot): Map<string, ClusterSummary> {
+  const clusterMap = new Map<string, ClusterSummary>((base.clusterSummary ?? []).map((cluster) => [cluster.tokens, cluster]));
+  const rowsByToken = new Map<string, ProcessedRow[]>();
+
+  for (const row of base.results ?? []) {
+    const existing = rowsByToken.get(row.tokens);
+    if (existing) {
+      existing.push(row);
+      continue;
+    }
+    rowsByToken.set(row.tokens, [row]);
+  }
+
+  for (const [tokens, rows] of rowsByToken) {
+    if (clusterMap.has(tokens) || rows.length === 0) continue;
+    const first = rows[0];
+    const keywordCount = rows.length;
+    const totalVolume = rows.reduce((sum, row) => sum + (Number.isFinite(row.searchVolume) ? row.searchVolume : 0), 0);
+    let kdSum = 0;
+    let kdCount = 0;
+    let kwRatingSum = 0;
+    let kwRatingCount = 0;
+    for (const row of rows) {
+      if (row.kd != null) {
+        kdSum += row.kd;
+        kdCount += 1;
+      }
+      if (row.kwRating != null) {
+        kwRatingSum += row.kwRating;
+        kwRatingCount += 1;
+      }
+    }
+
+    clusterMap.set(tokens, {
+      pageName: first.pageName || tokens,
+      pageNameLower: first.pageNameLower || (first.pageName || tokens).toLowerCase(),
+      pageNameLen: first.pageNameLen || (first.pageName || tokens).length,
+      tokens,
+      tokenArr: first.tokenArr ?? tokens.split(' '),
+      keywordCount,
+      totalVolume,
+      avgKd: kdCount > 0 ? Math.round(kdSum / kdCount) : null,
+      avgKwRating: kwRatingCount > 0 ? Math.round(kwRatingSum / kwRatingCount) : null,
+      label: first.label ?? '',
+      labelArr: first.labelArr ?? [],
+      locationCity: first.locationCity ?? null,
+      locationState: first.locationState ?? null,
+      keywords: rows.map((row) => ({
+        keyword: row.keyword,
+        volume: row.searchVolume,
+        kd: row.kd,
+        locationCity: row.locationCity ?? null,
+        locationState: row.locationState ?? null,
+        kwRating: row.kwRating ?? null,
+      })),
+    });
+  }
+
+  return clusterMap;
+}
+
 function clusterToRows(cluster: ClusterSummary): ProcessedRow[] {
   return cluster.keywords.map((keyword) => ({
     pageName: cluster.pageName,
@@ -859,7 +920,7 @@ export function assembleCanonicalPayload(
 ): ProjectDataPayload | null {
   if (!base) return null;
 
-  const clusterMap = new Map((base.clusterSummary ?? []).map((cluster) => [cluster.tokens, cluster]));
+  const clusterMap = buildClusterMapFromBase(base);
   const liveGroupDocs = entities.groups.filter((group) => group.datasetEpoch === base.datasetEpoch);
   const groups = liveGroupDocs.map((group) => refreshGroupFromBase(group, clusterMap));
   const groupedClusters = groups.filter((group) =>
@@ -870,9 +931,9 @@ export function assembleCanonicalPayload(
   );
 
   const groupedTokens = new Set<string>();
-  for (const group of [...groupedClusters, ...approvedGroups]) {
-    for (const cluster of group.clusters) {
-      groupedTokens.add(cluster.tokens);
+  for (const groupDoc of liveGroupDocs) {
+    for (const token of groupDoc.clusterTokens ?? []) {
+      groupedTokens.add(token);
     }
   }
 
