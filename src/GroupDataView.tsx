@@ -1347,10 +1347,10 @@ export default function GroupDataView(props: any) {
               <div className="px-4 py-2 border-t border-zinc-200 bg-zinc-50 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0" style={activeTab === 'auto-group' || activeTab === 'group-auto-merge' ? { display: 'none' } : undefined}>
                 <div className="flex items-center gap-2 text-sm text-zinc-500">
                   <span>Show</span>
-                  <select 
-                    value={itemsPerPage} 
+                  <select
+                    value={itemsPerPage}
                     onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
-                    className="border border-zinc-300 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="border border-zinc-300 rounded-md px-2 py-1 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value={250}>250</option>
                     <option value={500}>500</option>

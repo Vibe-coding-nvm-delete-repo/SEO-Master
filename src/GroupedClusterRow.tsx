@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, Copy, Loader2 } from 'lucide-react';
 import { CELL, TABLE_ZEBRA } from './tableConstants';
+import TokenChip from './TokenChip';
 import { normalizeMismatchedPageNames } from './GroupReviewEngine';
 import {
   groupedTabChildRowKey,
@@ -120,37 +121,32 @@ const GroupedClusterRow = React.memo(({
             {groupActionButton && <span onClick={(e) => e.stopPropagation()}>{groupActionButton}</span>}
           </div>
         </td>
-        <td className="px-1.5 py-0.5 overflow-hidden">
+        <td className="px-3 py-0.5 overflow-hidden">
           <div className="flex flex-wrap gap-1">
             {(() => {
               // Tokens from the highest volume page in the group (matches the page name)
               const topPage = row.clusters.length > 0 ? row.clusters.reduce((best, c) => c.totalVolume > best.totalVolume ? c : best, row.clusters[0]) : null;
               const groupTokens = topPage ? topPage.tokenArr : [];
-              return groupTokens.map(token => {
-                const labelColor = labelColorMap.get(token);
-                return (
-                  <button
-                    key={token}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if ((e.ctrlKey || e.metaKey) && onBlockToken) {
-                        onBlockToken(token);
-                        return;
-                      }
-                      const newTokens = new Set(selectedTokens);
-                      if (newTokens.has(token)) newTokens.delete(token);
-                      else newTokens.add(token);
-                      setSelectedTokens(newTokens);
-                      setCurrentPage(1);
-                    }}
-                    className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-                    style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                    title={labelColor ? `${labelColor.sectionName} · Ctrl+click to block` : 'Ctrl+click to block'}
-                  >
-                    {token}
-                  </button>
-                );
-              });
+              return groupTokens.map(token => (
+                <TokenChip
+                  key={token}
+                  token={token}
+                  isSelected={selectedTokens.has(token)}
+                  labelColor={labelColorMap.get(token) ?? null}
+                  onClick={(e, t) => {
+                    e.stopPropagation();
+                    if ((e.ctrlKey || e.metaKey) && onBlockToken) {
+                      onBlockToken(t);
+                      return;
+                    }
+                    const newTokens = new Set(selectedTokens);
+                    if (newTokens.has(t)) newTokens.delete(t);
+                    else newTokens.add(t);
+                    setSelectedTokens(newTokens);
+                    setCurrentPage(1);
+                  }}
+                />
+              ));
             })()}
           </div>
         </td>
@@ -245,33 +241,28 @@ const GroupedClusterRow = React.memo(({
                     </button>
                   </div>
                 </td>
-                <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
+                <td className="px-3 py-0.5 overflow-hidden">
                   <div className="flex flex-wrap gap-1">
-                    {cluster.tokenArr.map((token, i) => {
-                      const labelColor = labelColorMap.get(token);
-                      return (
-                        <button
-                          key={i}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if ((e.ctrlKey || e.metaKey) && onBlockToken) {
-                              onBlockToken(token);
-                              return;
-                            }
-                            const newTokens = new Set(selectedTokens);
-                            if (newTokens.has(token)) newTokens.delete(token);
-                            else newTokens.add(token);
-                            setSelectedTokens(newTokens);
-                            setCurrentPage(1);
-                          }}
-                          className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-                          style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                          title={labelColor ? `${labelColor.sectionName} · Ctrl+click to block` : 'Ctrl+click to block'}
-                        >
-                          {token}
-                        </button>
-                      );
-                    })}
+                    {cluster.tokenArr.map((token) => (
+                      <TokenChip
+                        key={token}
+                        token={token}
+                        isSelected={selectedTokens.has(token)}
+                        labelColor={labelColorMap.get(token) ?? null}
+                        onClick={(e, t) => {
+                          e.stopPropagation();
+                          if ((e.ctrlKey || e.metaKey) && onBlockToken) {
+                            onBlockToken(t);
+                            return;
+                          }
+                          const newTokens = new Set(selectedTokens);
+                          if (newTokens.has(t)) newTokens.delete(t);
+                          else newTokens.add(t);
+                          setSelectedTokens(newTokens);
+                          setCurrentPage(1);
+                        }}
+                      />
+                    ))}
                   </div>
                 </td>
                 {/* Sub-cluster QA: red = mismatched page; green = OK */}
@@ -289,7 +280,7 @@ const GroupedClusterRow = React.memo(({
                 <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">
                   {cluster.pageNameLen}
                 </td>
-                <td className="px-1 py-0.5 text-zinc-400 text-right tabular-nums text-xs">-</td>
+                <td className="px-1 py-0.5 text-zinc-400 text-right tabular-nums text-[12px]">-</td>
                 <td className="px-1 py-0.5 text-zinc-600 text-right tabular-nums text-[12px]">
                   {cluster.keywordCount.toLocaleString()}
                 </td>

@@ -1311,7 +1311,7 @@ const GenerationTimer = React.memo(function GenerationTimer({
     <>
       <div className="flex items-center gap-1.5 text-[11px] text-zinc-500" title="Total elapsed time for the current/last generation batch">
         <Clock className="w-3 h-3" />
-        <span className={`font-mono tabular-nums ${isActive ? 'text-amber-600 font-semibold' : 'text-emerald-600'}`}>
+        <span className={`font-mono tabular-nums ${isActive ? 'text-amber-600 font-semibold' : 'text-emerald-600 font-medium'}`}>
           {formatElapsedFn(displayElapsed)}
         </span>
         {!isActive && doneCount > 0 && (

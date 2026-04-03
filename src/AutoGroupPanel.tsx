@@ -2790,7 +2790,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               value={agAssignmentPrompt}
               onChange={e => setAgAssignmentPrompt(e.target.value)}
               rows={10}
-              className="w-full text-[11px] px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white resize-y font-mono leading-relaxed"
+              className="w-full text-xs px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white resize-y font-mono leading-relaxed"
             />
             <p className="text-[10px] text-zinc-400">
               V1 assignment prompt. The model sees one batch of ungrouped pages and the current group names only. It must be strict and assign each page to an existing group or itself.
@@ -2811,7 +2811,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               value={agQaPrompt}
               onChange={e => setAgQaPrompt(e.target.value)}
               rows={8}
-              className="w-full text-[11px] px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white resize-y font-mono leading-relaxed"
+              className="w-full text-xs px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white resize-y font-mono leading-relaxed"
             />
             <p className="text-[10px] text-zinc-400">
               V1 QA prompt. Multi-page groups are reviewed strictly. Singleton groups are auto-approved and skipped.
@@ -2832,7 +2832,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
               value={cosineSummaryPrompt}
               onChange={e => setCosineSummaryPrompt(e.target.value)}
               rows={8}
-              className="w-full text-[11px] px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white resize-y font-mono leading-relaxed"
+              className="w-full text-xs px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white resize-y font-mono leading-relaxed"
             />
             <p className="text-[10px] text-zinc-400">
               Cosine Test summary prompt. The model writes one strict semantic-intent sentence per page before embeddings are created.
@@ -3577,7 +3577,7 @@ const AutoGroupPanel: React.FC<AutoGroupPanelProps> = React.memo(({
                   }
                 }}
                 rows={8}
-                className="w-full text-[11px] px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 focus:border-violet-400 bg-white resize-y font-mono leading-relaxed"
+                className="w-full text-xs px-3 py-2 border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 focus:border-violet-400 bg-white resize-y font-mono leading-relaxed"
                 placeholder="Enter the system prompt for auto-grouping..."
               />
               <p className="mt-1.5 text-[10px] text-zinc-400">

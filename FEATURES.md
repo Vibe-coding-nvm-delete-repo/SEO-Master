@@ -731,6 +731,15 @@ All settings persisted to IDB + Firestore with real-time sync.
 
 ## 21. UI/UX Features
 
+### Typography & Font System
+- **Typeface:** Inter (Google Fonts CDN, weights 300–700), with system fallback stack
+- **Global:** `font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11'` for Inter stylistic alternates; antialiased rendering
+- **Size scale:** `text-[8px]`→sort indicators, `text-[9px]`→status badges, `text-[10px]`→labels/metadata, `text-[11px]`→child/detail rows + filter inputs, `text-[12px]`→all main table data cells, `text-xs`(12px)→form selects/textareas, `text-sm`(14px)→descriptions, `text-lg`(18px)→section headings
+- **Weight convention:** `font-medium` (500) for labels/buttons, `font-semibold` (600) for badges/headings, `font-bold` (700) only for sort rank indicators
+- **Monospace:** `font-mono` for code/regex inputs, token identifiers in management tabs, system IDs, tabular numeric counters
+- **Token chips:** Unified `TokenChip` component (`text-[12px]`, bordered, purple selected/zinc default) used in ClusterRow, GroupedClusterRow — single source of truth for chip styling
+- **Table cell standard:** `tableConstants.ts` defines `CELL.dataCompact`, `CELL.dataNormal`, `CELL.dataLabelLocation` all at `text-[12px]`; filter inputs at `text-[11px]`
+
 ### Layout
 - Two-panel layout: Keyword Management (left) + Token Management (right)
 - Compact chrome with reduced padding
