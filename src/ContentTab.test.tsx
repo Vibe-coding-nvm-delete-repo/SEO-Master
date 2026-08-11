@@ -97,7 +97,7 @@ vi.mock('./appSettingsPersistence', () => ({
 }));
 
 vi.mock('./generateWorkspaceScope', () => ({
-  ensureProjectGenerateWorkspace: vi.fn(async () => undefined),
+  ensureProjectGenerateWorkspace: vi.fn(async () => ({ status: 'ready' })),
   resolveGenerateScopedDocIds: (_projectId: string | null, docIds: Record<string, string>) => docIds,
 }));
 

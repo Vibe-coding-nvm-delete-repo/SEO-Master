@@ -160,12 +160,12 @@ const ModelSelector: React.FC<ModelSelectorProps> = React.memo(({
             </div>
             {/* Sort buttons */}
             <div className="flex items-center gap-1">
-              <span className="text-[9px] text-zinc-400 mr-0.5">Sort:</span>
+              <span className="text-[10px] text-zinc-400 mr-0.5">Sort:</span>
               {(['name', 'price-asc', 'price-desc'] as const).map(s => (
                 <button
                   key={s}
                   onClick={(e) => { e.stopPropagation(); setSort(s); }}
-                  className={`px-1.5 py-0.5 text-[9px] font-medium rounded transition-colors ${sort === s ? 'bg-zinc-700 text-white' : 'bg-zinc-100 text-zinc-500 hover:bg-zinc-200'}`}
+                  className={`px-1.5 py-0.5 text-[10px] font-medium rounded transition-colors ${sort === s ? 'bg-zinc-700 text-white' : 'bg-zinc-100 text-zinc-500 hover:bg-zinc-200'}`}
                 >
                   {s === 'name' ? 'Name' : s === 'price-asc' ? 'Price ↑' : 'Price ↓'}
                 </button>

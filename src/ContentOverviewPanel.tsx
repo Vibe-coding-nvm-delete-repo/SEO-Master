@@ -219,9 +219,11 @@ function ProgressLine({
 export default function ContentOverviewPanel({
   activeProjectId,
   onStageSelect,
+  runtimeEffectsActive = true,
 }: {
   activeProjectId: string | null;
   onStageSelect?: (stageId: string) => void;
+  runtimeEffectsActive?: boolean;
 }) {
   const [overviewInputs, setOverviewInputs] = useState<ContentOverviewInputs | null>(null);
   const [loading, setLoading] = useState(true);
@@ -237,6 +239,7 @@ export default function ContentOverviewPanel({
       docId,
       loadMode: mode,
       registryKind: 'rows',
+      allowProjectScopedLocalCache: mode === 'local-preferred',
     });
     const [
       pages,
@@ -281,8 +284,15 @@ export default function ContentOverviewPanel({
 
   useEffect(() => {
     let active = true;
+    if (!runtimeEffectsActive) {
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
 
     const refresh = async () => {
+      setLoading(true);
       setLoadError(null);
       try {
         await loadOverviewInputs();
@@ -325,7 +335,7 @@ export default function ContentOverviewPanel({
       unsubscribers.forEach((unsubscribe) => unsubscribe());
       window.removeEventListener(APP_SETTINGS_LOCAL_ROWS_UPDATED_EVENT, handleLocalRowsUpdated as EventListener);
     };
-  }, [loadOverviewInputs, overviewDocIds]);
+  }, [loadOverviewInputs, overviewDocIds, runtimeEffectsActive]);
 
   const summary = useMemo(() => buildContentOverview(overviewInputs ?? EMPTY_OVERVIEW_INPUTS), [overviewInputs]);
 

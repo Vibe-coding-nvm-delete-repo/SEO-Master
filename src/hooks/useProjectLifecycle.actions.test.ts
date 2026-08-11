@@ -84,9 +84,7 @@ describe('useProjectLifecycle project actions', () => {
       setIsAuthReady: vi.fn(),
       setSavedClusters: vi.fn(),
       newProjectName: '',
-      newProjectDescription: '',
       setNewProjectName: vi.fn(),
-      setNewProjectDescription: vi.fn(),
       setProjectError: vi.fn(),
       setIsCreatingProject: vi.fn(),
     };
@@ -207,7 +205,6 @@ describe('useProjectLifecycle project actions', () => {
     const input = makeInput({
       projects: [],
       newProjectName: 'Shared Project',
-      newProjectDescription: 'Desc',
     });
     const { result } = renderHook(() => useProjectLifecycle(input));
     (input.setProjects as Mock).mockClear();
@@ -311,7 +308,6 @@ describe('useProjectLifecycle project actions', () => {
     const input = makeInput({
       projects: [],
       newProjectName: 'Shared Project',
-      newProjectDescription: 'Desc',
     });
     const { result } = renderHook(() => useProjectLifecycle(input));
 

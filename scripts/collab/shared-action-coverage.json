@@ -75,7 +75,7 @@
     {
       "actionId": "generate.pipeline_settings",
       "contract": { "id": "generate-pipeline-settings-converges", "file": "src/appSettingsCollab.integration.test.ts" },
-      "browser": { "id": "generate-pipeline-settings-two-session", "file": "src/appSettingsCollab.integration.test.ts" },
+      "browser": { "id": "generate-pipeline-settings-two-session", "file": "e2e/collaboration-two-session.spec.ts" },
       "rules": { "status": "not_required", "rationale": "Project generate/content pipeline settings remain open-access in firestore.rules." }
     },
     {

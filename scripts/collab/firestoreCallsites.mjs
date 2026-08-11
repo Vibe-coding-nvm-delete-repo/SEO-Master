@@ -39,6 +39,8 @@ const LOW_LEVEL_COLLAB_IMPORT_RULES = [
   {
     targetPath: 'src/projectStorage.ts',
     forbiddenSymbols: [
+      'loadProjectDataFromFirestore',
+      'saveProjectDataToFirestore',
       'batchSetProjectsFolderId',
       'deleteProjectFromFirestore',
       'reviveProjectInFirestore',
@@ -47,9 +49,21 @@ const LOW_LEVEL_COLLAB_IMPORT_RULES = [
       'softDeleteProjectInFirestore',
     ],
     allowedImporters: [
+      'src/projectWorkspace.ts',
+      'src/useProjectPersistence.ts',
       'src/projectMetadataCollab.ts',
     ],
     reason: 'App-facing project metadata writes must route through projectMetadataCollab, not low-level projectStorage helpers.',
+  },
+  {
+    targetPath: 'src/projectWorkspace.ts',
+    forbiddenSymbols: [
+      'loadProjectDataForView',
+    ],
+    allowedImporters: [
+      'src/useProjectPersistence.ts',
+    ],
+    reason: 'Shared project bootstrap must route through useProjectPersistence, not generic project workspace helpers.',
   },
 ];
 

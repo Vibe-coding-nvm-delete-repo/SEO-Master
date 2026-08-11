@@ -19,14 +19,16 @@ These are "the building is on fire" bugs. Every piece of user state must be visi
 **Fix:** In the early-return block, check `entityListenersCleanupRef.current === null`. If entity listeners were never attached AND the meta is in a ready/complete V2 state, call `attachEpochListeners(nextMeta.datasetEpoch, nextMeta)` before returning. The existing generation and abort-controller fencing keeps any concurrent epoch-load completions safe.
 **All instances fixed:** Single call site — the only early-return block in the meta `onSnapshot` callback.
 
-### [ ] 1.1 Redundant double/triple setState in processCSV
+### [x] 1.1 Redundant double/triple setState in processCSV
+**Date fixed:** Previously resolved (processCSV moved to `useCsvImport.ts` with single atomic `bulkSet()` call)
 **File:** `src/App.tsx` ~lines 1661-1707
 **Problem:** `setResults()`, `setClusterSummary()`, etc. are called BEFORE `persistence.bulkSet()` (lines 1661-1666), then `persistence.bulkSet()` is called (line 1687) which internally syncs refs AND calls setState again, then MORE direct setters fire (lines 1690-1707). This causes triple renders and wasted work.
 **Severity note:** Verified that `persistence.bulkSet()` DOES sync `latest.current` before saving, so Firestore gets correct data. The direct setState calls at lines 1661-1666 are redundant, not data-losing — but they cause unnecessary re-renders and could confuse future developers into thinking the pattern is "setState then bulkSet."
 **Scenario:** Triple render on every CSV upload. Not a data loss bug per se, but a correctness/performance issue that makes the codebase misleading about the right pattern.
 **Fix:** Remove direct setState calls at lines 1661-1666 and 1690-1707. Let `persistence.bulkSet()` handle all state + ref sync + Firestore save atomically. Pass stats/datasetStats through bulkSet too.
 
-### [ ] 1.2 Ref-before-save violations in handleRemoveFromApproved (CRITICAL)
+### [x] 1.2 Ref-before-save violations in handleRemoveFromApproved (CRITICAL)
+**Date fixed:** Previously resolved (`removeFromApproved` moved into persistence layer at `useProjectPersistence.ts:3525`, reads `latest.current` atomically)
 **File:** `src/App.tsx` ~lines 2943-2971
 **Problem:** `setClusterSummary(newClusters)`, `setResults(...)`, `setGroupedClusters(updatedGrouped)`, `setApprovedGroups(newApproved)` called WITHOUT ref sync, then `persistence.bulkSet()` at line 2971 reads stale `latest.current`. Unlike 1.1, here `bulkSet()` does NOT receive all the changed data — it only gets the fields passed to it, and reads everything else from `latest.current` which is stale.
 **Scenario:** User 1 unapproves a group. Firestore saves stale approvedGroups (ref wasn't updated). User 2 still sees it as approved. This is a **confirmed data loss bug**.
@@ -48,7 +50,8 @@ resultsRef.current = [...results, ...newRows];
 persistence.bulkSet({ groupedClusters: updatedGrouped, approvedGroups: newApproved, clusterSummary: nextClusters });
 ```
 
-### [ ] 1.3 startTransition wrapping persistence-critical state (Token Merge) (CRITICAL)
+### [x] 1.3 startTransition wrapping persistence-critical state (Token Merge) (CRITICAL)
+**Date fixed:** Previously resolved (`useTokenMerge.ts:82` calls `applyMergeCascade` first, then UI-only state)
 **File:** `src/App.tsx` ~lines 2736-2757
 **Problem:** `startTransition()` wraps `setResults()`, `setClusterSummary()`, `setGroupedClusters()`, `setApprovedGroups()`, `setTokenSummary()`, `setTokenMergeRules()` at lines 2736-2745. React treats these as low-priority — refs may not sync for several render cycles. Then `persistence.applyMergeCascade(cascade, newRule)` is called at line 2757 OUTSIDE the transition block. The persistence call reads `latest.current` which still has pre-merge data because the deferred setState hasn't triggered the ref-sync useEffects yet.
 **Scenario:** User merges tokens. `startTransition` defers state updates. `persistence.applyMergeCascade()` fires immediately with stale refs. Firestore saves pre-merge data. Second user never sees the merge. Even worse: if User 1 does anything else (group, approve), those actions also use stale refs until React eventually processes the deferred transition.
@@ -63,7 +66,8 @@ startTransition(() => {
 });
 ```
 
-### [ ] 1.4 suppressSnapshotRef timing gap (fragile 1000ms timeout)
+### [x] 1.4 suppressSnapshotRef timing gap (fragile 1000ms timeout)
+**Date fixed:** Previously resolved (old `suppressSnapshotRef` + 1000ms timeout replaced by `evaluateSnapshotGuards()` with clientId match guard `2:ownEcho` + `6:staleSaveId` + `1b:isFlushing`)
 **File:** `src/useProjectPersistence.ts` — `enqueueSave()` ~line 291 and ~line 305
 **Problem:** `enqueueSave()` correctly sets `suppressSnapshotRef.current = true` at line 291 BEFORE calling `saveProjectDataToFirestore()`. However, it resets to `false` after a **hardcoded 1000ms setTimeout** at line 305. If the Firestore snapshot echo takes longer than 1 second (slow network, large dataset, cold start), the suppress flag is already false when the snapshot arrives → listener processes it → overwrites in-flight UI changes.
 **Scenario:** User on slow 3G connection groups page X. Save fires, suppress set to true. Firestore write takes 2 seconds. At T=1s, suppress resets to false. At T=2s, snapshot echo arrives with the save's data. But user grouped page Y at T=1.5s. Listener sees `suppressSnapshotRef = false`, applies snapshot, page Y grouping lost.
@@ -84,7 +88,8 @@ suppressSnapshotRef.current = false;
 applyViewState(data); // Truly remote change, apply it
 ```
 
-### [ ] 1.5 GroupReviewSettings writes without suppressSnapshotRef
+### [x] 1.5 GroupReviewSettings writes without suppressSnapshotRef
+**Date fixed:** 2026-04-01
 **File:** `src/GroupReviewSettings.tsx` ~lines 146-149 and 183-186
 **Problem:** This component has its own independent Firestore sync (not using the persistence hook). Two `setDoc()` calls — one for saving settings, one for backfill inside `onSnapshot` — neither sets `suppressSnapshotRef`. The backfill write inside the listener can overwrite a concurrent user's changes.
 **Scenario:** User A changes temperature to 0.5 and saves. Before the snapshot echoes back, User B changes concurrency. The backfill write from User A's snapshot overwrites User B's concurrency change.
@@ -92,13 +97,15 @@ applyViewState(data); // Truly remote change, apply it
   - (a) Add a local `suppressRef` to this component following the same pattern, OR
   - (b) Consolidate shared settings into the main persistence layer (preferred long-term)
 
-### [ ] 1.6 Universal blocked tokens race condition
+### [x] 1.6 Universal blocked tokens race condition
+**Date fixed:** 2026-04-01
 **File:** `src/App.tsx` ~lines 951-972
 **Problem:** `universalBlockedTokens` is loaded from Firestore via `onSnapshot` and stored as a `Set`. When User A blocks a token, User B's snapshot fires and replaces the ENTIRE Set. If User B had pending local changes (blocked a different token, save not yet committed), those changes are wiped.
 **Scenario:** User A blocks "cheap". User B blocks "free" at the same moment. User A's snapshot fires on User B's client, replacing the Set with just {"cheap"}. User B's "free" block is lost.
 **Fix:** Use the same `suppressSnapshotRef` + ref-before-save pattern. Or switch to Firestore `arrayUnion`/`arrayRemove` for atomic token additions/removals instead of overwriting the full array.
 
-### [ ] 1.7 Silent Firestore save failures (systematic — 17 instances)
+### [x] 1.7 Silent Firestore save failures (systematic — 17 instances)
+**Date fixed:** 2026-04-01 (remaining 3 instances: GenerateTab, AutoGroupPanel, TableHeader)
 **Complete list of every silent `.catch(() => {})` on Firestore/IDB operations:**
 1. `src/App.tsx:808` — starred_models setDoc
 2. `src/App.tsx:958` — universal_blocked setDoc
@@ -136,11 +143,19 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 }
 ```
 
-### [ ] 1.8 Stale closure in scheduled re-review timer
+### [x] 1.8 Stale closure in scheduled re-review timer
+**Date fixed:** Previously resolved (`useGroupReviewAutoProcessor.ts:36` uses functional updater on current persistence state, not stale closure capture)
 **File:** `src/App.tsx` ~lines 2658-2692
 **Problem:** `scheduleReReview()` stores group IDs in a ref and reads `groupedClustersRef.current` 5 seconds later. If the user modifies those groups during the 5s window, the timer rebuilds groups with wrong page memberships.
 **Scenario:** User removes page X from group A at T=0 (triggers re-review). User adds page Y to group A at T=2s. Timer fires at T=5s, reads current `groupedClustersRef` which now has page Y. Re-review runs on wrong group composition.
 **Fix:** Capture the full group snapshot when scheduling, not just IDs. The re-review should operate on the group state that triggered it.
+
+### [x] 1.9a All new projects created without shared collab flag (ROOT CAUSE)
+**Date fixed:** 2026-04-01
+**File:** `src/hooks/useProjectLifecycle.ts:505`
+**Root cause:** `createProject()` set `description: newProjectDescription` (user input, defaults to `""`). Since `isSharedProject()` checks for `description === 'collab'`, EVERY project created through the UI was a non-shared legacy project. This meant ALL multi-user sync infrastructure (V2 entity-per-doc listeners, CAS revisions, epoch scoping) was completely bypassed. Both users wrote to the same legacy `chunks` collection with last-writer-wins semantics.
+**Fix:** Hardcode `description: SHARED_PROJECT_DESCRIPTION` in `createProject()`. Also patched all 10 existing non-shared projects in Firestore production.
+**Impact:** This was the #1 reason multi-user sync didn't work. All other sync fixes (1.1-1.8, 1.10-1.16) were correct but irrelevant because the V2 sync path was never activated.
 
 ### [x] 1.9 Shared projects could still fall back to legacy chunk writes after V2 recovery/missing meta
 **Date fixed:** 2026-03-31
@@ -183,6 +198,50 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 
 **Files:** `src/groupingShortcutTargets.ts`, `src/GroupDataView.tsx`, `src/TableHeader.tsx`, `src/hooks/useGlobalGroupingShortcuts.ts`, `src/hooks/useGlobalGroupingShortcuts.test.tsx`, `FEATURES.md`
 
+### [x] 1.14 Shared-project CSV bootstrap raced the collab/meta listener
+
+**Date fixed:** 2026-04-01
+
+**Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FEATURES.md`
+
+**Root cause:** Opening a shared project with missing or still-writing `collab/meta` could start two bootstrap flows at once. `loadProject()` was already running the initial V2 canonical/bootstrap load, but the live `collab/meta` listener reacted to the same empty or half-written meta state and launched a second canonical recovery/bootstrap path. Those concurrent bootstrap attempts raced on the same project and surfaced `meta-conflict`/lock failures before CSV import could start cleanly.
+
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now treats the initial shared-project bootstrap as single-owner work: while `loadProject()` is still resolving storage mode for a shared project, the `collab/meta` listener ignores empty and in-progress bootstrap snapshots instead of starting a second canonical load or recovery pass.
+- `src/useProjectPersistence.v2.test.tsx` now covers the exact regression by proving that both `null` meta snapshots and `readMode:'v2'` + `commitState:'writing'` bootstrap echoes do not trigger a second `loadCanonicalProjectState()` call during the initial shared load.
+
+### [x] 1.15 Shared V2 convergence still had cache/status/wrapper loopholes
+**Date fixed:** 2026-04-01
+**Files:** `src/useProjectPersistence.ts`, `src/cloudSyncStatus.ts`, `src/appSettingsPersistence.ts`, `src/contentPipelineLoaders.ts`, `src/generateWorkspaceScope.ts`, `src/ContentOverviewPanel.tsx`, `src/FinalPagesPanel.tsx`, `src/ContentTab.tsx`, `src/GenerateTab.tsx`, `src/cloudSyncStatus.test.ts`, `src/AppStatusBar.test.tsx`, `src/appSettingsPersistence.test.ts`, `src/generateWorkspaceScope.test.ts`, `src/ContentOverviewPanel.test.tsx`, `src/FinalPagesPanel.test.tsx`, `src/ContentTab.test.tsx`, `e2e/collaboration-two-session.spec.ts`
+**Root cause:** Shared `collab` projects were mostly on the V2 architecture, but the enforcement boundary still had escape hatches. The runtime could show `Cloud: synced` after a single server snapshot, first authoritative V2 entity snapshots still used incremental merge semantics, project-scoped Content/Generate shared-doc loaders still exposed cache-first local-preferred paths without an explicit provisional-state contract, and nested Content surfaces could keep shared listeners alive while hidden.
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now tracks authoritative readiness for `collab/meta`, `project_operations/current`, and every active-epoch V2 entity collection, and the first server-authoritative snapshot for each entity collection now replaces the whole in-memory collection before steady-state incremental merges resume.
+- `src/cloudSyncStatus.ts` now carries explicit shared-project convergence state, so the status bar distinguishes `Connecting…`, cached provisional state, server convergence, and true authoritative sync instead of treating any `fromCache === false` snapshot as healthy.
+- `src/appSettingsPersistence.ts` and `src/contentPipelineLoaders.ts` now fail closed for project-scoped `local-preferred` loads unless the caller explicitly opts into provisional-cache behavior.
+- `src/ContentOverviewPanel.tsx`, `src/FinalPagesPanel.tsx`, and `src/ContentTab.tsx` now respect `runtimeEffectsActive` for project-scoped shared listeners and local-preferred refreshes, so hidden nested Content surfaces do not freeload on shared runtime work.
+- `src/generateWorkspaceScope.ts`, `src/ContentTab.tsx`, and `src/GenerateTab.tsx` now surface structured workspace-ensure results instead of collapsing blocked bootstrap writes into raw thrown errors.
+- Regression coverage now locks in the stricter status semantics, fail-closed project-scoped cache reads, hidden-surface idle behavior, and shared workspace ensure handling.
+
+### [x] 1.16 Shared V2 fallback payloads could masquerade as canonical state
+**Date fixed:** 2026-04-01
+**Files:** `src/useProjectPersistence.ts`, `src/useProjectPersistence.v2.test.tsx`, `FIXES.md`, `FEATURES.md`
+
+### [x] 1.17 Filtered Auto Group forced tab switches and could resurrect accepted pages in Ungrouped
+**Date fixed:** 2026-04-03
+**Files:** `src/App.tsx`, `src/filteredAutoGroupContract.ts`, `src/filteredAutoGroupContract.test.ts`, `src/hooks/useFilteredAutoGroupFlow.ts`, `src/hooks/useFilteredAutoGroupFlow.test.tsx`, `src/useProjectPersistence.ts`, `src/useProjectPersistence.test.tsx`, `src/useProjectPersistence.v2.test.tsx`, `FEATURES.md`
+**Root cause:** Filtered Auto Group had two separate failure points. A local UI regression explicitly called `showGroupedTab()` on run start, which forced users away from Ungrouped. Separately, the flow hid the whole accepted batch immediately but the persistence boundary trusted caller-provided removal tokens without proving the final merged grouped state still contained those same pages. If the model omitted pages or any later merge path lost them, pending masking expired and those pages resurfaced in Ungrouped.
+**All instances fixed:**
+- `src/App.tsx` and `src/hooks/useFilteredAutoGroupFlow.ts` no longer switch tabs automatically when filtered Auto Group starts.
+- `src/filteredAutoGroupContract.ts` centralizes accepted-page reconciliation, duplicate-assignment normalization, and final exact-once grouped-coverage checks for the entire filtered Auto Group flow.
+- `src/useProjectPersistence.ts` now uses a dedicated `applyFilteredAutoGroupBatch()` boundary that strips stale accepted-page duplicates out of existing grouped state before merge and refuses to prune Ungrouped if final grouped coverage is incomplete or duplicated.
+- Regression coverage now locks in the no-tab-switch contract, accepted-page singleton repair behavior, legacy-state durability, and V2 invocation path.
+**Root cause:** The shared-project V2 hook treated a fallback `canonical.resolved` payload as equivalent to a fully loaded canonical epoch whenever `collab/meta` already said `readMode:'v2'` and `commitState:'ready'`. That collapsed provisional local fallback and authoritative canonical state into the same branch. Once that happened, a stale cache payload could be re-saved as canonical IndexedDB state, the browser could appear writable even though no immutable base commit was loaded, and the `collab/meta` listener could short-circuit identical meta snapshots before retrying the canonical reload that should have repaired the session.
+**All instances fixed:**
+- `src/useProjectPersistence.ts` now tracks whether the current V2 base snapshot is `authoritative` or only `provisional`, so only a loaded base commit matching the active `collab/meta` epoch can unlock writes or qualify for canonical cache persistence.
+- Shared fallback payloads without a loaded base commit now stay explicitly read-only/provisional, and the hook rebuilds local refs from them only for temporary UI continuity instead of treating them as server-acknowledged truth.
+- The `collab/meta` duplicate-snapshot guard now skips reloads only when the browser already holds an authoritative base for that exact meta identity, so same-meta listener events can still repair a provisional fallback session.
+- `src/useProjectPersistence.v2.test.tsx` now proves that fallback payloads stay read-only, do not overwrite the canonical cache, and recover to the real shared state once the live `collab/meta` snapshot for that epoch is observed.
+
 **Root cause:** `src/hooks/useGlobalGroupingShortcuts.ts` treated every editable target as either globally allowed or globally blocked, instead of distinguishing between dataset-defining filter/search controls and arbitrary editors. That meant `Shift+1` could silently no-op when focus stayed inside the pages/token-management filters that define the visible list, while the same hook also let `Tab` grouping shortcuts fire during input focus. The bug lived in the shared shortcut boundary, not in Auto Group itself.
 
 **Instances fixed:**
@@ -202,6 +261,14 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 - `FEATURES.md` now documents the stronger shared-editability rule so future changes do not reintroduce “writable while meta already points at a different canonical base” behavior.
 
 ---
+
+### [x] 1.17 Shift+1 still missed real Keyword Management input paths
+**Date fixed:** 2026-04-01
+**Files:** `src/GroupDataView.tsx`, `src/GroupDataView.shortcutWiring.test.ts`
+**Root cause:** The prior Shift+1 fix used explicit input opt-in (`groupingShortcutTargetProps`) but only wired a subset of real controls. Two production single-line inputs remained untagged, so keyboard behavior changed based on focus and appeared inconsistent.
+**All instances fixed:**
+- `src/GroupDataView.tsx` now tags both missing shortcut origins: `Group name...` and `Search tokens (comma-separated)...`.
+- `src/GroupDataView.shortcutWiring.test.ts` now locks those exact callsites so either input losing the opt-in fails CI immediately.
 
 ## Tier 2 — CORRECTNESS (bugs that produce wrong results)
 
@@ -228,7 +295,7 @@ function firestoreSave(promise: Promise<void>, context: string, addToast: Functi
 ### [x] 2.6 Project deep links could open the last active project instead of the requested project
 **Date fixed:** 2026-04-01
 **Files:** `src/hooks/useProjectLifecycle.ts`, `src/hooks/useProjectLifecycle.actions.test.ts`
-**Root cause:** `useProjectLifecycle` resolved `/seo-magic/group/data/:projectKey` only once during bootstrap. If the initial project list was empty/stale and did not contain that key, mount restore immediately fell back to `prefs.activeProjectId`, and the later live `projects` snapshot never retried the URL target. The URL sync effect could also strip the unresolved key before the live snapshot arrived.
+**Root cause:** `useProjectLifecycle` resolved `/seo-magic/group/data/:projectKey` only once during bootstrap. If the initial project list was empty/stale and did not contain that key, mount restore immediately fell back to `prefs.activeProjectId` (`src/hooks/useProjectLifecycle.ts` mount restore path), and the later live `projects` snapshot never retried the URL target. The URL sync effect could also strip the unresolved key before the live snapshot arrived. That produced the visible symptom: opening one project link loaded a different project from prior workspace prefs.
 **All instances fixed:**
 - Mount restore now treats an unresolved data-route key as a pending URL target instead of falling back to workspace prefs.
 - Group/data URL sync now preserves the unresolved deep link while resolution is pending.
@@ -416,3 +483,28 @@ All items in this file were triple-checked on 2026-03-25:
 - **3.5:** CORRECTED — duplication is `formatCost()` across files, not cost estimation in AutoGroupEngine.
 - **4.1:** CLARIFIED — not a leak (connections are closed), but no pooling/reuse.
 - **4.6:** DOWNGRADED — no leak in normal operation, only on unmount with pending toasts.
+
+- [x] (2026-04-01) Hardened shared-project V2 convergence bootstrap/readiness in `src/useProjectPersistence.ts` and `src/useProjectPersistence.v2.test.tsx`.
+  Root cause: the shared V2 bootstrap path could skip an actionable initial `collab/meta` snapshot and rely on a later meta event to attach/reload listeners, while readiness tracking could be reset during listener attach even after an authoritative canonical load. This left some sessions in non-authoritative listener state and allowed inconsistent propagation behavior.
+  Instances fixed: queued bootstrap-meta drain (instead of skip-and-forget), deterministic post-authoritative listener reattach trigger, authoritative canonical-base tracking for cache/listener guard paths, preserved authoritative entity readiness across listener reattach, and strict shared fail-closed mutation/read-only gating until authoritative shared readiness is satisfied.
+  Prevention rule: shared V2 bootstrap snapshots are never dropped; listener activation and authoritative readiness must converge without requiring a second meta event.
+
+- [x] (2026-04-01) Strengthened collaboration gating so convergence checks are mandatory in `package.json` (`collab:convergence`, `collab:gate`, `collab:release-gate`).
+  Root cause: static census/audit/coverage checks alone can verify callsite hygiene, but they cannot guarantee runtime cross-client convergence for every shared lane.
+  Instances fixed: collab gate now enforces targeted convergence tests for app settings, project metadata, shared-project V2 persistence, Firestore rules, and two-session browser collaboration before release gating continues.
+  Prevention rule: no release gate can pass unless shared-lane convergence tests pass in addition to Firestore callsite contract checks.
+
+- [x] (2026-04-03) Restored filtered Auto Group queue capture, grouped-tab handoff, and full stop behavior in `src/App.tsx`, `src/hooks/useFilteredAutoGroupFlow.ts`, `src/hooks/useFilteredAutoGroupFlow.test.tsx`, `src/hooks/useFilteredTableData.test.tsx`, `src/hooks/useGlobalGroupingShortcuts.ts`, `src/hooks/useGlobalGroupingShortcuts.test.tsx`, and `src/GroupDataView.tsx`.
+  Root cause: the extracted filtered Auto Group hook had drifted away from the documented flow. It no longer flipped the workspace into the Grouped tab when a run started, the queue/stop state machine only aborted the active fetch instead of cancelling the full pending pipeline, the keyboard shortcut contract had fallen out of sync with the documented backquote alias, omitted-model pages could fall back into Ungrouped instead of being forced into singleton groups, and the final removal path still trusted generated-group tokens instead of the accepted Pages batch itself.
+  Instances fixed: start-of-run grouped-tab handoff, pending-token rollback when the exclusive-operation wrapper refuses to start, queue cancellation and pending-token restoration on Stop, backquote shortcut support outside editable targets, singleton fallback for omitted pages, accepted-batch repair if generated groups still miss a page, and direct regressions proving pending auto-group pages disappear from Ungrouped immediately.
+  Prevention rule: filtered Auto Group must always treat the current visible Pages list as the accepted source of truth; any page accepted into the run must either be restored by Stop/cancel or be forcibly represented in grouped output before Ungrouped removal clears.
+
+- [x] (2026-04-03) Prevented filtered Auto Group pages from being reintroduced into Ungrouped by V2 listener churn in `src/useProjectPersistence.ts`, `src/projectCollabV2.ts`, `src/useProjectPersistence.v2.test.tsx`, and `src/projectCollabV2.test.ts`.
+  Root cause: the shared V2 entity listener treated an initial empty Firestore cache snapshot as authoritative even when the client already held a newer non-empty local groups state. That empty snapshot replaced the group docs, canonical recomposition dropped grouped ownership, and recently auto-grouped pages leaked back into Ungrouped a moment later. Separately, canonical group hydration trusted only `clusterSummary`, so a token-only group doc could lose ownership if the base needed to rebuild from rows.
+  Instances fixed: empty-cache group listener preservation until a real server snapshot arrives, canonical grouped-token filtering from authoritative group doc `clusterTokens`, and row-based fallback cluster hydration when `clusterSummary` is incomplete.
+  Prevention rule: a local/shared grouped ownership set must never be downgraded by an empty cache snapshot, and canonical Ungrouped filtering must honor persisted group ownership tokens even while hydration catches up.
+
+- [x] (2026-04-01) Added durable collaboration diagnostics journaling in `src/collabDiagnosticsLog.ts`, `src/cloudSyncStatus.ts`, and `src/runtimeTrace.ts` with regression tests in `src/collabDiagnosticsLog.test.ts` and `src/cloudSyncStatus.diagnostics.test.ts`.
+  Root cause: prevention gates were strong, but forensic debugging still depended on transient console output and in-memory state, making post-incident cross-client timeline reconstruction difficult.
+  Instances fixed: authoritative/readiness transitions, shared project sync phase updates, listener server snapshots/errors, listener apply events, and shared mutation accepted/blocked/failed outcomes now append structured entries with session/run correlation IDs to a bounded local diagnostics journal.
+  Prevention rule: every critical shared convergence transition must emit durable diagnostics so support can reconstruct causality after the fact.

@@ -19,6 +19,20 @@ function isAbortError(error: unknown): boolean {
     : !!error && typeof error === 'object' && 'name' in error && (error as { name?: string }).name === 'AbortError';
 }
 
+/**
+ * Detect transient network errors that are safe to retry (e.g. "Failed to fetch",
+ * connection reset, DNS failure). These are browser-level errors thrown by fetch()
+ * before any HTTP response is received.
+ */
+export function isTransientNetworkError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (error && typeof error === 'object' && 'message' in error) {
+    const msg = (error as { message?: string }).message ?? '';
+    return /fetch|network/i.test(msg);
+  }
+  return false;
+}
+
 export async function runWithOpenRouterTimeout<T>(opts: {
   signal: AbortSignal;
   timeoutMs?: number;

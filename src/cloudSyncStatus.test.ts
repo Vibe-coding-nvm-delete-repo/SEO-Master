@@ -41,6 +41,9 @@ function makeBase(): CloudSyncDerived {
       writeFailed: false,
       lastCloudWriteOkAtMs: null,
       serverReachable: true,
+      authoritativeReady: true,
+      authoritativePhase: 'synced',
+      pendingAuthoritativeTargets: [],
       listenerErrors: [],
       criticalListenerErrors: [],
     },
@@ -62,6 +65,13 @@ function makeBase(): CloudSyncDerived {
       auxiliaryErrors: [],
     },
     unsafeToRefresh: false,
+    sharedProject: {
+      activeProjectId: null,
+      bootstrapSource: 'empty',
+      authoritativeReady: false,
+      pendingKeys: [],
+      phase: 'inactive',
+    },
   };
 }
 
@@ -182,6 +192,20 @@ describe('deriveCloudStatusLine', () => {
       },
     }, true);
     expect(r.label).toBe('Connecting…');
+    expect(r.tone).toBe('amber');
+  });
+
+  it('keeps shared projects amber until authoritative readiness is satisfied', () => {
+    const r = deriveCloudStatusLine(true, {
+      ...makeBase(),
+      project: {
+        ...makeBase().project,
+        authoritativeReady: false,
+        authoritativePhase: 'converging',
+        pendingAuthoritativeTargets: ['collab/meta', 'groups'],
+      },
+    }, true);
+    expect(r.label).toContain('Converging');
     expect(r.tone).toBe('amber');
   });
 

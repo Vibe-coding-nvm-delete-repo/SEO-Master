@@ -23,6 +23,8 @@ vi.mock('firebase/firestore', () => ({
 import {
   APP_SETTINGS_LOCAL_DURABILITY_TIMEOUT_MS,
   cacheStateLocally,
+  loadAppSettingsDoc,
+  loadAppSettingsRows,
   loadCachedState,
   persistLocalCachedState,
   persistTrackedState,
@@ -185,5 +187,23 @@ describe('appSettingsPersistence', () => {
 
     local.resolve();
     await persistPromise;
+  });
+
+  it('blocks project-scoped local-preferred row loads without explicit provisional approval', async () => {
+    await expect(loadAppSettingsRows({
+      docId: 'project_proj-1__generate_rows',
+      loadMode: 'local-preferred',
+      registryKind: 'rows',
+    })).rejects.toThrow('local-preferred load without provisional-cache approval');
+  });
+
+  it('allows project-scoped local-preferred doc loads only with explicit provisional approval', async () => {
+    storageMocks.loadFromIDB.mockResolvedValue({ value: { prompt: 'cached' } });
+    await expect(loadAppSettingsDoc<Record<string, unknown>>({
+      docId: 'project_proj-1__generate_settings',
+      localPreferred: true,
+      registryKind: 'settings',
+      allowProjectScopedLocalCache: true,
+    })).resolves.toEqual({ prompt: 'cached' });
   });
 });

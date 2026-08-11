@@ -10,6 +10,7 @@ export async function loadContentPipelineRows<T>(
     docId,
     loadMode,
     registryKind: 'rows',
+    allowProjectScopedLocalCache: loadMode === 'local-preferred',
   });
 }
 
@@ -20,5 +21,6 @@ export async function loadContentPipelineDocData(
   return loadAppSettingsDoc<Record<string, unknown>>({
     docId,
     localPreferred: loadMode === 'local-preferred',
+    allowProjectScopedLocalCache: loadMode === 'local-preferred',
   });
 }

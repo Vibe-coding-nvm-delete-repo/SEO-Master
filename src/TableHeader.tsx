@@ -228,7 +228,7 @@ const TableHeader = React.memo(({
 
       const latest = colWidthsRef.current;
       if (Object.keys(latest).length > 0) {
-        void persistColumnWidthsToDisk(latest).catch(() => {});
+        void persistColumnWidthsToDisk(latest).catch((err) => { console.warn('[TableHeader] Column width persist failed:', err); });
       }
     };
 

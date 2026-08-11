@@ -321,23 +321,33 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
   const embeddingModels = useMemo(() => models.filter(isEmbeddingModel), [models]);
 
   const lastSharedSavedRef = useRef(JSON.stringify(toSharedSettings(settings)));
+  const suppressSnapshotRef = useRef(false);
+  const lastWrittenAtRef = useRef('');
   const persistSharedSettings = useCallback(async () => {
     if (!hasHydratedSharedSettings) return;
     const shared = toSharedSettings(settings);
     const json = JSON.stringify(shared);
     if (json === lastSharedSavedRef.current) return;
     lastSharedSavedRef.current = json;
+    const updatedAt = new Date().toISOString();
+    lastWrittenAtRef.current = updatedAt;
+    suppressSnapshotRef.current = true;
     await persistAppSettingsDoc({
       docId: FS_DOC,
       data: {
         ...shared,
-        updatedAt: new Date().toISOString(),
+        updatedAt,
       },
       addToast,
       localContext: 'group review settings',
       cloudContext: 'group review settings',
       localStorageKey: LS_SETTINGS_KEY,
       localStorageValue: json,
+    }).then(() => {
+      suppressSnapshotRef.current = false;
+    }).catch((err) => {
+      suppressSnapshotRef.current = false;
+      reportPersistFailure(addToast, 'group review settings', err);
     });
   }, [addToast, hasHydratedSharedSettings, settings]);
   const { schedule: scheduleSharedSettingsPersist } = useLatestPersistQueue(persistSharedSettings);
@@ -400,6 +410,12 @@ const GroupReviewSettings = forwardRef<GroupReviewSettingsRef, {
         if (!snap.exists() && isFromCache) return;
         firestoreLoadedRef.current = true;
         const remote = snap.exists() ? snap.data() : null;
+        // Suppress own-write echoes to prevent overwriting concurrent remote changes
+        const incomingUpdatedAt = typeof remote?.updatedAt === 'string' ? remote.updatedAt : '';
+        if (suppressSnapshotRef.current && incomingUpdatedAt && lastWrittenAtRef.current && incomingUpdatedAt <= lastWrittenAtRef.current) {
+          return;
+        }
+        suppressSnapshotRef.current = false;
         setSettings(() => {
           const merged: GroupReviewSettingsData = {
             apiKey: remote?.apiKey || '',

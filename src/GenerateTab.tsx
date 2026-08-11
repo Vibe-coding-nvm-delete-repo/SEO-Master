@@ -26,6 +26,7 @@ import {
 import { PRIMARY_COLUMN_WIDTH_PRESETS, type PrimaryColumnPreset } from './generateTablePresets';
 import {
   buildOpenRouterTimeoutError,
+  isTransientNetworkError,
   OPENROUTER_REQUEST_TIMEOUT_MS,
   resolveOpenRouterAbortError,
   runWithOpenRouterTimeout,
@@ -1310,7 +1311,7 @@ const GenerationTimer = React.memo(function GenerationTimer({
     <>
       <div className="flex items-center gap-1.5 text-[11px] text-zinc-500" title="Total elapsed time for the current/last generation batch">
         <Clock className="w-3 h-3" />
-        <span className={`font-mono tabular-nums ${isActive ? 'text-amber-600 font-semibold' : 'text-emerald-600'}`}>
+        <span className={`font-mono tabular-nums ${isActive ? 'text-amber-600 font-semibold' : 'text-emerald-600 font-medium'}`}>
           {formatElapsedFn(displayElapsed)}
         </span>
         {!isActive && doneCount > 0 && (
@@ -2866,8 +2867,9 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
       localStorageValue: json,
     }).then(() => {
       suppressSettingsSnapshotRef.current = false;
-    }).catch(() => {
+    }).catch((err) => {
       suppressSettingsSnapshotRef.current = false;
+      reportPersistFailure(addToast, 'generate settings', err);
     });
 
     if (sharedSelectedModelDocId !== settingsDocId && nextSettings.selectedModel.trim() && !nextSettings.selectedModelLocked) {
@@ -3474,6 +3476,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
             }),
             durationMs: Math.round(performance.now() - startTime),
           };
+        }
+        // Retry transient network errors (Failed to fetch, connection reset, etc.)
+        if (isTransientNetworkError(e) && attempt < maxRateLimitRetries) {
+          const completedDelay = await waitForDelayOrAbort(Math.min(2000 * Math.pow(2, attempt), 30000), signal);
+          if (!completedDelay) return { error: '__aborted__', durationMs: Math.round(performance.now() - startTime) };
+          continue;
         }
         return { error: e.message || 'Unknown error', durationMs: Math.round(performance.now() - startTime) };
       }
@@ -4151,6 +4159,12 @@ export const GenerateTabInstance = React.memo(function GenerateTabInstance({ act
               }),
               durationMs: Math.round(performance.now() - st),
             };
+          }
+          // Retry transient network errors (Failed to fetch, connection reset, etc.)
+          if (isTransientNetworkError(e) && attempt < maxRateLimitRetries) {
+            const completedDelay = await waitForDelayOrAbort(Math.min(2000 * Math.pow(2, attempt), 30000), signal);
+            if (!completedDelay) return { error: '__aborted__', durationMs: Math.round(performance.now() - st) };
+            continue;
           }
           return { error: e.message || 'Unknown error', durationMs: Math.round(performance.now() - st) };
         }
@@ -5621,8 +5635,12 @@ export default function GenerateTab({
     setWorkspaceReady(false);
     setWorkspaceError(null);
     void ensureProjectGenerateWorkspace(activeProjectId)
-      .then(() => {
+      .then((result) => {
         if (!alive) return;
+        if (result.status !== 'ready') {
+          setWorkspaceError(result.message ?? 'Failed to prepare the shared Generate workspace.');
+          return;
+        }
         setWorkspaceReady(true);
       })
       .catch((error) => {

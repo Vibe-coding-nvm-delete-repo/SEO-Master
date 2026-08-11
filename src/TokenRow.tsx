@@ -10,7 +10,7 @@ const TokenRow = React.memo(({ row, selectedTokens, setSelectedTokens, setCurren
   switchToPages?: () => void;
 }) => (
   <tr className="hover:bg-zinc-50/50 transition-colors">
-    <td className="px-3 py-0.5 font-medium text-zinc-700 font-mono text-sm">
+    <td className="px-3 py-0.5 font-medium text-zinc-700 font-mono text-[12px]">
       <button
         onClick={() => {
           const newTokens = new Set(selectedTokens);

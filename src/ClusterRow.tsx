@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, Copy } from 'lucide-react';
 import { CELL, TABLE_ZEBRA } from './tableConstants';
+import TokenChip from './TokenChip';
 import {
   pagesTabChildRowKey,
   pagesTabChildCity,
@@ -87,33 +88,28 @@ const ClusterRow = React.memo(({
           </button>
         </div>
       </td>
-      <td className="px-3 py-0.5 text-zinc-500 font-mono text-xs overflow-hidden">
+      <td className="px-3 py-0.5 overflow-hidden">
         <div className="flex flex-wrap gap-1">
-          {row.tokenArr.map((token, i) => {
-            const labelColor = labelColorMap.get(token);
-            return (
-              <button
-                key={i}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if ((e.ctrlKey || e.metaKey) && onBlockToken) {
-                    onBlockToken(token);
-                    return;
-                  }
-                  const newTokens = new Set(selectedTokens);
-                  if (newTokens.has(token)) newTokens.delete(token);
-                  else newTokens.add(token);
-                  setSelectedTokens(newTokens);
-                  setCurrentPage(1);
-                }}
-                className={`${selectedTokens.has(token) ? 'bg-purple-100 text-purple-700 font-semibold border-purple-200' : 'bg-zinc-100 text-zinc-600 hover:bg-indigo-50 hover:text-indigo-600 border-zinc-200'} px-1.5 py-0.5 rounded-md border text-[12px] transition-colors`}
-                style={labelColor ? { borderColor: labelColor.border, borderWidth: '2px' } : undefined}
-                title={labelColor ? `${labelColor ? `Label: ${labelColor.sectionName} · ` : ''}Ctrl+click to block` : 'Ctrl+click to block'}
-              >
-                {token}
-              </button>
-            );
-          })}
+          {row.tokenArr.map((token) => (
+            <TokenChip
+              key={token}
+              token={token}
+              isSelected={selectedTokens.has(token)}
+              labelColor={labelColorMap.get(token) ?? null}
+              onClick={(e, t) => {
+                e.stopPropagation();
+                if ((e.ctrlKey || e.metaKey) && onBlockToken) {
+                  onBlockToken(t);
+                  return;
+                }
+                const newTokens = new Set(selectedTokens);
+                if (newTokens.has(t)) newTokens.delete(t);
+                else newTokens.add(t);
+                setSelectedTokens(newTokens);
+                setCurrentPage(1);
+              }}
+            />
+          ))}
         </div>
       </td>
       <td className="px-1 py-0.5 text-zinc-500 text-right tabular-nums text-[12px]">

@@ -7,6 +7,7 @@
 - [`docs/group-project-flow.md`](./docs/group-project-flow.md) — visual Group workspace flow, shared sync path, and collaboration guarantees
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — system shape and storage model
 - [`SHARED_PROJECT_COLLAB_V2.md`](./SHARED_PROJECT_COLLAB_V2.md) — shared-project persistence contract
+- [`docs/COLLAB_CONVERGENCE_HISTORY_2026-04-01.md`](./docs/COLLAB_CONVERGENCE_HISTORY_2026-04-01.md) — convergence hardening decisions, tradeoffs, and verification history
 - [`SHARED_DUAL_PATH_INVENTORY.md`](./SHARED_DUAL_PATH_INVENTORY.md) — completed shared-runtime dual-path inventory, cutover record, and postmortem/prevention guide
 - [`PERSISTENCE_AUDIT.md`](./PERSISTENCE_AUDIT.md) — current persistence-state summary and remaining limits
 - [`REFACTOR_ANALYSIS.md`](./REFACTOR_ANALYSIS.md) — latest repo-wide refactor analysis and importance scoring

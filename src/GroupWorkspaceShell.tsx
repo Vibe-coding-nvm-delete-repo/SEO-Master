@@ -116,7 +116,7 @@ export function ProjectBusyBanner({ isProjectBusy, activeProjectId, activeOperat
     <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
       <AlertCircle className="h-4 w-4 shrink-0" />
       <span>
-        Project busy: {activeOperation?.type ?? 'shared operation'} is running in another client. Shared edits are temporarily blocked until that project-wide operation finishes.
+        Project busy: {activeOperation?.type ?? 'shared operation'} is running in another client. Bulk operations are blocked, but routine edits (grouping, approving, blocking) remain available.
       </span>
     </div>
   );

@@ -238,7 +238,7 @@ export default function GroupDataView(props: any) {
   const manualGroupButtonTitle = useMemo(() => {
     if (canRunManualGroup) return 'Create a group from the selected pages.';
     if (isRoutineSharedEditBlocked) {
-      return 'Shared project is read-only, write-unsafe, or busy. Wait until edits are allowed.';
+      return 'Shared project is read-only or still syncing. Wait until sync completes.';
     }
     if (selectedClusters.size === 0) return 'Select one or more pages using the row checkboxes.';
     if (!groupNameInput.trim()) return 'Enter a group name (it auto-fills when you select pages).';
@@ -869,6 +869,7 @@ export default function GroupDataView(props: any) {
                     {(activeTab === 'pages' || activeTab === 'grouped') && (
                       <input
                         type="text"
+                        {...groupingShortcutTargetProps}
                         placeholder="Group name..."
                         value={groupNameInput}
                         onChange={(e) => setGroupNameInput(e.target.value)}
@@ -894,20 +895,12 @@ export default function GroupDataView(props: any) {
                           disabled={!canRunFilteredAutoGroup}
                           title={
                             filteredAutoGroupButtonTitle ??
-                            'Run AI Auto Group on visible ungrouped pages in this list (Shift+1).'
+                            'Run AI Auto Group on visible ungrouped pages in this list (Shift+1 or `).'
                           }
                           className="px-4 py-1.5 text-xs font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap min-w-[110px]"
                         >
                           {isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0 ? 'Queue Auto Group' : 'Auto Group'} ({filteredClusters.length})
                         </button>
-                        {isRunningFilteredAutoGroup && (
-                          <button
-                            onClick={handleStopFilteredAutoGroup}
-                            className="px-4 py-1.5 text-xs font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors whitespace-nowrap min-w-[110px]"
-                          >
-                            Stop
-                          </button>
-                        )}
                       </>
                     )}
 
@@ -958,6 +951,15 @@ export default function GroupDataView(props: any) {
                           <Download className="w-3.5 h-3.5 mr-1 inline" /> Export
                         </button>
                       </>
+                    )}
+                    {(activeTab === 'pages' || activeTab === 'grouped') && (isRunningFilteredAutoGroup || filteredAutoGroupQueue.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={handleStopFilteredAutoGroup}
+                        className="px-4 py-1.5 text-xs font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors whitespace-nowrap min-w-[110px]"
+                      >
+                        Stop Auto Group
+                      </button>
                     )}
                   </div>
                     </>
@@ -1056,8 +1058,8 @@ export default function GroupDataView(props: any) {
                       </span>
                     )}
                     {activeTab === 'pages' && (
-                      <span className="text-zinc-400 shrink-0" title="Keyboard shortcut">
-                        Shift+1
+                      <span className="text-zinc-400 shrink-0" title="Keyboard shortcuts">
+                        Shift+1 or `
                       </span>
                     )}
                   </div>
@@ -1242,16 +1244,6 @@ export default function GroupDataView(props: any) {
                         onSubClusterSelect={handleSubClusterSelect}
                         labelColorMap={labelColorMap}
                         onBlockToken={handleBlockSingleToken}
-                        groupActionButton={
-                          <button
-                            onClick={() => handleApproveGroup(row.groupName)}
-                  disabled={isRoutineSharedEditBlocked}
-                            className="w-5 h-5 flex items-center justify-center rounded bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[10px] font-bold shrink-0"
-                            title="Approve group"
-                          >
-                            {'\u2713'}
-                          </button>
-                        }
                       />
                     ))}
 
@@ -1346,10 +1338,10 @@ export default function GroupDataView(props: any) {
               <div className="px-4 py-2 border-t border-zinc-200 bg-zinc-50 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0" style={activeTab === 'auto-group' || activeTab === 'group-auto-merge' ? { display: 'none' } : undefined}>
                 <div className="flex items-center gap-2 text-sm text-zinc-500">
                   <span>Show</span>
-                  <select 
-                    value={itemsPerPage} 
+                  <select
+                    value={itemsPerPage}
                     onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
-                    className="border border-zinc-300 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="border border-zinc-300 rounded-md px-2 py-1 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value={250}>250</option>
                     <option value={500}>500</option>
@@ -1433,6 +1425,7 @@ export default function GroupDataView(props: any) {
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
                       <input
                         type="text"
+                        {...groupingShortcutTargetProps}
                         placeholder="Search tokens (comma-separated)..."
                         value={tokenMgmtSearch}
                         onChange={(e) => { setTokenMgmtSearch(e.target.value); setTokenMgmtPage(1); }}

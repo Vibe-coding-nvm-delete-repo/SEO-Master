@@ -13,6 +13,8 @@ export function useUniversalBlockedTokens(addToast?: PersistToastFn) {
   const [universalBlockedTokens, setUniversalBlockedTokens] = useState<Set<string>>(new Set<string>());
   const universalBlockedHydratedRef = useRef(false);
   const lastUniversalBlockedSavedRef = useRef<string>('');
+  const suppressSnapshotRef = useRef(false);
+  const lastWrittenAtRef = useRef('');
 
   useEffect(() => {
     if (!universalBlockedHydratedRef.current) return;
@@ -20,12 +22,20 @@ export function useUniversalBlockedTokens(addToast?: PersistToastFn) {
     const payloadJson = JSON.stringify(arr);
     if (payloadJson === lastUniversalBlockedSavedRef.current) return;
     lastUniversalBlockedSavedRef.current = payloadJson;
+    const updatedAt = new Date().toISOString();
+    lastWrittenAtRef.current = updatedAt;
+    suppressSnapshotRef.current = true;
     void persistAppSettingsDoc({
       docId: 'universal_blocked',
-      data: { tokens: arr, updatedAt: new Date().toISOString() },
+      data: { tokens: arr, updatedAt },
       addToast,
       localContext: 'universal blocked tokens',
       cloudContext: 'universal blocked tokens',
+    }).then(() => {
+      suppressSnapshotRef.current = false;
+    }).catch((err) => {
+      suppressSnapshotRef.current = false;
+      reportPersistFailure(addToast, 'universal blocked tokens', err);
     });
   }, [universalBlockedTokens, addToast]);
 
@@ -53,7 +63,14 @@ export function useUniversalBlockedTokens(addToast?: PersistToastFn) {
         const isFromCache = snap.metadata.fromCache;
         if (!snap.exists() && isFromCache) return;
         firestoreLoadedRef.current = true;
-        const tokens = snap.exists() && Array.isArray(snap.data()?.tokens) ? snap.data()?.tokens : [];
+        const data = snap.exists() ? snap.data() : null;
+        const tokens: string[] = data && Array.isArray(data.tokens) ? data.tokens : [];
+        // Suppress own-write echoes to prevent overwriting concurrent remote changes
+        const incomingUpdatedAt = typeof data?.updatedAt === 'string' ? data.updatedAt : '';
+        if (suppressSnapshotRef.current && incomingUpdatedAt && lastWrittenAtRef.current && incomingUpdatedAt <= lastWrittenAtRef.current) {
+          return;
+        }
+        suppressSnapshotRef.current = false;
         lastUniversalBlockedSavedRef.current = JSON.stringify(tokens);
         cacheStateLocallyBestEffort({
           idbKey: appSettingsIdbKey('universal_blocked'),

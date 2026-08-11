@@ -1317,8 +1317,18 @@ export default function ContentTab({
       alive = false;
     };
     void ensureProjectGenerateWorkspace(activeProjectId)
-      .then(() => {
+      .then((result) => {
         if (!alive) return;
+        if (result.status !== 'ready') {
+          setWorkspaceStatusByProject((prev) => ({
+            ...prev,
+            [activeProjectId]: {
+              ready: false,
+              error: result.message ?? 'Failed to prepare the shared Content workspace.',
+            },
+          }));
+          return;
+        }
         setWorkspaceStatusByProject((prev) => ({
           ...prev,
           [activeProjectId]: { ready: true, error: null },
@@ -1700,6 +1710,7 @@ export default function ContentTab({
       <div data-testid="content-panel-overview" style={{ display: externalView === 'overview' ? undefined : 'none' }}>
         <ContentOverviewPanel
           activeProjectId={activeProjectId}
+          runtimeEffectsActive={runtimeEffectsActive && externalView === 'overview'}
           onStageSelect={(stageId) => handleContentSubtabSelect(mapOverviewStageIdToContentSubtab(stageId))}
         />
       </div>
@@ -1960,7 +1971,11 @@ export default function ContentTab({
       </div>
 
       <div data-testid="content-panel-final-pages" style={{ display: externalView === 'final-pages' ? undefined : 'none' }}>
-        <FinalPagesPanel activeProjectId={activeProjectId} onSourceSelect={handleContentSubtabSelect} />
+        <FinalPagesPanel
+          activeProjectId={activeProjectId}
+          runtimeEffectsActive={runtimeEffectsActive && externalView === 'final-pages'}
+          onSourceSelect={handleContentSubtabSelect}
+        />
       </div>
     </div>
   );

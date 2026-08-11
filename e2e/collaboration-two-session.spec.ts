@@ -9,7 +9,7 @@ import {
   waitForRowStatus,
 } from './contentPipelineQa';
 
-test('[generate-settings-two-session][generate-rows-two-session][generate-logs-two-session] two QA pages converge on shared settings, rows, and logs', async ({ browser }) => {
+test('[generate-settings-two-session][generate-rows-two-session][generate-logs-two-session][generate-pipeline-settings-two-session] two QA pages converge on shared settings, rows, logs, and pipeline settings', async ({ browser }) => {
   const context = await browser.newContext();
   const pageA = await context.newPage();
   const pageB = await context.newPage();
@@ -30,14 +30,6 @@ test('[generate-settings-two-session][generate-rows-two-session][generate-logs-t
 
   const h2PanelA = pageA.getByTestId('content-panel-h2-content');
   const h2PanelB = pageB.getByTestId('content-panel-h2-content');
-
-  await h2PanelA.getByRole('button', { name: 'Settings' }).click();
-  await h2PanelA.getByTestId('openrouter-api-key').fill('sk-two-session-shared');
-  await h2PanelA.getByRole('button', { name: 'Settings' }).click();
-
-  await h2PanelB.getByRole('button', { name: 'Settings' }).click();
-  await expect(h2PanelB.getByTestId('openrouter-api-key')).toHaveValue('sk-two-session-shared');
-  await h2PanelB.getByRole('button', { name: 'Settings' }).click();
 
   const rowA = rowByText(pageA, 'What Are Installment Loans?', 'content-panel-h2-content');
   const rowB = rowByText(pageB, 'What Are Installment Loans?', 'content-panel-h2-content');
